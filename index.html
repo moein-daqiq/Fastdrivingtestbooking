@@ -1,0 +1,1679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+
+<link rel="canonical" href="https://fastdrivingtestfinder.co.uk/">
+<title>Driving Test Cancellation Finder | Earlier DVSA Dates — FastDrivingTestFinder</title>
+<meta name="description" content="Find earlier DVSA driving test dates and cancellations UK-wide. We scan centres 24/7 and send instant alerts so you can book or swap a sooner test.">
+<meta property="og:url" content="https://fastdrivingtestfinder.co.uk/">
+<meta property="og:title" content="Driving Test Cancellation Finder — FastDrivingTestFinder">
+<meta property="og:description" content="Find earlier DVSA dates and cancellations. Instant alerts across UK centres.">
+
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Risk-Free, Stress-Free Booking</title>
+
+<style>
+  :root{
+    --line:#e5e7eb; --ink:#0f172a; --muted:#475569;
+    --primary:#2563eb; --primary-dark:#1e40af;
+    --danger:#dc2626;
+    --tint-blue: rgba(37,99,235,.044);
+    --tint-amber: rgba(245,158,11,.055);
+    --tint-slate: rgba(15,23,42,.033);
+  }
+
+  body{
+    margin:0;
+    font-family:"Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif;
+    background:#f7fafc;color:var(--ink);line-height:1.45;
+  }
+  .wrap{max-width:760px;margin:10px auto;background:#fff;border:1px solid var(--line);
+    box-shadow:0 2px 16px rgba(15,23,42,.06)}
+
+  .strip{padding:10px 12px;text-align:center;color:#fff;font-weight:700}
+  .strip.title{background:linear-gradient(180deg,#60a5fa 0%, #3b82f6 100%)}
+  .strip.subtitle{background:#34d399}
+  .strip.important{background:#fbbf24;color:#111827}
+  .strip + section{margin-top:14px}
+
+  section.panel, section.blue-panel, section.yellow-panel{
+    border:1px solid var(--line);border-radius:10px;
+    box-shadow:0 2px 10px rgba(15,23,42,.04);
+    padding:16px 18px;margin:16px;background-clip:padding-box;
+  }
+  .panel{background:var(--tint-slate)}
+  .blue-panel{background:var(--tint-blue)}
+  .yellow-panel{background:var(--tint-amber)}
+
+  .row{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:10px}
+  label{font-size:14px;font-weight:bold;color:var(--ink)}
+  .note-line{display:flex;justify-content:space-between;width:100%;font-size:12px;color:var(--muted);margin-top:2px}
+
+  /* Required */
+  label.req::after{content:" *";color:var(--danger);font-weight:bold;}
+  .req-title::after{content:" *";color:var(--danger);font-weight:bold;margin-left:4px;}
+
+  /* ===== Test Booking Type ===== */
+  #test-booking-type .heading{display:grid;grid-template-columns:1fr;text-align:center}
+  #test-booking-type .heading .helper{color:var(--muted);font-size:15.5px;font-weight:400;margin-top:6px}
+  #test-booking-type .row{
+    display:grid;grid-template-columns:1fr 1fr;column-gap:16px;row-gap:10px;align-items:start;
+  }
+  #test-booking-type .row .btn, #test-booking-type .row input{width:100%;height:34px;box-sizing:border-box}
+  #btnBook{grid-column:1;grid-row:1} #theoryPass{grid-column:1;grid-row:2}
+  #btnSwap{grid-column:2;grid-row:1} #swapRef{grid-column:2;grid-row:2}
+  #test-booking-type .note-line{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+
+  /* Unified inputs */
+  input, select{
+    box-sizing:border-box;height:34px;padding:6px 8px;border:1px solid var(--line);
+    border-radius:4px;background:#fff;color:var(--ink);
+    font:14px/22px "Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif;
+    transition:border-color .15s, box-shadow .15s;
+  }
+  input:focus, select:focus{outline:none;border-color:var(--primary);
+    box-shadow:0 0 0 2px rgba(37,99,235,.15)}
+
+  .error{border-color:var(--danger)!important;box-shadow:0 0 0 2px rgba(220,38,38,.15)!important}
+  [aria-invalid="true"]{border-color:var(--danger)!important}
+  label.show-error{color:#991b1b}
+  label.show-error::after{content:attr(data-error) " ";display:block;font-weight:normal;color:#dc2626;font-size:12px;margin-top:4px;line-height:1.2;white-space:normal;max-width:32ch}
+
+  /* Phone */
+  .phone-mask{position:relative;flex:1 1 260px;min-width:260px}
+  .phone-mask input{width:100%}
+  .phone-mask .mask-text{display:none}
+
+  .btn{background:#93c5fd;border:1px solid #bfdbfe;color:#0b1a33;font-weight:700;
+    padding:6px 12px;border-radius:4px;cursor:pointer;height:34px}
+  .btn:hover{background:#60a5fa;color:#fff}
+  .btn.selected{background:var(--primary-dark);color:#fff;border-color:var(--primary-dark)}
+
+  .yesno button{height:32px;background:#fff;color:#1e3a8a;border:1px solid var(--line);
+    padding:4px 12px;border-radius:4px;font-weight:600;cursor:pointer}
+  .yesno button:hover{border-color:var(--primary)}
+  .yesno button.selected{background:#2563eb;color:#fff;border-color:#2563eb}
+
+  .option.row{align-items:flex-start}
+  .option-text{line-height:1.35;margin-top:1px}
+  .yesno{margin-top:-2px}
+
+  .panel .option{font-weight:normal !important}
+
+  /* Test Centres */
+  .centres-intro{color:#475569;line-height:1.45;margin:0 0 10px 0}
+  .centres-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+  .centre-field{display:flex;flex-direction:column;gap:6px}
+  .centre-field input{width:100%}
+  .lock-full{width:100%!important;max-width:100%!important}
+
+  /* caret icon on datalist inputs (visual only) */
+  .centre-input{
+    background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"><path fill="%2399a3b3" d="M7 10l5 5 5-5z"/></svg>');
+    background-repeat:no-repeat;
+    background-position:right 10px center;
+    padding-right:28px;
+    cursor:text;
+  }
+
+  /* ===== Date & Time Window ===== */
+  .dt-heading{margin:0 0 8px 0;font-weight:bold}
+  .dt-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .field-col{display:flex;flex-direction:column;gap:6px}
+  .field-col input{width:100%}
+  .inline{display:flex;flex-direction:column;gap:8px;width:100%}
+
+  .time-inline{display:flex;align-items:center;gap:10px;flex-wrap:nowrap}
+  .time-input{width:12ch;max-width:100%}
+  /* Center AM/PM perfectly with inputs */
+  .time-inline > span{display:inline-flex;align-items:center;height:34px;line-height:34px}
+
+  /* Notice input + Day(s) label close and aligned */
+  .days-inline{display:flex;align-items:center;gap:8px}
+  .days-inline > span{display:inline-flex;align-items:center;height:34px;line-height:34px}
+
+  /* Payment */
+  .subtotal{font-weight:bold;margin-top:10px;font-size:16px;text-align:right;color:var(--primary-dark)}
+  .payment-box input,.payment-box select{margin-bottom:10px}
+  .paypal{margin-top:12px;display:flex;align-items:center;gap:12px;justify-content:space-between;
+    border-top:1px dashed var(--line);padding-top:10px}
+  .card-logos img{height:18px;max-width:56px}
+  .paypal a#paypalBtn{background:#0070ba;padding:8px 14px;border-radius:4px;color:#fff;font-weight:bold;text-decoration:none}
+
+  .indicator{margin-top:12px;text-align:center;font-weight:bold;display:none}
+  .indicator.success{color:#16a34a}.indicator.fail{color:#dc2626}
+  .submit-row{display:flex;align-items:center;gap:12px;margin:16px 0}
+  .status-pill{padding:6px 10px;border-radius:999px;font-size:12px;font-weight:700;background:#eef2ff;color:#1e40af}
+  .status-pill.paid{background:#ecfdf5;color:#16a34a}
+  .submit-btn{flex:1;background:#2563eb;color:#fff;padding:10px;border:none;font-size:15px;border-radius:4px;cursor:pointer;opacity:.6}
+  .submit-btn.enabled{opacity:1}
+
+  /* Applicant grid */
+  #applicant-details .fields{display:grid;grid-template-columns:200px 1fr;column-gap:16px;row-gap:10px;align-items:center}
+  #applicant-details .field-row{display:contents}
+  #applicant-details .fields label{justify-self:end;text-align:right}
+  #applicant-details .fields input{width:100%}
+  #applicant-details .wide-note{grid-column:2/3;color:var(--muted);font-size:12px;margin-top:4px}
+
+  /* Driving Licence uppercase appearance */
+  #drivingLicence{text-transform:uppercase}
+
+  /* Put CVV visually on same line as Expiry (wide screens) */
+  .payment-box label[for="expMonth"],
+  .payment-box label[for="expYear"]{display:none}
+  .payment-box .exp-group,
+  .payment-box #cardCvv{display:inline-block;vertical-align:top}
+  .payment-box .exp-group{min-width:230px}
+  .payment-box #cardCvv{width:9ch;margin-left:10px;margin-top:0}
+
+  @media (max-width:520px){
+    #test-booking-type .row{grid-template-columns:1fr}
+    .row{gap:10px;margin-top:8px}
+    #applicant-details .fields{grid-template-columns:1fr;row-gap:6px}
+    #applicant-details .fields label{justify-self:start;text-align:left}
+    #applicant-details .wide-note{grid-column:1/-1}
+    .centres-grid{grid-template-columns:1fr}
+    .dt-grid{grid-template-columns:1fr}
+    /* Stack CVV under expiry on small screens */
+    .payment-box .exp-group,
+    .payment-box #cardCvv{display:block;margin-left:0}
+    .payment-box #cardCvv{width:100%}
+  }
+
+/* Payment side-by-side */
+.payment-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+.pay-frame{border:1px dashed var(--line); border-radius:8px; padding:12px; background:#fff}
+.pay-frame.stripe{border-style:solid}
+.pay-methods{display:flex; gap:16px; align-items:center; margin:8px 0 12px 0}
+.pay-methods label{display:flex; align-items:center; gap:6px; cursor:pointer}
+.pay-actions{margin-top:8px}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="strip title">Risk-Free, Stress-Free Booking</div>
+    <div class="strip subtitle">Money-Back Guarantee</div>
+    <div class="strip important">❗ Important: Please read everything carefully and provide complete and accurate information.</div>
+
+    <!-- ===================== Test Booking Type ===================== -->
+    <section id="test-booking-type" class="panel">
+      <div class="heading">
+        <label class="small">Test Booking Type:</label>
+        <div class="helper">Select one option below and provide the required reference.</div>
+      </div>
+
+      <div class="row">
+        <button class="btn" id="btnBook" aria-pressed="false">Book a New Test</button>
+        <input type="text" id="theoryPass" class="lock-full" aria-label="Theory test pass number (from DVSA, usually on paper)" placeholder="Theory test pass number" maxlength="16" autocomplete="off"/>
+
+        <button class="btn" id="btnSwap" aria-pressed="false">Swap an Existing Test</button>
+        <input type="text" id="swapRef" class="lock-full" aria-label="DVSA practical test booking reference (usually emailed)" placeholder="8-digit booking reference" maxlength="8" inputmode="numeric" autocomplete="off"/>
+      </div>
+
+      <div class="note-line">
+        <div>Theory test pass number (from DVSA, usually on paper)</div>
+        <div>Practical test booking reference (from DVSA, usually by email)</div>
+      </div>
+    </section>
+
+    <!-- ===================== Applicant Details ===================== -->
+    <section id="applicant-details" class="panel">
+      <div class="row heading"><label class="small">Applicant Details:</label></div>
+
+      <div class="fields">
+        <div class="field-row">
+          <label class="req" for="surname">Surname(s):</label>
+          <input type="text" id="surname" placeholder="Exactly as shown on your driving licence (field 1)"/>
+        </div>
+        <div class="field-row">
+          <label class="req" for="firstname">First and Middle Name(s):</label>
+          <input type="text" id="firstname" placeholder="Exactly as shown on your driving licence (field 2)"/>
+        </div>
+        <div class="field-row">
+          <label class="req" for="drivingLicence">Driving Licence No:</label>
+          <input type="text" id="drivingLicence" placeholder="First 16 characters only (exclude the last 2)" maxlength="16"/>
+        </div>
+        <div class="field-row">
+          <label class="req" for="address">Address:</label>
+          <input type="text" id="address" placeholder="House number and street name"/>
+        </div>
+        <div class="field-row">
+          <label for="town">Town/City:</label>
+          <input type="text" id="town" placeholder="Town/City"/>
+        </div>
+        <div class="field-row">
+          <label class="req" for="postcode">Postcode:</label>
+          <input type="text" id="postcode" placeholder="UK postcode (e.g., SW1A 1AA)" inputmode="text" autocomplete="postal-code"/>
+        </div>
+        <div class="field-row">
+          <label class="req" for="email">Email Address:</label>
+          <input type="email" id="email" placeholder="If the email is incorrect, you will not receive a confirmation" autocomplete="email"/>
+        </div>
+        <div class="field-row">
+          <label class="req" for="phoneRaw">UK WhatsApp Phone No:</label>
+          <div class="phone-mask">
+            <input type="tel" id="phoneRaw" autocomplete="off" placeholder="+44 7XXXXXXXXX"/>
+            <div class="mask-text"><span class="fixed">+44</span><span id="phoneDigits" aria-hidden="true"></span></div>
+          </div>
+        </div>
+        <div class="wide-note">If you do not have a WhatsApp number, the system will not send a confirmation.</div>
+      </div>
+    </section>
+
+    <!-- ===================== Test Centres ===================== -->
+    <section class="blue-panel">
+      <div class="row heading"><label class="small">Test Centres:</label></div>
+      <p class="centres-intro">
+        We cover all centres in England, Wales, Scotland, and Northern Ireland. Choose the centres you can attend.
+        The first centre is compulsory; up to five additional centres are optional. The more centres you choose, the faster we can find a test.
+      </p>
+
+      <div class="centres-grid">
+        <div class="centre-field">
+          <label class="req">Test Centre 1:</label>
+          <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+        </div>
+        <div class="centre-field">
+          <label>Test Centre 2:</label>
+          <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+        </div>
+        <div class="centre-field">
+          <label>Test Centre 3:</label>
+          <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+        </div>
+        <div class="centre-field">
+          <label>Test Centre 4:</label>
+          <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+        </div>
+        <div class="centre-field">
+          <label>Test Centre 5:</label>
+          <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+        </div>
+        <div class="centre-field">
+          <label>Test Centre 6:</label>
+          <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+        </div>
+      </div>
+
+      <datalist id="testCentresList">
+        <option value="Aberdeen"></option><option value="Armagh"></option><option value="Ashford"></option>
+        <option value="Barking (Tanner Street)"></option><option value="Barnet"></option><option value="Basingstoke"></option>
+        <option value="Belfast"></option><option value="Birmingham"></option><option value="Bournemouth"></option>
+        <option value="Bradford"></option><option value="Brighton"></option><option value="Bristol"></option>
+        <option value="Cambridge"></option><option value="Canterbury"></option><option value="Cardiff"></option>
+        <option value="Chertsey"></option><option value="Chingford"></option><option value="Coventry"></option>
+        <option value="Croydon"></option><option value="Derby"></option><option value="Doncaster"></option>
+        <option value="Edinburgh"></option><option value="Exeter"></option><option value="Farnborough"></option>
+        <option value="Glasgow"></option><option value="Goodmayes"></option><option value="Greenford"></option>
+        <option value="Guildford"></option><option value="Hendon"></option><option value="Hounslow"></option>
+        <option value="Ipswich"></option><option value="Leeds"></option><option value="Leicester"></option>
+        <option value="Liverpool"></option><option value="Luton"></option><option value="Manchester"></option>
+        <option value="Milton Keynes"></option><option value="Morden"></option><option value="Newcastle upon Tyne"></option>
+        <option value="Norwich"></option><option value="Nottingham"></option><option value="Oxford"></option>
+        <option value="Pinner"></option><option value="Portsmouth"></option><option value="Reading"></option>
+        <option value="Slough"></option><option value="Southampton"></option><option value="Tolworth"></option>
+        <option value="Uxbridge"></option><option value="Watford"></option><option value="Wimbledon"></option>
+        <option value="Wolverhampton"></option><option value="York"></option><option value="West Didsbury (Manchester)"></option>
+      </datalist>
+    </section>
+
+    <!-- ===================== Date and Time Window ===================== -->
+    <section class="yellow-panel">
+      <div class="row heading"><label class="small dt-heading">Date and Time Window:</label></div>
+
+      <div class="dt-grid">
+        <!-- Row 1 -->
+        <div class="field-col">
+          <label for="earliestDate">Earliest Date:</label>
+          <input id="earliestDate" class="lock-full" type="date" placeholder="dd/mm/yyyy"/>
+        </div>
+        <div class="field-col">
+          <label for="latestDate">Latest Date:</label>
+          <input id="latestDate" class="lock-full" type="date" placeholder="dd/mm/yyyy"/>
+        </div>
+
+        <!-- Row 2 -->
+        <div class="field-col">
+          <label for="unavailInput">My Unavailable Dates:</label>
+          <div class="multi-date" id="unavail">
+            <input id="unavailInput" class="calendar-input lock-full" type="text" placeholder="Select one or more dates" readonly/>
+            <div class="calendar-dropdown" id="unavailCal"></div>
+          </div>
+        </div>
+        <div class="field-col">
+          <label for="instrInput">Instructor Unavailable Dates:</label>
+          <div class="multi-date" id="instr">
+            <input id="instrInput" class="calendar-input lock-full" type="text" placeholder="Select one or more dates" readonly/>
+            <div class="calendar-dropdown" id="instrCal"></div>
+          </div>
+        </div>
+
+        <!-- Row 3: Time left inline; Notice right -->
+        <div class="field-col">
+          <label>Available Time Window:</label>
+          <div class="time-inline">
+            <input type="number" id="timeFrom" min="1" max="12" value="7" class="time-input" aria-label="From hour"/>
+            <span>AM</span>
+            <input type="number" id="timeTo" min="1" max="12" value="7" class="time-input" aria-label="To hour"/>
+            <span>PM</span>
+          </div>
+        </div>
+        <div class="field-col">
+          <label>Notice Period: 1–15 days</label>
+          <div class="days-inline">
+            <input type="number" id="noticeDays" class="lock-full" min="0" max="15" value="0" aria-label="Notice days"/>
+            <span>Day (s)</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== Confirmation and Agreements ===================== -->
+    <section class="panel">
+      <div class="section">
+        <div class="section-title req-title" style="font-weight:bold; margin-bottom:8px;">Confirmation and Agreement</div>
+        <label class="option" style="display:flex; align-items:flex-start; gap:8px; margin-bottom:10px;">
+          <input type="checkbox" name="agreement1"/>
+          I confirm I have read the pricing, refund policy, and terms of service, and that the information I have provided is correct.
+        </label>
+      </div>
+
+      <div class="section">
+        <div class="section-title req-title" style="font-weight:bold; margin-bottom:8px;">Consent and Data Usage Agreement</div>
+        <label class="option" style="display:flex; align-items:flex-start; gap:8px; margin-bottom:10px;">
+          <input type="checkbox" name="agreement2"/>
+          I consent to my data being stored temporarily until my test is booked. I can withdraw at any time by sending an email.
+        </label>
+      </div>
+
+      <div class="section">
+        <div class="section-title req-title" style="font-weight:bold; margin-bottom:8px;">Test Booking and Test Centre</div>
+        <label class="option" style="display:flex; align-items:flex-start; gap:8px; margin-bottom:10px;">
+          <input type="checkbox" name="agreement3"/>
+          If we cannot find a test within your date range, you authorise us to continue searching for up to 30 additional calendar days. If we still cannot find one, you will receive a full refund.
+        </label>
+        <label class="option" style="display:flex; align-items:flex-start; gap:8px; margin-bottom:10px;">
+          <input type="checkbox" name="agreement4"/>
+          If you later ask to change your test centre, this will be treated as a new search and additional fees will apply. Only choose centres you can attend.
+        </label>
+      </div>
+    </section>
+
+    <!-- ===================== Payment ===================== -->
+    <section class="panel">
+      <div class="section">
+        <p><b>Payment:</b><br>
+        Please read the information below and answer each “Yes/No” question accurately so the correct amount is calculated.</p>
+
+        <div class="option row">
+          <div class="option-text" style="flex:1">1. Are you looking for any of the busy test centres listed below? +£20<br>
+          <small>Barking, Chertsey (London), Chingford, Farnborough, Goodmayes, Greenford, High Wycombe, Hornchurch, Hounslow, Leighton Buzzard, Letchworth, Luton, Morden, Oxford, Pinner, Reading, Slough, Southall, Tolworth, Uxbridge, Wanstead, West Didsbury (Manchester)</small></div>
+          <div class="yesno" role="group" aria-label="Yes or No">
+            <button type="button" data-price="20">Yes</button><button type="button" data-price="0">No</button>
+          </div>
+        </div>
+
+        <div class="option row">
+          <div class="option-text" style="flex:1">2. Fast Priority Test Booking? +£100<br>
+          <small>If you failed your test and have not paid the DVSA for a retest, you do not have a valid booking.</small></div>
+          <div class="yesno" role="group" aria-label="Yes or No">
+            <button type="button" data-price="100">Yes</button><button type="button" data-price="0">No</button>
+          </div>
+        </div>
+
+        <div class="option row">
+          <div class="option-text" style="flex:1">3. Fast Priority Test Swapping? +£50<br>
+          <small>Select either booking or swapping (not both).</small></div>
+          <div class="yesno" role="group" aria-label="Yes or No">
+            <button type="button" data-price="50">Yes</button><button type="button" data-price="0">No</button>
+          </div>
+        </div>
+
+        <div class="option row">
+          <div class="option-text" style="flex:1">4. High-priority searching? +£20<br>
+          <small>We will run a separate high-priority search and book the first suitable DVSA slot for you. Otherwise, your request stays in the standard queue.</small></div>
+          <div class="yesno" role="group" aria-label="Yes or No">
+            <button type="button" data-price="20">Yes</button><button type="button" data-price="0">No</button>
+          </div>
+        </div>
+
+        <div class="option row">
+          <div class="option-text" style="flex:1">5. Include weekend test slots? +£15<br>
+          <small>If a weekend test cannot be found, the £15 is not refundable.</small></div>
+          <div class="yesno" role="group" aria-label="Yes or No">
+            <button type="button" data-price="15">Yes</button><button type="button" data-price="0">No</button>
+          </div>
+        </div>
+
+        <div class="option row">
+          <div class="option-text" style="flex:1">6. Instructor tests (ADI Part 2 or Part 3)? +£100<br>
+          <small>Additional fee applies for instructor (ADI) practical tests.</small></div>
+          <div class="yesno" role="group" aria-label="Yes or No">
+            <button type="button" data-price="100">Yes</button><button type="button" data-price="0">No</button>
+          </div>
+        </div>
+
+        <div class="option row">
+          <div class="option-text" style="flex:1">7. Extended Test? +£150<br>
+          <small>Required for drivers who must retake a longer test after a serious offence. An additional fee of £150 applies.</small></div>
+          <div class="yesno" role="group" aria-label="Yes or No">
+            <button type="button" data-price="150">Yes</button><button type="button" data-price="0">No</button>
+          </div>
+        </div>
+
+        <div class="subtotal" id="totalLine">Total: £0.00</div>
+
+        <div class="promo-row" style="display:flex;align-items:center;gap:12px;margin-top:8px;border-top:1px dashed var(--line);padding-top:10px">
+          <label for="promoCode" style="font-weight:bold">Promo Code:</label>
+          <input type="text" id="promoCode" placeholder="Enter promo code (optional)"/>
+        </div>
+
+        <div class="payment-box" style="margin-top:12px;">
+          <input type="text" class="full lock-full" id="cardNumber" placeholder="Card long number"/>
+          <!-- EXPIRY BEFORE CVV -->
+          <label style="display:block; font-weight:bold; margin-bottom:4px;">Expiry Date:</label>
+          <div class="exp-group" style="display:flex; gap:10px; align-items:center;">
+            <select id="expMonth" aria-label="Expiry Month" style="flex:1;">
+              <option>Month</option>
+              <option value="01">01</option><option value="02">02</option><option value="03">03</option>
+              <option value="04">04</option><option value="05">05</option><option value="06">06</option>
+              <option value="07">07</option><option value="08">08</option><option value="09">09</option>
+              <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+            </select>
+            <select id="expYear" aria-label="Expiry Year" style="flex:1;">
+              <option>Year</option>
+              <option>2025</option><option>2026</option><option>2027</option><option>2028</option><option>2029</option>
+              <option>2030</option><option>2031</option><option>2032</option><option>2033</option><option>2034</option><option>2035</option>
+            </select>
+          </div>
+          <input type="text" id="cardCvv" placeholder="CVV/CVC"/>
+          <input type="text" class="full lock-full" id="billingAddress" placeholder="Billing Address"/>
+          <input type="text" class="full lock-full" id="billingPostcode" placeholder="Billing Postcode"/>
+        </div>
+
+        <div class="paypal">
+  <div class="card-logos">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/0/04/Visa.svg" alt="Visa">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/2/2a/Mastercard-logo.svg" alt="Mastercard">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/3/30/American_Express_logo.svg" alt="Amex">
+  </div>
+
+  <div style="display:flex; gap:10px;">
+    <a href="#" id="paypalBtn">Pay with PayPal</a>
+    <a href="#" id="stripeBtn">Pay with Stripe</a>
+  </div>
+</div>
+
+
+        <div id="paymentIndicator" class="indicator"></div>
+
+        
+<!-- Payment Methods (side-by-side) -->
+<div id="payment-section" class="payment-row">
+  <div class="pay-frame paypal">
+    <div class="pay-methods">
+      <label><input type="radio" name="payMethod" value="paypal" checked> PayPal</label>
+    </div>
+    <div class="pay-actions">
+      <div id="paypal-button-container"></div>
+      <div class="small note">Pay first with PayPal. After success, the status will turn <strong>Paid</strong>, then you can submit.</div>
+    </div>
+  </div>
+  <div class="pay-frame stripe">
+    <div class="pay-methods">
+      <label><input type="radio" name="payMethod" value="stripe"> Card (Stripe)</label>
+    </div>
+    <div class="pay-actions">
+      <div id="stripeCardInline"></div>
+      <div class="small note">With Stripe, you can submit first. On submit we’ll take you to Stripe with the exact total.</div>
+    </div>
+  </div>
+</div>
+
+<div class="submit-row">
+          <div id="payStatus" class="status-pill">Payment: Not Paid</div>
+          <button class="submit-btn" id="submitBtn" disabled>SUBMIT</button>
+        </div>
+        <div id="liveErrors" class="live-errors" role="status" aria-live="assertive" style="display:none"></div>
+      </div>
+    </section>
+  </div>
+
+<!-- ===================== Scripts ===================== -->
+<script>
+  /* Booking Type + constraints (swapRef compulsory only when Swap is selected) */
+  (function(){
+    const btnBook=document.getElementById('btnBook');
+    const btnSwap=document.getElementById('btnSwap');
+    const theoryPass=document.getElementById('theoryPass');
+    const swapRef=document.getElementById('swapRef');
+
+    function select(btn){
+      [btnBook, btnSwap].forEach(b => { b && b.classList.remove('selected'); b && b.setAttribute('aria-pressed','false'); });
+      btn.classList.add('selected'); btn.setAttribute('aria-pressed','true');
+
+      if(btn===btnSwap){ swapRef && swapRef.setAttribute('required','required'); }
+      else{ swapRef && swapRef.removeAttribute('required'); }
+    }
+    if(btnBook) btnBook.addEventListener('click', () => select(btnBook));
+    if(btnSwap) btnSwap.addEventListener('click', () => select(btnSwap));
+
+    if(theoryPass) theoryPass.addEventListener('input', () => {
+      theoryPass.value = theoryPass.value.replace(/[^a-z0-9]/gi, '').slice(0, 16);
+    });
+    if(swapRef) swapRef.addEventListener('input', () => {
+      swapRef.value = swapRef.value.replace(/\D/g, '').slice(0, 8);
+      if(btnSwap && btnSwap.classList.contains('selected')){
+        markValidity(swapRef, swapRef.value.length===8, 'Enter the 8-digit DVSA booking reference.');
+      }
+    });
+
+    function markValidity(input, isValid, message){
+      const label = findLabelFor(input);
+      const hasVal = (input.value || '').trim() !== '';
+      input.classList.toggle('error', !isValid && hasVal);
+      input.setAttribute('aria-invalid', (!isValid && hasVal) ? 'true' : 'false');
+      if(label){
+        if(!isValid && hasVal){
+          label.classList.add('show-error');
+          label.setAttribute('data-error', message);
+        }else{
+          label.classList.remove('show-error');
+          label.removeAttribute('data-error');
+        }
+      }
+    }
+    function findLabelFor(input){
+      let prev = input.previousElementSibling;
+      if(prev && prev.tagName === 'LABEL') return prev;
+      let node=input;
+      while(node && node.previousElementSibling){
+        node=node.previousElementSibling;
+        if(node.tagName==='LABEL') return node;
+      }
+      return null;
+    }
+  })();
+
+  /* Applicant details validation + phone (keep +44 and allow 10 digits after) */
+  (function(){
+    const dl=document.getElementById('drivingLicence');
+    if(dl) dl.addEventListener('input', () => {
+      dl.value = dl.value.replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, 16);
+      markValidity(dl, dl.value.length === 16, 'Enter the first 16 characters only.');
+    });
+
+    const email=document.getElementById('email');
+    const emailRe=/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
+    if(email) email.addEventListener('input', ()=>{
+      const ok = email.value.trim()==='' ? true : emailRe.test(email.value.trim());
+      markValidity(email, ok, 'Enter a valid email address.');
+    });
+
+    const pc=document.getElementById('postcode');
+    const ukPost=/^([Gg][Ii][Rr] 0[Aa]{2})|((([A-Za-z][0-9]{1,2})|(([A-Za-z][A-Ha-hJ-Yj-y][0-9]{1,2})|(([A-Za-z][0-9][A-Za-z])|([A-Za-z][A-Ha-hJ-Yj-y][0-9]?[A-Za-z]?))))\s?[0-9][A-Za-z]{2})$/;
+    if(pc){
+      pc.addEventListener('keydown', (e)=>{
+        const allowedNav = ['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'];
+        if (allowedNav.includes(e.key)) return;
+        if (/^[a-z0-9 ]$/i.test(e.key)) return;
+        e.preventDefault();
+      });
+      pc.addEventListener('input', ()=>{
+        let v = pc.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (v.length > 3) v = v.slice(0, v.length - 3) + ' ' + v.slice(v.length - 3);
+        pc.value = v;
+        const ok = pc.value.trim()==='' ? true : ukPost.test(pc.value);
+        markValidity(pc, ok, 'Enter a valid UK postcode (e.g., SW1A 1AA).');
+      });
+    }
+
+    function markValidity(input, isValid, message){
+      const label = findLabelFor(input);
+      const hasVal = (input.value || '').trim() !== '';
+      input.classList.toggle('error', !isValid && hasVal);
+      input.setAttribute('aria-invalid', (!isValid && hasVal) ? 'true' : 'false');
+      if(label){
+        if(!isValid && hasVal){
+          label.classList.add('show-error');
+          label.setAttribute('data-error', message);
+        }else{
+          label.classList.remove('show-error');
+          label.removeAttribute('data-error');
+        }
+      }
+    }
+    function findLabelFor(input){
+      let prev = input.previousElementSibling;
+      if(prev && prev.tagName === 'LABEL') return prev;
+      let node=input;
+      while(node && node.previousElementSibling){
+        node=node.previousElementSibling;
+        if(node.tagName==='LABEL') return node;
+      }
+      return null;
+    }
+
+    /* WhatsApp phone: +44 + 10 digits */
+    const phoneInput=document.getElementById('phoneRaw');
+    if(phoneInput){
+      function normalize(){
+        let digits = phoneInput.value.replace(/\D/g,'');
+        if(digits.startsWith('44')) digits = digits.slice(2);
+        if(digits.startsWith('0')) digits = digits.slice(1);
+        digits = digits.slice(0,10);
+        phoneInput.value = '+44 ' + digits;
+        const ok = digits.length === 10;
+        markValidity(phoneInput, ok || phoneInput.value.trim()==='+44', 'Enter a 10-digit UK mobile after +44.');
+      }
+      phoneInput.addEventListener('input', normalize);
+      phoneInput.addEventListener('blur', normalize);
+      if(!phoneInput.value) phoneInput.value = '+44 ';
+    }
+  })();
+
+  /* Centres: datalist with autocomplete OFF (mouse selection reliable) */
+  (function(){
+    document.querySelectorAll('.centre-input').forEach(inp=>{
+      inp.autocomplete = 'off';
+      inp.spellcheck = false;
+    });
+  })();
+
+  /* Multi-date pickers */
+  (function(){
+    const pad=n=>String(n).padStart(2,'0');
+    const fmt=d=>`${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()}`;
+    const iso=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const fromYMD=s=>{const [y,m,dd]=s.split('-').map(Number);return new Date(y,m-1,dd)};
+
+    function makeMultiDatePicker(wrapperId,inputId,dropdownId){
+      const wrapper=document.getElementById(wrapperId);
+      const input=document.getElementById(inputId);
+      const dropdown=document.getElementById(dropdownId);
+      if(!wrapper||!input||!dropdown)return;
+
+      let view=new Date();view.setDate(1);
+      const selected=new Set();
+
+      dropdown.addEventListener('mousedown',e=>e.stopPropagation());
+
+      function render(){
+        dropdown.innerHTML='';dropdown.style.display='block';
+        const header=document.createElement('div');header.style.display='flex';header.style.justifyContent='space-between';header.style.alignItems='center';header.style.marginBottom='6px';
+        const title=document.createElement('div');title.textContent=view.toLocaleString(undefined,{month:'long',year:'numeric'});
+        const nav=document.createElement('div');
+        const prev=document.createElement('button');prev.textContent='‹';
+        const next=document.createElement('button');next.textContent='›';
+        [prev,next].forEach(b=>{b.style.border='1px solid #ddd';b.style.background='#fafafa';b.style.borderRadius='4px';b.style.padding='4px 6px';b.style.cursor='pointer';b.addEventListener('mousedown',e=>e.stopPropagation())});
+        prev.onclick=()=>{view.setMonth(view.getMonth()-1);render()};
+        next.onclick=()=>{view.setMonth(view.getMonth()+1);render()};
+        nav.append(prev,next);header.append(title,nav);dropdown.append(header);
+
+        const dow=document.createElement('div');dow.style.display='grid';dow.style.gridTemplateColumns='repeat(7,1fr)';dow.style.gap='4px';
+        ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].forEach(n=>{const c=document.createElement('div');c.textContent=n;c.style.textAlign='center';c.style.padding='6px 0';c.style.fontWeight='bold';c.style.background='#f7f7f7';c.style.borderRadius='4px';dow.append(c)});
+        dropdown.append(dow);
+
+        const grid=document.createElement('div');grid.style.display='grid';grid.style.gridTemplateColumns='repeat(7,1fr)';grid.style.gap='4px';
+        const first=new Date(view.getFullYear(),view.getMonth(),1);
+        let startIndex=first.getDay();if(startIndex===0)startIndex=7;
+        for(let i=1;i<startIndex;i++){const b=document.createElement('div');b.style.color='#bbb';b.style.background='#fafafa';b.style.border='1px solid #eee';b.style.borderRadius='4px';grid.append(b)}
+        const daysInMonth=new Date(view.getFullYear(),view.getMonth()+1,0).getDate();
+        for(let d=1;d<=daysInMonth;d++){
+          const cell=document.createElement('div');cell.textContent=d;
+          cell.style.textAlign='center';cell.style.padding='6px 0';cell.style.borderRadius='4px';cell.style.border='1px solid #eee';cell.style.background='#fff';cell.style.cursor='pointer';
+          const dateObj=new Date(view.getFullYear(),view.getMonth(),d);const key=iso(dateObj);
+          if(selected.has(key)){cell.style.background='#1a73e8';cell.style.color='#fff';cell.style.borderColor='#1a73e8';cell.style.fontWeight='bold'}
+          cell.addEventListener('mousedown',e=>e.stopPropagation());
+          cell.onclick=()=>{if(selected.has(key))selected.delete(key);else selected.add(key);updateInput();render()};
+          grid.append(cell)
+        }
+        dropdown.append(grid);
+
+        const footer=document.createElement('div');footer.style.display='flex';footer.style.gap='8px';footer.style.marginTop='8px';
+        const clearBtn=document.createElement('button');clearBtn.textContent='Clear';
+        const closeBtn=document.createElement('button');closeBtn.textContent='Close';
+        [clearBtn,closeBtn].forEach(b=>{b.style.flex='1';b.style.padding='6px';b.style.border='1px solid #ddd';b.style.borderRadius='4px';b.style.cursor='pointer';b.addEventListener('mousedown',e=>e.stopPropagation())});
+        clearBtn.onclick=()=>{selected.clear();updateInput();render()};
+        closeBtn.onclick=()=>{dropdown.style.display='none'};
+        footer.append(clearBtn,closeBtn);dropdown.append(footer)
+      }
+
+      function updateInput(){
+        const sorted=Array.from(selected).sort();
+        input.value=sorted.map(s=>fmt(fromYMD(s))).join(', ')
+      }
+
+      input.addEventListener('click',e=>{e.stopPropagation();dropdown.style.display=dropdown.style.display==='block'?'none':'block';if(dropdown.style.display==='block')render()});
+      document.addEventListener('mousedown',e=>{if(!wrapper.contains(e.target))dropdown.style.display='none'})
+    }
+
+    makeMultiDatePicker('unavail','unavailInput','unavailCal');
+    makeMultiDatePicker('instr','instrInput','instrCal');
+  })();
+
+  /* Payment: totals + conflicts + promo */
+  (function(){
+    const groups=document.querySelectorAll('.yesno');
+    const promoInput=document.getElementById('promoCode');
+    const totalLine=document.getElementById('totalLine');
+
+    function money(n){return `£${n.toFixed(2)}`}
+
+    function baseSum(){
+      let sum=0;
+      document.querySelectorAll('.yesno button.selected').forEach(b=>{
+        const price=Number(b.dataset.price||0);
+        if(!isNaN(price))sum+=price;
+      });
+      return sum;
+    }
+
+    function promoDiscount(sum){
+      if(!promoInput)return 0;
+      const code=(promoInput.value||'').trim().toUpperCase();
+      if(!code)return 0;
+      if(code==='SAVE10')return Math.min(10,sum);
+      if(code==='SAVE20')return Math.min(20,sum);
+      if(code==='OFF10')return +(sum*0.10).toFixed(2);
+      return 0;
+    }
+
+    function recalc(){
+      const sum=baseSum();
+      const disc=promoDiscount(sum);
+      const total=Math.max(0,sum-disc);
+      if(totalLine)totalLine.textContent=`Total: ${money(total)}`;
+    }
+
+    groups.forEach(g=>{
+      g.addEventListener('click',e=>{
+        const btn=e.target.closest('button');if(!btn)return;
+        g.querySelectorAll('button').forEach(b=>{b.classList.remove('selected');b.setAttribute('aria-pressed','false')});
+        btn.classList.add('selected');btn.setAttribute('aria-pressed','true');
+        enforceConflicts();recalc();
+      });
+    });
+
+    if(promoInput){
+      promoInput.addEventListener('input',recalc);
+      promoInput.addEventListener('change',recalc);
+    }
+
+    function enforceConflicts(){
+      const options=Array.from(document.querySelectorAll('.option'));
+      const booking=options.find(o=>/Fast Priority Test Booking/i.test(o.textContent));
+      const swapping=options.find(o=>/Fast Priority Test Swapping/i.test(o.textContent));
+      if(!booking||!swapping)return;
+      const bookBtns=booking.querySelectorAll('.yesno button');
+      const swapBtns=swapping.querySelectorAll('.yesno button');
+      const bookYes=Array.from(bookBtns).find(b=>b.textContent.trim()==='Yes')?.classList.contains('selected');
+      const swapYes=Array.from(swapBtns).find(b=>b.textContent.trim()==='Yes')?.classList.contains('selected');
+      if(bookYes&&swapYes){
+        swapBtns.forEach(b=>{b.classList.remove('selected');b.setAttribute('aria-pressed','false')});
+        const swapNo=Array.from(swapBtns).find(b=>b.textContent.trim()==='No');
+        if(swapNo){swapNo.classList.add('selected');swapNo.setAttribute('aria-pressed','true')}
+      }
+    }
+
+    recalc();
+  })();
+
+  /* Payment flow & card formatting + billing fields */
+  (function(){
+    const payStatus=document.getElementById('payStatus');
+
+    const cn=document.getElementById('cardNumber');
+    const cvv=document.getElementById('cardCvv');
+    const month=document.getElementById('expMonth');
+    const year=document.getElementById('expYear');
+    const address=document.getElementById('billingAddress');
+    const bp=document.getElementById('billingPostcode');
+
+    if(cn){
+      cn.setAttribute('inputmode','numeric');
+      cn.style.webkitTextSecurity='disc';
+      cn.addEventListener('beforeinput',e=>{
+        if(e.inputType && e.inputType.startsWith('delete')) return;
+        if(e.data && /\D/.test(e.data)) e.preventDefault();
+      });
+      cn.addEventListener('paste',e=>{
+        const txt=(e.clipboardData||window.clipboardData).getData('text');
+        if(/\D/.test(txt)) e.preventDefault();
+      });
+      cn.addEventListener('input',()=>{
+        const digits=cn.value.replace(/\D/g,'').slice(0,16);
+        const grouped=digits.replace(/(\d{4})(?=\d)/g,'$1 ');
+        cn.value=grouped;
+        const ok = digits.length===16;
+        markValidity(cn, ok || cn.value.trim()==='', 'Enter a 16-digit card number.');
+        gateSubmit();
+      });
+    }
+
+    if(month&&year){
+      function checkExpiry(){
+        let ok=false;
+        if(month.value!=='Month'&&year.value!=='Year'){
+          const now=new Date();const yNow=now.getFullYear();const mNow=now.getMonth()+1;
+          const y=Number(year.value);const m=Number(month.value);
+          ok=(y>yNow)||(y===yNow&&m>=mNow);
+        } else { ok = false; }
+        const touched = (month.value!=='Month' || year.value!=='Year');
+        const validOrEmpty = ok || !touched;
+        markValidity(year, validOrEmpty, 'Choose a valid expiry date.');
+        return ok;
+      }
+      month.addEventListener('change',checkExpiry);
+      year.addEventListener('change',checkExpiry);
+    }
+
+    if(cvv){
+      cvv.setAttribute('inputmode','numeric');
+      cvv.addEventListener('beforeinput',e=>{
+        if(e.inputType && e.inputType.startsWith('delete')) return;
+        if(e.data && /\D/.test(e.data)) e.preventDefault();
+      });
+      cvv.addEventListener('paste',e=>{
+        const txt=(e.clipboardData||window.clipboardData).getData('text');
+        if(/\D/.test(txt)) e.preventDefault();
+      });
+      cvv.addEventListener('input',()=>{
+        const digits=cvv.value.replace(/\D/g,'').slice(0,4);
+        cvv.value=digits;
+        const ok = /^\d{3,4}$/.test(digits);
+        markValidity(cvv, ok || cvv.value.trim()==='', 'Enter a 3 or 4 digit CVV.');
+        gateSubmit();
+      });
+    }
+
+    if(address){
+      address.addEventListener('input',()=>{
+        const ok=address.value.trim().length>0;
+        markValidity(address, ok || address.value.trim()==='', 'Enter your billing address.');
+        gateSubmit();
+      });
+    }
+
+    const ukPost=/^([Gg][Ii][Rr] 0[Aa]{2})|((([A-Za-z][0-9]{1,2})|(([A-Za-z][A-Ha-hJ-Yj-y][0-9]{1,2})|(([A-Za-z][0-9][A-Za-z])|([A-Za-z][A-Ha-hJ-Yj-y][0-9]?[A-Za-z]?))))\s?[0-9][A-Za-z]{2})$/;
+    if(bp){
+      bp.addEventListener('keydown',e=>{
+        const allowed=['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'];
+        if(allowed.includes(e.key))return;
+        if(/^[a-z0-9 ]$/i.test(e.key))return;
+        e.preventDefault();
+      });
+      bp.addEventListener('input',()=>{
+        let v=bp.value.toUpperCase().replace(/[^A-Z0-9]/g,'');
+        if(v.length>3)v=v.slice(0,v.length-3)+' '+v.slice(v.length-3);
+        bp.value=v;
+        const ok=bp.value.trim()==='' ? true : ukPost.test(v);
+        markValidity(bp, ok, 'Enter a valid UK postcode (e.g., SW1A 1AA).');
+        gateSubmit();
+      });
+    }
+
+    function markValidity(input,isValid,message){
+      const label=findPrevLabel(input);
+      const hasVal = (input.value||'').trim() !== '';
+      input.classList.toggle('error',!isValid && hasVal);
+      input.setAttribute('aria-invalid',(!isValid && hasVal)?'true':'false');
+      if(label){
+        if(!isValid && hasVal){label.classList.add('show-error');label.setAttribute('data-error',message)}
+        else{label.classList.remove('show-error');label.removeAttribute('data-error')}
+      }
+    }
+    function findPrevLabel(input){
+      let prev=input.previousElementSibling;
+      if(prev&&prev.tagName==='LABEL')return prev;
+      let n=input;while(n&&n.previousElementSibling){n=n.previousElementSibling;if(n.tagName==='LABEL')return n}
+      return null;
+    }
+
+    function gateSubmit(){
+      const submitBtn=document.getElementById('submitBtn');
+      if(!submitBtn)return;
+      const paid=payStatus&&/Paid$/.test(payStatus.textContent);
+
+      const swapSelected = document.getElementById('btnSwap')?.classList.contains('selected');
+      const swapRefVal = document.getElementById('swapRef')?.value || '';
+      const swapOk = !swapSelected || /^\d{8}$/.test(swapRefVal);
+
+      submitBtn.disabled = !(paid && swapOk);
+      submitBtn.classList.toggle('enabled', paid && swapOk);
+
+      if(swapSelected){
+        const sr=document.getElementById('swapRef');
+        if(sr){
+          const hasVal = sr.value.trim()!=='';
+          const valid = /^\d{8}$/.test(sr.value.trim());
+          sr.classList.toggle('error', hasVal && !valid);
+          sr.setAttribute('aria-invalid', (hasVal && !valid) ? 'true' : 'false');
+        }
+      }
+    }
+    const indicator=document.getElementById('paymentIndicator');
+    function showIndicator(success,method){
+      if(!indicator)return;
+      indicator.style.display='block';
+      indicator.style.opacity=1;
+      indicator.textContent=success?(method+' OK ✔'):(method+' issues found ✘');
+      indicator.className='indicator '+(success?'success':'fail');
+      setTimeout(()=>{indicator.style.opacity=0;setTimeout(()=>{indicator.style.display='none'},1000)},2500);
+    }
+    const paypalBtn=document.getElementById('paypalBtn');
+    if(paypalBtn)paypalBtn.addEventListener('click',e=>{
+      e.preventDefault();
+      showIndicator(true,'PayPal');
+      payStatus.textContent='Payment: Paid';
+      payStatus.classList.add('paid');
+      gateSubmit();
+    });
+    const submitBtn=document.getElementById('submitBtn');
+    if(submitBtn)submitBtn.addEventListener('click',e=>{
+      const swapSelected = document.getElementById('btnSwap')?.classList.contains('selected');
+      const sr=document.getElementById('swapRef');
+      if(swapSelected && (!sr || !/^\d{8}$/.test(sr.value))){
+        e.preventDefault();
+        if(sr){
+          sr.classList.add('error');
+          sr.setAttribute('aria-invalid','true');
+          const lbl = sr.previousElementSibling?.tagName==='LABEL' ? sr.previousElementSibling : null;
+          if(lbl){ lbl.classList.add('show-error'); lbl.setAttribute('data-error','Enter the 8-digit DVSA booking reference.'); }
+        }
+        return;
+      }
+      if(submitBtn.disabled){e.preventDefault()}else{showIndicator(true,'Submitted')}
+    });
+  })();
+
+  /* Adaptive width (unchanged) */
+  (function(){
+    function px(n){return Math.ceil(n)+'px'}
+    const measurer=document.createElement('span');
+    measurer.style.position='absolute';measurer.style.visibility='hidden';measurer.style.whiteSpace='pre';measurer.style.left='-9999px';
+    document.body.appendChild(measurer);
+
+    function copyFontStyles(src){
+      const cs=window.getComputedStyle(src);
+      ['fontFamily','fontSize','fontWeight','fontStyle','letterSpacing','textTransform','lineHeight'].forEach(p=>measurer.style[p]=cs[p]);
+    }
+    function contentText(el){return (el.value&&el.value.length?el.value:(el.placeholder||''))||''}
+    function minChFor(el){
+      const type=(el.getAttribute('type')||'').toLowerCase();
+      if(type==='number'||type==='time')return 4;
+      if(type==='date')return 10;
+      return 14;
+    }
+    function adjust(el){
+      const isTextish=el.matches('input[type="text"], input[type="email"], input[type="tel"]');
+      const isExtra=el.matches('input[type="date"], input[type="number"], input[type="time"]');
+      if(!(isTextish||isExtra))return;
+
+      const skip =
+        el.id==='phoneRaw' ||
+        el.closest('#applicant-details') ||
+        el.closest('.centres-grid') ||
+        el.classList.contains('lock-full') ||
+        ['earliestDate','latestDate','unavailInput','instrInput','cardNumber','billingAddress','billingPostcode','timeFrom','timeTo','noticeDays'].includes(el.id);
+
+      if(skip){ el.style.width='100%'; el.style.maxWidth='100%'; return; }
+
+      copyFontStyles(el);
+      const minCh=minChFor(el);
+      measurer.textContent='0'.repeat(minCh);
+      const baseMin=measurer.getBoundingClientRect().width;
+      measurer.textContent=contentText(el);
+      const desiredText=measurer.getBoundingClientRect().width;
+      const cs=window.getComputedStyle(el);
+      const pad=parseFloat(cs.paddingLeft)+parseFloat(cs.paddingRight);
+      const brd=parseFloat(cs.borderLeftWidth)+parseFloat(cs.borderRightWidth);
+      const desired=Math.max(baseMin,desiredText)+pad+brd+6;
+      el.style.width=px(desired);
+      el.style.maxWidth='100%';
+    }
+    function runAll(){
+      const sels=['input[type="text"]','input[type="email"]','input[type="tel"]','input[type="date"]','input[type="number"]','input[type="time"]','.calendar-input'];
+      document.querySelectorAll(sels.join(',')).forEach(el=>{
+        adjust(el);
+        el.addEventListener('input',()=>adjust(el));
+        el.addEventListener('change',()=>adjust(el));
+      });
+    }
+    if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',runAll)}else{runAll()}
+  })();
+</script>
+
+<script>
+(() => {
+  const API_BASE  = 'https://api.fastdrivingtestfinder.co.uk/api';
+  const API_TOKEN = 'YOUR_REAL_API_TOKEN';
+
+  const $  = (sel) => document.querySelector(sel);
+  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+  const pad = (n) => String(n).padStart(2,'0');
+  const toHH    = (n) => `${pad((+n||0) === 12 ? 0 : (+n||0))}:00`;
+  const toHHpm  = (n) => `${pad((+n||0) === 12 ? 12 : (+n||0)+12)}:00`;
+
+  const ymd = (el) => {
+    const v = (el && el.value ? el.value.trim() : '');
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+    const m = v.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
+  };
+
+  const normalizePhone = (v) => {
+    let d = (v||'').replace(/\D/g,'');
+    if (d.startsWith('44')) d = d.slice(2);
+    if (d.startsWith('0'))  d = d.slice(1);
+    d = d.slice(0,10);
+    return d ? ('0' + d) : '';
+  };
+
+  const toast = (msg, ok=true) => {
+    let t = document.getElementById('apiToast');
+    if (!t) {
+      t = document.createElement('div');
+      t.id = 'apiToast';
+      t.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.15);transition:opacity .3s';
+      document.body.appendChild(t);
+    }
+    t.style.background = ok ? '#ecfdf5' : '#fef2f2';
+    t.style.color      = ok ? '#065f46' : '#991b1b';
+    t.textContent = msg;
+    t.style.opacity = '1';
+    setTimeout(()=>{ t.style.opacity='0' }, 3500);
+  };
+
+  // Small "API ✓" badge next to subtitle when health passes
+  async function healthCheck() {
+    try {
+      const r = await fetch(`${API_BASE}/health`);
+      const j = await r.json();
+      if (j && j.ok) {
+        const sub = document.querySelector('.strip.subtitle');
+        if (sub && !document.getElementById('apiHealthBadge')) {
+          const s = document.createElement('span');
+          s.id = 'apiHealthBadge';
+          s.textContent = ' API ✓';
+          s.style.cssText = 'margin-left:8px;font-weight:700;color:#064e3b;background:#d1fae5;padding:2px 6px;border-radius:999px';
+          sub.appendChild(s);
+        }
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  // Create a floating "Stop searching" button (appears when a search id exists)
+  function ensureStopButton() {
+    if (document.getElementById('stopSearchBtn')) return;
+    const btn = document.createElement('button');
+    btn.id = 'stopSearchBtn';
+    btn.type = 'button';
+    btn.textContent = 'Stop searching';
+    btn.title = 'Disable this search so the bot stops scanning/swapping';
+    btn.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:8px;border:0;background:#fee2e2;color:#991b1b;font-weight:700;box-shadow:0 6px 18px rgba(0,0,0,.15);cursor:pointer';
+    btn.addEventListener('click', disableCurrentSearch);
+    document.body.appendChild(btn);
+  }
+
+  function currentSearchId() {
+    return localStorage.getItem('dvsa_last_search_id') || '';
+  }
+
+  async function disableCurrentSearch() {
+    const id = currentSearchId();
+    if (!id) { toast('No active search id found on this device.', false); return; }
+    try {
+      const r = await fetch(`${API_BASE}/search/${encodeURIComponent(id)}/disable`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${API_TOKEN}` }
+      });
+      const t = await r.text();
+      if (r.status === 501) {
+        toast('Disable not available in this build (backend). I can enable it if you want.', false);
+        return;
+      }
+      if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+      toast('Search disabled. The bot will stop scanning.', true);
+      const b = document.getElementById('stopSearchBtn'); if (b) { b.disabled = true; b.style.opacity = '0.6'; b.textContent = 'Stopped'; }
+    } catch (e) {
+      toast('Failed to disable: ' + (e?.message || e), false);
+    }
+  }
+
+  function collectPayload() {
+    const centres = $$('.centre-input').map(i => i.value.trim()).filter(Boolean);
+
+    const swapSelected  = $('#btnSwap')?.classList.contains('selected');
+    const bookSelected  = $('#btnBook')?.classList.contains('selected');
+    const swapRef       = $('#swapRef')?.value.trim() || '';
+    const theoryPass    = $('#theoryPass')?.value.trim() || '';
+
+    const payload = {
+      email:  $('#email')?.value.trim() || null,
+      phone:  normalizePhone($('#phoneRaw')?.value),
+
+      centres: centres.join(','),
+      from_date: ymd($('#earliestDate')),
+      to_date:   ymd($('#latestDate')),
+      time_from: toHH($('#timeFrom')?.value),
+      time_to:   toHHpm($('#timeTo')?.value),
+      notice_days: parseInt($('#noticeDays')?.value || '0', 10) || 0,
+
+      surname:         $('#surname')?.value.trim() || null,
+      licence_number:  $('#drivingLicence')?.value.trim() || null,
+
+      booking_reference: swapSelected ? swapRef : undefined,
+      theory_pass:       bookSelected ? theoryPass : undefined,
+
+      // Important: we can later add `stop_after_booked: true` once backend supports it
+      mode: 'auto',
+      auth_method: 3
+    };
+
+    Object.keys(payload).forEach(k => {
+      if (payload[k] === undefined || payload[k] === null || payload[k] === '') delete payload[k];
+    });
+
+    return payload;
+  }
+
+  async function submitToApi() {
+    const btn = $('#submitBtn');
+    if (!btn || btn.disabled) return;
+
+    const p = collectPayload();
+
+    if (!p.centres)                         return toast('Select at least one test centre.', false);
+    if (!p.from_date || !p.to_date)         return toast('Choose earliest/latest dates.', false);
+    if (!p.surname || !p.licence_number)    return toast('Enter surname and licence number.', false);
+    if (!p.email)                           return toast('Enter your email.', false);
+    if (!p.phone)                           return toast('Enter your WhatsApp phone.', false);
+    if ($('#btnSwap')?.classList.contains('selected') && !/^\d{8}$/.test($('#swapRef')?.value||'')) {
+      return toast('Swap selected: add the 8-digit DVSA booking reference.', false);
+    }
+
+    try {
+      btn.disabled = true; btn.classList.remove('enabled');
+      toast('Submitting your search…');
+
+      const r = await fetch(`${API_BASE}/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_TOKEN}` },
+        body: JSON.stringify(p)
+      });
+      const text = await r.text();
+      let j; try { j = JSON.parse(text) } catch { j = null; }
+
+      if (!r.ok) throw new Error(j?.error || text || `HTTP ${r.status}`);
+
+      const id = j?.id || j?.search_id || '';
+      if (id) {
+        localStorage.setItem('dvsa_last_search_id', id);
+        ensureStopButton();
+      }
+      toast(id ? `Search created: ${id}` : 'Search created', true);
+      console.log('Gateway response:', j);
+    } catch (err) {
+      console.error(err);
+      toast(`API error: ${err.message || err}`, false);
+    } finally {
+      btn.disabled = false; btn.classList.add('enabled');
+    }
+  }
+
+  window.addEventListener('DOMContentLoaded', async () => {
+    await healthCheck();
+    // If an id already exists from a previous session, show the Stop button
+    if (currentSearchId()) ensureStopButton();
+
+    const btn = $('#submitBtn');
+    if (btn) {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        submitToApi();
+      });
+    }
+  });
+})();
+</script>
+<script>
+/* ===== Frontend polish: autosave, success strip, better errors, double-submit guard ===== */
+(() => {
+  const API_BASE  = 'https://api.fastdrivingtestfinder.co.uk/api';
+  const API_TOKEN = 'YOUR_REAL_API_TOKEN';
+  const STORE_KEY = 'dvsa_form_autosave_v1';
+  const LAST_ID   = 'dvsa_last_search_id';
+
+  // Minimal toast (reuses existing if present)
+  function toast(msg, ok=true){
+    let t = document.getElementById('apiToast');
+    if(!t){
+      t = document.createElement('div');
+      t.id = 'apiToast';
+      t.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.15);transition:opacity .3s';
+      document.body.appendChild(t);
+    }
+    t.style.background = ok ? '#ecfdf5' : '#fef2f2';
+    t.style.color      = ok ? '#065f46' : '#991b1b';
+    t.textContent = msg;
+    t.style.opacity = '1';
+    setTimeout(()=>{t.style.opacity='0'}, 3500);
+  }
+
+  // Success strip after a search is created
+  function showSuccessStrip(id){
+    if(document.getElementById('dvsaSuccessStrip')) return;
+    const bar = document.createElement('div');
+    bar.id = 'dvsaSuccessStrip';
+    bar.style.cssText = 'position:fixed;left:16px;right:16px;bottom:16px;background:#ecfdf5;color:#065f46;border:1px solid #bbf7d0;border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px;z-index:9999;box-shadow:0 8px 24px rgba(0,0,0,.12)';
+    bar.innerHTML = `
+      <strong>Search created:</strong> <span id="dvsaSid">${id}</span>
+      <a href="http://localhost:8787/api/admin" target="_blank" style="margin-left:auto;font-weight:700;text-decoration:none;background:#dbeafe;border:1px solid #bfdbfe;color:#1e3a8a;padding:6px 10px;border-radius:8px">Open Admin</a>
+      <button id="dvsaStopBtn" type="button" style="font-weight:700;background:#fee2e2;color:#991b1b;border:1px solid #fecaca;padding:6px 10px;border-radius:8px;cursor:pointer">Stop this search</button>
+    `;
+    document.body.appendChild(bar);
+
+    document.getElementById('dvsaStopBtn').addEventListener('click', async () => {
+      const sid = localStorage.getItem(LAST_ID);
+      if(!sid){ toast('No search id saved on this device.', false); return; }
+      try{
+        const r = await fetch(`${API_BASE}/search/${encodeURIComponent(sid)}/disable`, {
+          method:'POST',
+          headers:{ 'Authorization': `Bearer ${API_TOKEN}` }
+        });
+        if(!r.ok){
+          const txt = await r.text();
+          throw new Error(txt || `HTTP ${r.status}`);
+        }
+        toast('Search disabled. The bot will stop.', true);
+        const btn = document.getElementById('dvsaStopBtn');
+        btn.disabled = true; btn.style.opacity = .6;
+      }catch(e){
+        toast('Disable failed: ' + (e?.message||e), false);
+      }
+    });
+  }
+
+  // Autosave / restore
+  const FIELDS = [
+    '#surname','#firstname','#drivingLicence','#address','#town','#postcode',
+    '#email','#phoneRaw','#earliestDate','#latestDate','#timeFrom','#timeTo','#noticeDays'
+  ];
+  function readForm(){
+    const data = {};
+    FIELDS.forEach(sel => { const el = document.querySelector(sel); if(el) data[sel] = el.value; });
+    data.centres = Array.from(document.querySelectorAll('.centre-input')).map(i=>i.value);
+    data.swapSelected = !!document.getElementById('btnSwap')?.classList.contains('selected');
+    data.bookSelected = !!document.getElementById('btnBook')?.classList.contains('selected');
+    data.swapRef    = document.getElementById('swapRef')?.value || '';
+    data.theoryPass = document.getElementById('theoryPass')?.value || '';
+    return data;
+  }
+  function writeForm(data){
+    if(!data) return;
+    FIELDS.forEach(sel => { const el = document.querySelector(sel); if(el && data[sel]!=null) el.value = data[sel]; });
+    if(Array.isArray(data.centres)){
+      const inputs = Array.from(document.querySelectorAll('.centre-input'));
+      inputs.forEach((el,i)=>{ if(data.centres[i]!=null) el.value = data.centres[i]; });
+    }
+    if(data.bookSelected) document.getElementById('btnBook')?.click();
+    if(data.swapSelected) document.getElementById('btnSwap')?.click();
+    if(data.swapRef)    document.getElementById('swapRef').value    = data.swapRef;
+    if(data.theoryPass) document.getElementById('theoryPass').value = data.theoryPass;
+  }
+  function saveDraft(){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(readForm())) }catch{} }
+  function restoreDraft(){ try{ const j = localStorage.getItem(STORE_KEY); if(j) writeForm(JSON.parse(j)); }catch{} }
+  function wireAutosave(){
+    FIELDS.map(sel=>document.querySelector(sel)).filter(Boolean).forEach(el=>{
+      el.addEventListener('input', saveDraft);
+      el.addEventListener('change', saveDraft);
+    });
+    document.querySelectorAll('.centre-input').forEach(el=>{
+      el.addEventListener('input', saveDraft);
+      el.addEventListener('change', saveDraft);
+    });
+    ['swapRef','theoryPass'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el){ el.addEventListener('input', saveDraft); el.addEventListener('change', saveDraft); }
+    });
+  }
+
+  // Double-submit guard + capture success ID
+  let submitting = false;
+  function interceptSubmit(){
+    const btn = document.getElementById('submitBtn');
+    if(!btn) return;
+    btn.addEventListener('click', (e)=> {
+      if(submitting){
+        e.preventDefault();
+        toast('Already submitting…', false);
+      }else{
+        submitting = true;
+        setTimeout(()=>submitting=false, 5000);
+      }
+    }, true);
+
+    const origFetch = window.fetch;
+    window.fetch = async function(url, init){
+      const resp = await origFetch.apply(this, arguments);
+      try{
+        const isCreate = (typeof url === 'string') && url.includes('/api/search') && (init?.method||'GET').toUpperCase()==='POST';
+        if(isCreate){
+          submitting = false;
+          const text = await resp.clone().text();
+          try{
+            const j = JSON.parse(text);
+            if(resp.ok && j && (j.id || j.search_id)){
+              const id = j.id || j.search_id;
+              localStorage.setItem(LAST_ID, String(id));
+              showSuccessStrip(id);
+            }else if(!resp.ok){
+              toast(`API error: ${j?.detail || j?.error || resp.status}`, false);
+            }
+          }catch{
+            if(!resp.ok) toast(`API error: ${resp.status} ${text.slice(0,160)}`, false);
+          }
+        }
+      }catch{}
+      return resp;
+    }
+  }
+
+  window.addEventListener('DOMContentLoaded', () => {
+    restoreDraft();
+    wireAutosave();
+    interceptSubmit();
+    const lastId = localStorage.getItem(LAST_ID);
+    if(lastId) showSuccessStrip(lastId);
+  });
+})();
+</script>
+<script>
+/* ===== Preflight form check (no markup changes) ===== */
+(() => {
+  const $  = s => document.querySelector(s);
+  const $$ = s => Array.from(document.querySelectorAll(s));
+
+  function banner(){
+    let b = document.getElementById('preflightBanner');
+    if(!b){
+      b = document.createElement('div');
+      b.id = 'preflightBanner';
+      b.style.cssText = 'position:fixed;left:16px;right:16px;top:16px;z-index:9999;background:#fff7ed;color:#7c2d12;border:1px solid #fed7aa;border-radius:10px;padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.12);font-weight:600;display:none';
+      document.body.appendChild(b);
+    }
+    return b;
+  }
+
+  function showBanner(msg){
+    const b = banner();
+    b.innerHTML = msg;
+    b.style.display = 'block';
+    b.style.opacity = '1';
+    setTimeout(()=>{ b.style.opacity='0'; setTimeout(()=>{ b.style.display='none' }, 500); }, 4500);
+  }
+
+  function markErr(input, message){
+    if(!input) return;
+    const hasVal = (input.value||'').trim() !== '';
+    input.classList.toggle('error', true);
+    input.setAttribute('aria-invalid','true');
+    // try to find a previous label
+    let label = input.previousElementSibling;
+    if(!(label && label.tagName==='LABEL')){
+      let n=input;
+      while(n && n.previousElementSibling){ n=n.previousElementSibling; if(n.tagName==='LABEL'){ label=n; break; } }
+    }
+    if(label){ label.classList.add('show-error'); label.setAttribute('data-error', message); }
+  }
+
+  function clearErr(input){
+    if(!input) return;
+    input.classList.remove('error');
+    input.removeAttribute('aria-invalid');
+    let label = input.previousElementSibling;
+    if(!(label && label.tagName==='LABEL')){
+      let n=input;
+      while(n && n.previousElementSibling){ n=n.previousElementSibling; if(n.tagName==='LABEL'){ label=n; break; } }
+    }
+    if(label){ label.classList.remove('show-error'); label.removeAttribute('data-error'); }
+  }
+
+  function normalizePhone(v){
+    let d = (v||'').replace(/\D/g,'');
+    if(d.startsWith('44')) d = d.slice(2);
+    if(d.startsWith('0'))  d = d.slice(1);
+    d = d.slice(0,10);
+    return d;
+  }
+
+  function validate(){
+    const errs = [];
+    const swapSelected = $('#btnSwap')?.classList.contains('selected');
+    const bookSelected = $('#btnBook')?.classList.contains('selected');
+
+    // Required fields
+    const surname = $('#surname');
+    const first   = $('#firstname');
+    const dl      = $('#drivingLicence');
+    const email   = $('#email');
+    const phone   = $('#phoneRaw');
+    const centre1 = document.querySelector('.centre-input');
+    const fromD   = $('#earliestDate');
+    const toD     = $('#latestDate');
+    const pc      = $('#postcode');
+
+    [surname, first, dl, email, phone, centre1, fromD, toD, pc].forEach(clearErr);
+
+    if(!surname.value.trim()){ errs.push('Surname is required.'); markErr(surname,'Enter your surname.'); }
+    if(!first.value.trim()){   errs.push('First/Middle name(s) required.'); markErr(first,'Enter your first/middle name(s).'); }
+    if((dl.value||'').trim().length !== 16){ errs.push('Driving licence must be 16 characters.'); markErr(dl,'Enter 16 characters (first part only).'); }
+    // Email quick check
+    const okEmail = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i.test((email.value||'').trim());
+    if(!okEmail){ errs.push('Enter a valid email address.'); markErr(email,'Enter a valid email address.'); }
+    // Phone +44 + 10 digits
+    if(normalizePhone(phone.value).length !== 10){ errs.push('Enter a 10-digit UK mobile after +44.'); markErr(phone,'Enter a 10-digit UK mobile after +44.'); }
+    // Centre 1
+    if(!centre1 || !centre1.value.trim()){ errs.push('Select at least one test centre.'); if(centre1) markErr(centre1,'Choose your test centre.'); }
+    // Dates
+    if(!/^\d{4}-\d{2}-\d{2}$/.test((fromD.value||''))){ errs.push('Earliest date is required.'); markErr(fromD,'Choose earliest date.'); }
+    if(!/^\d{4}-\d{2}-\d{2}$/.test((toD.value||''))){   errs.push('Latest date is required.');   markErr(toD,'Choose latest date.'); }
+
+    // Postcode (loose UK pattern)
+    const ukPost=/^([Gg][Ii][Rr] 0[Aa]{2})|((([A-Za-z][0-9]{1,2})|(([A-Za-z][A-Ha-hJ-Yj-y][0-9]{1,2})|(([A-Za-z][0-9][A-Za-z])|([A-Za-z][A-Ha-hJ-Yj-y][0-9]?[A-Za-z]?))))\s?[0-9][A-Za-z]{2})$/;
+    const pcVal = pc.value.toUpperCase();
+    if(!ukPost.test(pcVal)){ errs.push('Enter a valid UK postcode (e.g., SW1A 1AA).'); markErr(pc,'Enter a valid UK postcode (e.g., SW1A 1AA).'); }
+
+    // Agreements
+    const a1=$('input[name="agreement1"]');
+    const a2=$('input[name="agreement2"]');
+    const a3=$('input[name="agreement3"]');
+    const a4=$('input[name="agreement4"]');
+    const agreements = [a1,a2,a3,a4];
+    const allChecked = agreements.every(x=>x && x.checked);
+    if(!allChecked) errs.push('Please confirm all agreements and consent.');
+
+    // Mode-specific
+    if(swapSelected){
+      const ref = $('#swapRef')?.value.replace(/\D/g,'') || '';
+      if(ref.length!==8){ errs.push('Swap selected: enter the 8-digit DVSA booking reference.'); markErr($('#swapRef'),'Enter the 8-digit DVSA booking reference.'); }
+    }
+    if(bookSelected){
+      const tp = ($('#theoryPass')?.value||'').trim();
+      if(tp.length===0){ errs.push('Booking selected: enter your theory pass number.'); markErr($('#theoryPass'),'Enter your theory pass number.'); }
+    }
+    // Conditional payment gate: PayPal must be paid; Stripe can submit first
+  const chosen = (document.querySelector('input[name="payMethod"]:checked')||{}).value;
+  if(chosen==='paypal'){
+    if(!document.getElementById('payStatus')?.textContent.includes('Paid')){
+      errs.push('Please complete payment with PayPal first.');
+    }
+  }
+  return errs;
+}
+
+    return errs;
+  }
+
+  function attachPreflight(){
+    const btn = document.getElementById('submitBtn');
+    if(!btn) return;
+    btn.addEventListener('click', (e) => {
+      const errs = validate();
+      if(errs.length){
+        e.preventDefault();
+        const firstErrInput = document.querySelector('.error');
+        if(firstErrInput){ firstErrInput.scrollIntoView({behavior:'smooth', block:'center'}); firstErrInput.focus({preventScroll:true}); }
+        showBanner('Please fix the following before submitting:<br>• ' + errs.join('<br>• '));
+      }
+    }, true);
+  }
+
+  window.addEventListener('DOMContentLoaded', attachPreflight);
+})();
+</script>
+<!-- Stripe.js -->
+<script src="https://js.stripe.com/v3/"></script>
+
+<script>
+(function () {
+  // Reuse your API base
+  const API_BASE = 'https://api.fastdrivingtestfinder.co.uk/api';
+
+  // Replace with your real Stripe *publishable* key (looks like pk_test_...)
+  const STRIPE_PK = "pk_live_REPLACE_THIS_WITH_YOUR_KEY"; // Use pk_test_xxx for testing
+
+  // Small toast helper (reuses the one you already use if present)
+  function toast(msg, ok = true) {
+    let t = document.getElementById('apiToast');
+    if (!t) {
+      t = document.createElement('div');
+      t.id = 'apiToast';
+      t.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.15);transition:opacity .3s';
+      document.body.appendChild(t);
+    }
+    t.style.background = ok ? '#ecfdf5' : '#fef2f2';
+    t.style.color      = ok ? '#065f46' : '#991b1b';
+    t.textContent = msg;
+    t.style.opacity = '1';
+    setTimeout(()=>{t.style.opacity='0'}, 3500);
+  }
+
+  // Read the current total from your "Total: £X.XX" line and convert to pence
+  function amountFromTotalLine() {
+    const txt = (document.getElementById('totalLine')?.textContent || '');
+    const m = txt.match(/£([\d.]+)/);
+    const pounds = m ? parseFloat(m[1]) : 0;
+    // Minimum £1.00 for Stripe
+    return Math.max(100, Math.round(pounds * 100));
+  }
+
+  const btn = document.getElementById('stripeBtn');
+  if (!btn) return;
+
+  btn.addEventListener('click', async (e) => {
+    e.preventDefault();
+
+    // Ensure the search exists (created by /api/search earlier)
+    const searchId = localStorage.getItem('dvsa_last_search_id');
+    if (!searchId) {
+      toast('Please submit the form first so we can create your search.', false);
+      return;
+    }
+
+    // Build the amount from your UI
+    const amount_cents = amountFromTotalLine();
+
+    try {
+      // Create Stripe Checkout session via your backend
+      const r = await fetch(`${API_BASE}/pay/create-checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          search_id: Number(searchId),
+          amount_cents,
+          currency: 'gbp'
+        })
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.detail || JSON.stringify(j));
+
+      // Redirect to Stripe hosted page
+      const stripe = Stripe(STRIPE_PK);
+      const res = await stripe.redirectToCheckout({ sessionId: j.session_id });
+      if (res.error) throw new Error(res.error.message || 'Stripe redirection failed');
+    } catch (err) {
+      console.error(err);
+      toast('Stripe error: ' + (err?.message || err), false);
+    }
+  });
+})();
+</script>
+
+
+<!-- Real Payments Wiring (Flow A: submit -> pay) -->
+<script>
+(function(){
+  const API_BASE  = typeof API_BASE !== 'undefined' ? API_BASE : 'https://YOUR-GATEWAY-URL/api';
+  const AUTH      = typeof API_TOKEN !== 'undefined' ? API_TOKEN : 'YOUR_REAL_API_TOKEN';
+  const STRIPE_PK_CONST = typeof STRIPE_PK !== 'undefined' ? STRIPE_PK : 'pk_live_REPLACE_THIS_WITH_YOUR_KEY';
+
+  const $ = (s)=>document.querySelector(s);
+
+  function amountFromTotalLine(){
+    const el = document.getElementById('grandTotal') || document.querySelector('[data-total]');
+    if(!el) return 0;
+    const m = String(el.textContent||'').match(/([\d,.]+)/);
+    if(!m) return 0;
+    const pounds = parseFloat(m[1].replace(/,/g,'')) || 0;
+    return Math.round(pounds*100);
+  }
+
+  // For Stripe Checkout redirect
+  async function redirectToStripeCheckout(searchId){
+    const amount_cents = amountFromTotalLine(); // using front-end amount per your request
+    const r = await fetch(`${API_BASE}/pay/create-checkout`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':`Bearer ${AUTH}`},
+      body: JSON.stringify({ search_id: Number(searchId), amount_cents, currency:'gbp' })
+    });
+    const j = await r.json();
+    if(!r.ok) throw new Error(j?.detail || JSON.stringify(j));
+    const stripe = Stripe(STRIPE_PK_CONST);
+    const res = await stripe.redirectToCheckout({ sessionId: j.session_id });
+    if(res.error) throw new Error(res.error.message || 'Stripe redirection failed');
+  }
+
+  window.__PAYMENT_HELPERS__ = { redirectToStripeCheckout };
+})();
+</script>
+
+<!-- PayPal SDK -->
+<script src="https://www.paypal.com/sdk/js?client-id=YOUR_PAYPAL_CLIENT_ID&currency=GBP" data-sdk-integration-source="button-factory"></script>
+
+
+<script>
+(function(){
+  document.addEventListener('dvsa:search-created', async function(e){
+    const chosen = (document.querySelector('input[name="payMethod"]:checked')||{}).value;
+    const pill = document.getElementById('payStatus');
+    if(chosen==='stripe' && pill && !pill.textContent.includes('Paid')){
+      try{
+        const sid = e.detail && e.detail.search_id;
+        await window.__PAYMENT_HELPERS__.redirectToStripeCheckout(sid);
+      }catch(err){
+        console.error(err);
+        if(typeof toast==='function'){ toast(err.message || 'Stripe redirect failed', false); }
+      }
+    }
+  });
+})();
+</script>
+
+</body>
+</html>
