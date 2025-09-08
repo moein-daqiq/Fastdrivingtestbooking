@@ -27,10 +27,11 @@ if STRIPE_SECRET_KEY:
 # FastAPI
 # ------------------------------------------------------------------------------
 app = FastAPI(title="DVSA Bot API", version="1.2.0")
+from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # OK for local testing; tighten for production
+    allow_origins=["https://www.fastdrivingtestfinder.co.uk"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -306,3 +307,4 @@ def pay_cancel():
 # ------------------------------------------------------------------------------
 
 # No `if __name__ == "__main__":` block needed, but you can add it if you prefer.
+
