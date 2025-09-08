@@ -746,7 +746,9 @@
       makeMultiDatePicker('unavail','unavailInput','unavailCal');
       makeMultiDatePicker('instr','instrInput','instrCal');
     })();
+  </script>
 
+  <script>
     /* Payment: totals + conflicts + promo */
     (function(){
       const groups=document.querySelectorAll('.yesno');
@@ -813,7 +815,9 @@
 
       recalc();
     })();
+  </script>
 
+  <script>
     /* Payment flow & card formatting + billing fields */
     (function(){
       const payStatus=document.getElementById('payStatus');
@@ -960,8 +964,8 @@
       if(paypalBtn)paypalBtn.addEventListener('click',e=>{
         e.preventDefault();
         showIndicator(true,'PayPal');
-        payStatus.textContent='Payment: Paid';
-        payStatus.classList.add('paid');
+        document.getElementById('payStatus').textContent='Payment: Paid';
+        document.getElementById('payStatus').classList.add('paid');
         gateSubmit();
       });
       const submitBtn=document.getElementById('submitBtn');
@@ -981,7 +985,9 @@
         if(submitBtn.disabled){e.preventDefault()}else{showIndicator(true,'Submitted')}
       });
     })();
+  </script>
 
+  <script>
     /* Adaptive width (unchanged) */
     (function(){
       function px(n){return Math.ceil(n)+'px'}
@@ -1620,8 +1626,10 @@
   })();
   </script>
 
-  <!-- PayPal SDK -->
+  <!-- PayPal SDK (commented out to avoid 400 until you add a real client id) -->
+  <!--
   <script src="https://www.paypal.com/sdk/js?client-id=YOUR_PAYPAL_CLIENT_ID&currency=GBP" data-sdk-integration-source="button-factory"></script>
+  -->
 
   <script>
   (function(){
