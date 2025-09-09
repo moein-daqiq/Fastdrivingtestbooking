@@ -589,7 +589,9 @@
         return null;
       }
     })();
+  </script>
 
+  <script>
     /* Applicant details validation + phone (keep +44 and allow 10 digits after) */
     (function(){
       const dl=document.getElementById('drivingLicence');
@@ -626,7 +628,7 @@
       function markValidity(input, isValid, message){
         const label = findLabelFor(input);
         const hasVal = (input.value || '').trim() !== '';
-        input.classList.toggle('error', !isValid && hasVal);
+        input.classList.toggle('error, !isValid && hasVal');
         input.setAttribute('aria-invalid', (!isValid && hasVal) ? 'true' : 'false');
         if(label){
           if(!isValid && hasVal){
@@ -666,7 +668,9 @@
         if(!phoneInput.value) phoneInput.value = '+44 ';
       }
     })();
+  </script>
 
+  <script>
     /* Centres: datalist with autocomplete OFF (mouse selection reliable) */
     (function(){
       document.querySelectorAll('.centre-input').forEach(inp=>{
@@ -674,7 +678,9 @@
         inp.spellcheck = false;
       });
     })();
+  </script>
 
+  <script>
     /* Multi-date pickers */
     (function(){
       const pad=n=>String(n).padStart(2,'0');
@@ -1530,44 +1536,44 @@
   <script src="https://js.stripe.com/v3/"></script>
 
   <!-- PayPal SDK (SANDBOX) -->
-<script src="https://www.paypal.com/sdk/js?client-id=AW5rAuiuJi7W30wj1pgZY2o-47Gy79rY9RjX1YZOWKxQkkaQ23Dv5Rk9AW4MvCZ-1UldpFxf-01rGKvV&currency=GBP&components=buttons&intent=capture"></script>
-<script>
-  (function () {
-    if (!window.paypal) return;
+  <script src="https://www.paypal.com/sdk/js?client-id=AW5rAuiuJi7W30wj1pgZY2o-47Gy79rY9RjX1YZOWKxQkkaQ23Dv5Rk9AW4MvCZ-1UldpFxf-01rGKvV&currency=GBP&components=buttons&intent=capture"></script>
 
-    function amountGBP() {
-      const txt = (document.getElementById('totalLine')?.textContent || '');
-      const m = txt.match(/£([\d.]+)/);
-      return (m ? m[1] : '0.00') || '0.00';
-    }
+  <!-- PayPal Buttons initializer (ADDED) -->
+  <script>
+    (function () {
+      if (!window.paypal) return;
 
-    paypal.Buttons({
-      style: { layout: 'vertical', color: 'gold', shape: 'rect', label: 'paypal' },
-
-      // Simple client-side order creation for sandbox/live
-      createOrder: function (data, actions) {
-        return actions.order.create({
-          purchase_units: [{ amount: { currency_code: 'GBP', value: amountGBP() } }]
-        });
-      },
-
-      // Capture payment, then unlock the Submit button
-      onApprove: function (data, actions) {
-        return actions.order.capture().then(function () {
-          const pill = document.getElementById('payStatus');
-          if (pill) { pill.textContent = 'Payment: Paid'; pill.classList.add('paid'); }
-          const submitBtn = document.getElementById('submitBtn');
-          if (submitBtn) { submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
-        });
-      },
-
-      onError: function (err) {
-        console.error(err);
-        if (typeof toast === 'function') toast('PayPal error: ' + (err?.message || err), false);
+      function amountGBP() {
+        const txt = (document.getElementById('totalLine')?.textContent || '');
+        const m = txt.match(/£([\d.]+)/);
+        const pounds = m ? parseFloat(m[1]) : 0;
+        const val = Math.max(1.00, pounds); // PayPal can't take £0.00
+        return val.toFixed(2);
       }
-    }).render('#paypal-button-container');
-  })();
-</script>
+
+      paypal.Buttons({
+        style: { layout: 'vertical', color: 'gold', shape: 'rect', label: 'paypal' },
+        createOrder: function (data, actions) {
+          return actions.order.create({
+            purchase_units: [{ amount: { currency_code: 'GBP', value: amountGBP() } }]
+          });
+        },
+        onApprove: function (data, actions) {
+          return actions.order.capture().then(function () {
+            const pill = document.getElementById('payStatus');
+            if (pill) { pill.textContent = 'Payment: Paid'; pill.classList.add('paid'); }
+            const submitBtn = document.getElementById('submitBtn');
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
+            if (typeof toast === 'function') toast('PayPal payment captured', true);
+          });
+        },
+        onError: function (err) {
+          console.error(err);
+          if (typeof toast === 'function') toast('PayPal error: ' + (err?.message || err), false);
+        }
+      }).render('#paypal-button-container');
+    })();
+  </script>
 
   <script>
   (function () {
@@ -1630,37 +1636,6 @@
         console.error(err);
         toast('Stripe error: ' + (err?.message || err), false);
       }
-    });
-  })();
-  </script>
-
-  <!-- ✅ PayPal Buttons initializer (ADDED) -->
-  <script>
-  (function(){
-    function ppAmount(){
-      const txt = (document.getElementById('totalLine')?.textContent || '');
-      const m = txt.match(/£([\d.]+)/);
-      const pounds = m ? parseFloat(m[1]) : 0;
-      return (Math.max(1, pounds || 0)).toFixed(2); // GBP string (min £1)
-    }
-    function markPaid(){
-      const pill = document.getElementById('payStatus');
-      if (pill){ pill.textContent = 'Payment: Paid'; pill.classList.add('paid'); }
-      const submit = document.getElementById('submitBtn');
-      if (submit){ submit.disabled = false; submit.classList.add('enabled'); }
-    }
-    document.addEventListener('DOMContentLoaded', function(){
-      if (!window.paypal || !paypal.Buttons) return;
-      const container = document.getElementById('paypal-button-container');
-      if (!container) return;
-      paypal.Buttons({
-        style: { layout: 'horizontal', height: 40 },
-        createOrder: (data, actions) => actions.order.create({
-          purchase_units: [{ amount: { currency_code: 'GBP', value: ppAmount() } }]
-        }),
-        onApprove: async (data, actions) => { try{ await actions.order.capture(); }catch(_){} markPaid(); },
-        onError: (err) => { console.error('PayPal error:', err); }
-      }).render(container);
     });
   })();
   </script>
