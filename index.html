@@ -134,6 +134,7 @@
 
     /* Payment */
     .subtotal{font-weight:bold;margin-top:10px;font-size:16px;text-align:right;color:var(--primary-dark)}
+    .payment-box input,.payment-box select{margin-bottom:10px}
     .paypal{margin-top:12px;display:flex;align-items:center;gap:12px;justify-content:space-between;
       border-top:1px dashed var(--line);padding-top:10px}
     .card-logos img{height:18px;max-width:56px}
@@ -146,11 +147,6 @@
     .status-pill.paid{background:#ecfdf5;color:#16a34a}
     .submit-btn{flex:1;background:#2563eb;color:#fff;padding:10px;border:none;font-size:15px;border-radius:4px;cursor:pointer;opacity:.6}
     .submit-btn.enabled{opacity:1}
-
-    /* Payment (PayPal-only) */
-    .payment-row{display:grid;grid-template-columns:1fr;gap:16px;align-items:start}
-    .pay-frame{border:1px dashed var(--line); border-radius:8px; padding:12px; background:#fff}
-    .pay-actions{margin-top:8px}
   </style>
 </head>
 <body>
@@ -185,42 +181,42 @@
       <div class="row heading"><label class="small">Applicant Details:</label></div>
 
       <div class="fields" style="display:grid;grid-template-columns:200px 1fr;column-gap:16px;row-gap:10px;align-items:center">
-        <div class="field-row" style="display:contents">
-          <label class="req" for="surname" style="justify-self:end;text-align:right">Surname(s):</label>
+        <div class="field-row">
+          <label class="req" for="surname">Surname(s):</label>
           <input type="text" id="surname" placeholder="Exactly as shown on your driving licence (field 1)"/>
         </div>
-        <div class="field-row" style="display:contents">
-          <label class="req" for="firstname" style="justify-self:end;text-align:right">First and Middle Name(s):</label>
+        <div class="field-row">
+          <label class="req" for="firstname">First and Middle Name(s):</label>
           <input type="text" id="firstname" placeholder="Exactly as shown on your driving licence (field 2)"/>
         </div>
-        <div class="field-row" style="display:contents">
-          <label class="req" for="drivingLicence" style="justify-self:end;text-align:right">Driving Licence No:</label>
-          <input type="text" id="drivingLicence" placeholder="First 16 characters only (exclude the last 2)" maxlength="16" style="width:100%"/>
+        <div class="field-row">
+          <label class="req" for="drivingLicence">Driving Licence No:</label>
+          <input type="text" id="drivingLicence" placeholder="First 16 characters only (exclude the last 2)" maxlength="16"/>
         </div>
-        <div class="field-row" style="display:contents">
-          <label class="req" for="address" style="justify-self:end;text-align:right">Address:</label>
+        <div class="field-row">
+          <label class="req" for="address">Address:</label>
           <input type="text" id="address" placeholder="House number and street name"/>
         </div>
-        <div class="field-row" style="display:contents">
-          <label for="town" style="justify-self:end;text-align:right">Town/City:</label>
+        <div class="field-row">
+          <label for="town">Town/City:</label>
           <input type="text" id="town" placeholder="Town/City"/>
         </div>
-        <div class="field-row" style="display:contents">
-          <label class="req" for="postcode" style="justify-self:end;text-align:right">Postcode:</label>
+        <div class="field-row">
+          <label class="req" for="postcode">Postcode:</label>
           <input type="text" id="postcode" placeholder="UK postcode (e.g., SW1A 1AA)" inputmode="text" autocomplete="postal-code"/>
         </div>
-        <div class="field-row" style="display:contents">
-          <label class="req" for="email" style="justify-self:end;text-align:right">Email Address:</label>
+        <div class="field-row">
+          <label class="req" for="email">Email Address:</label>
           <input type="email" id="email" placeholder="If the email is incorrect, you will not receive a confirmation" autocomplete="email"/>
         </div>
-        <div class="field-row" style="display:contents">
-          <label class="req" for="phoneRaw" style="justify-self:end;text-align:right">UK WhatsApp Phone No:</label>
+        <div class="field-row">
+          <label class="req" for="phoneRaw">UK WhatsApp Phone No:</label>
           <div class="phone-mask">
             <input type="tel" id="phoneRaw" autocomplete="off" placeholder="+44 7XXXXXXXXX"/>
             <div class="mask-text"><span class="fixed">+44</span><span id="phoneDigits" aria-hidden="true"></span></div>
           </div>
         </div>
-        <div class="wide-note" style="grid-column:2/3;color:var(--muted);font-size:12px;margin-top:4px">If you do not have a WhatsApp number, the system will not send a confirmation.</div>
+        <div class="wide-note" style="grid-column:2/3;color:#475569;font-size:12px;margin-top:4px">If you do not have a WhatsApp number, the system will not send a confirmation.</div>
       </div>
     </section>
 
@@ -363,13 +359,12 @@
       </div>
     </section>
 
-    <!-- ===================== Payment ===================== -->
+    <!-- ===================== Payment (PayPal-only) ===================== -->
     <section class="panel">
       <div class="section">
         <p><b>Payment:</b><br>
         Please read the information below and answer each “Yes/No” question accurately so the correct amount is calculated.</p>
 
-        <!-- 1 -->
         <div class="option row">
           <div class="option-text" style="flex:1">1. Are you looking for any of the busy test centres listed below? +£20<br>
           <small>Barking, Chertsey (London), Chingford, Farnborough, Goodmayes, Greenford, High Wycombe, Hornchurch, Hounslow, Leighton Buzzard, Letchworth, Luton, Morden, Oxford, Pinner, Reading, Slough, Southall, Tolworth, Uxbridge, Wanstead, West Didsbury (Manchester)</small></div>
@@ -378,7 +373,6 @@
           </div>
         </div>
 
-        <!-- 2 -->
         <div class="option row">
           <div class="option-text" style="flex:1">2. Fast Priority Test Booking? +£100<br>
           <small>If you failed your test and have not paid the DVSA for a retest, you do not have a valid booking.</small></div>
@@ -387,7 +381,6 @@
           </div>
         </div>
 
-        <!-- 3 -->
         <div class="option row">
           <div class="option-text" style="flex:1">3. Fast Priority Test Swapping? +£50<br>
           <small>Select either booking or swapping (not both).</small></div>
@@ -396,7 +389,6 @@
           </div>
         </div>
 
-        <!-- 4 -->
         <div class="option row">
           <div class="option-text" style="flex:1">4. High-priority searching? +£20<br>
           <small>We will run a separate high-priority search and book the first suitable DVSA slot for you. Otherwise, your request stays in the standard queue.</small></div>
@@ -405,7 +397,6 @@
           </div>
         </div>
 
-        <!-- 5 -->
         <div class="option row">
           <div class="option-text" style="flex:1">5. Include weekend test slots? +£15<br>
           <small>If a weekend test cannot be found, the £15 is not refundable.</small></div>
@@ -421,27 +412,22 @@
           <input type="text" id="promoCode" placeholder="Enter promo code (optional)"/>
         </div>
 
-        <!-- Simple logos + PayPal link -->
+        <!-- Simple logos + buttons row -->
         <div class="paypal">
-          <div class="card-logos" aria-hidden="true">
+          <div class="card-logos">
             <img src="https://upload.wikimedia.org/wikipedia/commons/0/04/Visa.svg" alt="Visa">
             <img src="https://upload.wikimedia.org/wikipedia/commons/2/2a/Mastercard-logo.svg" alt="Mastercard">
             <img src="https://upload.wikimedia.org/wikipedia/commons/3/30/American_Express_logo.svg" alt="Amex">
           </div>
-
           <div style="display:flex; gap:10px;">
-            <a href="#paypal-button-container" id="paypalBtn">Pay with PayPal</a>
+            <a href="#" id="paypalBtn">Pay with PayPal</a>
           </div>
         </div>
 
-        <!-- PayPal-only -->
-        <div id="payment-section" class="payment-row">
-          <div class="pay-frame">
-            <div class="pay-actions">
-              <div id="paypal-button-container"></div>
-              <div class="small note">Submit will be enabled after the payment.</div>
-            </div>
-          </div>
+        <!-- PayPal Smart Buttons -->
+        <div style="margin-top:8px">
+          <div id="paypal-button-container"></div>
+          <div class="small note" style="margin-top:6px">Submit will be enabled after the payment.</div>
         </div>
 
         <div class="submit-row">
@@ -456,7 +442,7 @@
 
   <!-- ===================== Scripts ===================== -->
   <script>
-    /* Booking Type + constraints (swapRef compulsory only when Swap is selected) */
+    /* Booking Type + constraints */
     (function(){
       const btnBook=document.getElementById('btnBook');
       const btnSwap=document.getElementById('btnSwap');
@@ -509,8 +495,10 @@
         return null;
       }
     })();
+  </script>
 
-    /* Applicant details validation + phone */
+  <script>
+    /* Applicant details validation + phone + postcode */
     (function(){
       const dl=document.getElementById('drivingLicence');
       if(dl) dl.addEventListener('input', () => {
@@ -586,156 +574,163 @@
         if(!phoneInput.value) phoneInput.value = '+44 ';
       }
     })();
+  </script>
 
-    /* Centres: datalist with autocomplete OFF (mouse selection reliable) */
+  <script>
+    /* Centres: datalist with autocomplete OFF */
     (function(){
       document.querySelectorAll('.centre-input').forEach(inp=>{
         inp.autocomplete = 'off';
         inp.spellcheck = false;
       });
     })();
-
-    /* Multi-date pickers (restored) */
-    (function(){
-      const pad=n=>String(n).padStart(2,'0');
-      const fmt=d=>`${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()}`;
-      const iso=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-      const fromYMD=s=>{const [y,m,dd]=s.split('-').map(Number);return new Date(y,m-1,dd)};
-
-      function makeMultiDatePicker(wrapperId,inputId,dropdownId){
-        const wrapper=document.getElementById(wrapperId);
-        const input=document.getElementById(inputId);
-        const dropdown=document.getElementById(dropdownId);
-        if(!wrapper||!input||!dropdown)return;
-
-        let view=new Date();view.setDate(1);
-        const selected=new Set();
-
-        dropdown.addEventListener('mousedown',e=>e.stopPropagation());
-
-        function render(){
-          dropdown.innerHTML='';dropdown.style.display='block';
-          const header=document.createElement('div');header.style.display='flex';header.style.justifyContent='space-between';header.style.alignItems='center';header.style.marginBottom='6px';
-          const title=document.createElement('div');title.textContent=view.toLocaleString(undefined,{month:'long',year:'numeric'});
-          const nav=document.createElement('div');
-          const prev=document.createElement('button');prev.textContent='‹';
-          const next=document.createElement('button');next.textContent='›';
-          [prev,next].forEach(b=>{b.style.border='1px solid #ddd';b.style.background='#fafafa';b.style.borderRadius='4px';b.style.padding='4px 6px';b.style.cursor='pointer';b.addEventListener('mousedown',e=>e.stopPropagation())});
-          prev.onclick=()=>{view.setMonth(view.getMonth()-1);render()};
-          next.onclick=()=>{view.setMonth(view.getMonth()+1);render()};
-          nav.append(prev,next);header.append(title,nav);dropdown.append(header);
-
-          const dow=document.createElement('div');dow.style.display='grid';dow.style.gridTemplateColumns='repeat(7,1fr)';dow.style.gap='4px';
-          ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].forEach(n=>{const c=document.createElement('div');c.textContent=n;c.style.textAlign='center';c.style.padding='6px 0';c.style.fontWeight='bold';c.style.background='#f7f7f7';c.style.borderRadius='4px';dow.append(c)});
-          dropdown.append(dow);
-
-          const grid=document.createElement('div');grid.style.display='grid';grid.style.gridTemplateColumns='repeat(7,1fr)';grid.style.gap='4px';
-          const first=new Date(view.getFullYear(),view.getMonth(),1);
-          let startIndex=first.getDay();if(startIndex===0)startIndex=7;
-          for(let i=1;i<startIndex;i++){const b=document.createElement('div');b.style.color='#bbb';b.style.background='#fafafa';b.style.border='1px solid #eee';b.style.borderRadius='4px';grid.append(b)}
-          const daysInMonth=new Date(view.getFullYear(),view.getMonth()+1,0).getDate();
-          for(let d=1;d<=daysInMonth;d++){
-            const cell=document.createElement('div');cell.textContent=d;
-            cell.style.textAlign='center';cell.style.padding='6px 0';cell.style.borderRadius='4px';cell.style.border='1px solid #eee';cell.style.background='#fff';cell.style.cursor='pointer';
-            const dateObj=new Date(view.getFullYear(),view.getMonth(),d);const key=iso(dateObj);
-            if(selected.has(key)){cell.style.background='#1a73e8';cell.style.color='#fff';cell.style.borderColor='#1a73e8';cell.style.fontWeight='bold'}
-            cell.addEventListener('mousedown',e=>e.stopPropagation());
-            cell.onclick=()=>{if(selected.has(key))selected.delete(key);else selected.add(key);updateInput();render()};
-            grid.append(cell)
-          }
-          dropdown.append(grid);
-
-          const footer=document.createElement('div');footer.style.display='flex';footer.style.gap='8px';footer.style.marginTop='8px';
-          const clearBtn=document.createElement('button');clearBtn.textContent='Clear';
-          const closeBtn=document.createElement('button');closeBtn.textContent='Close';
-          [clearBtn,closeBtn].forEach(b=>{b.style.flex='1';b.style.padding='6px';b.style.border='1px solid #ddd';b.style.borderRadius='4px';b.style.cursor='pointer';b.addEventListener('mousedown',e=>e.stopPropagation())});
-          clearBtn.onclick=()=>{selected.clear();updateInput();render()};
-          closeBtn.onclick=()=>{dropdown.style.display='none'};
-          footer.append(clearBtn,closeBtn);dropdown.append(footer)
-        }
-
-        function updateInput(){
-          const sorted=Array.from(selected).sort();
-          input.value=sorted.map(s=>fmt(fromYMD(s))).join(', ')
-        }
-
-        input.addEventListener('click',e=>{e.stopPropagation();dropdown.style.display=dropdown.style.display==='block'?'none':'block';if(dropdown.style.display==='block')render()});
-        document.addEventListener('mousedown',e=>{if(!wrapper.contains(e.target))dropdown.style.display='none'})
-      }
-
-      makeMultiDatePicker('unavail','unavailInput','unavailCal');
-      makeMultiDatePicker('instr','instrInput','instrCal');
-    })();
   </script>
 
   <script>
-    /* Payment: totals + conflicts + promo (restored) */
-    (function(){
-      const groups=document.querySelectorAll('.yesno');
-      const promoInput=document.getElementById('promoCode');
-      const totalLine=document.getElementById('totalLine');
+  /* Multi-date pickers (RESTORED) */
+  (function(){
+    const pad=n=>String(n).padStart(2,'0');
+    const fmt=d=>`${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()}`;
+    const iso=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const fromYMD=s=>{const [y,m,dd]=s.split('-').map(Number);return new Date(y,m-1,dd)};
 
-      function money(n){return `£${n.toFixed(2)}`}
+    function makeMultiDatePicker(wrapperId,inputId,dropdownId){
+      const wrapper=document.getElementById(wrapperId);
+      const input=document.getElementById(inputId);
+      const dropdown=document.getElementById(dropdownId);
+      if(!wrapper||!input||!dropdown)return;
 
-      function baseSum(){
-        let sum=0;
-        document.querySelectorAll('.yesno button.selected').forEach(b=>{
-          const price=Number(b.dataset.price||0);
-          if(!isNaN(price))sum+=price;
-        });
-        return sum;
+      let view=new Date();view.setDate(1);
+      const selected=new Set();
+
+      dropdown.addEventListener('mousedown',e=>e.stopPropagation());
+
+      function updateInput(){
+        const sorted=Array.from(selected).sort();
+        input.value=sorted.map(s=>fmt(fromYMD(s))).join(', ');
       }
 
-      function promoDiscount(sum){
-        if(!promoInput)return 0;
-        const code=(promoInput.value||'').trim().toUpperCase();
-        if(!code)return 0;
-        if(code==='SAVE10')return Math.min(10,sum);
-        if(code==='SAVE20')return Math.min(20,sum);
-        if(code==='OFF10')return +(sum*0.10).toFixed(2);
-        return 0;
-      }
+      function render(){
+        dropdown.innerHTML='';dropdown.style.display='block';
+        const header=document.createElement('div');header.style.display='flex';header.style.justifyContent='space-between';header.style.alignItems='center';header.style.marginBottom='6px';
+        const title=document.createElement('div');title.textContent=view.toLocaleString(undefined,{month:'long',year:'numeric'});
+        const nav=document.createElement('div');
+        const prev=document.createElement('button');prev.textContent='‹';
+        const next=document.createElement('button');next.textContent='›';
+        [prev,next].forEach(b=>{b.style.border='1px solid #ddd';b.style.background='#fafafa';b.style.borderRadius='4px';b.style.padding='4px 6px';b.style.cursor='pointer';b.addEventListener('mousedown',e=>e.stopPropagation())});
+        prev.onclick=()=>{view.setMonth(view.getMonth()-1);render()};
+        next.onclick=()=>{view.setMonth(view.getMonth()+1);render()};
+        nav.append(prev,next);header.append(title,nav);dropdown.append(header);
 
-      function recalc(){
-        const sum=baseSum();
-        const disc=promoDiscount(sum);
-        const total=Math.max(0,sum-disc);
-        if(totalLine)totalLine.textContent=`Total: ${money(total)}`;
-      }
+        const dow=document.createElement('div');dow.style.display='grid';dow.style.gridTemplateColumns='repeat(7,1fr)';dow.style.gap='4px';
+        ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].forEach(n=>{const c=document.createElement('div');c.textContent=n;c.style.textAlign='center';c.style.padding='6px 0';c.style.fontWeight='bold';c.style.background='#f7f7f7';c.style.borderRadius='4px';dow.append(c)});
+        dropdown.append(dow);
 
-      groups.forEach(g=>{
-        g.addEventListener('click',e=>{
-          const btn=e.target.closest('button');if(!btn)return;
-          g.querySelectorAll('button').forEach(b=>{b.classList.remove('selected');b.setAttribute('aria-pressed','false')});
-          btn.classList.add('selected');btn.setAttribute('aria-pressed','true');
-          enforceConflicts();recalc();
-        });
-      });
-
-      if(promoInput){
-        promoInput.addEventListener('input',recalc);
-        promoInput.addEventListener('change',recalc);
-      }
-
-      function enforceConflicts(){
-        const options=Array.from(document.querySelectorAll('.option'));
-        const booking=options.find(o=>/Fast Priority Test Booking/i.test(o.textContent));
-        const swapping=options.find(o=>/Fast Priority Test Swapping/i.test(o.textContent));
-        if(!booking||!swapping)return;
-        const swapBtns=swapping.querySelectorAll('.yesno button');
-        const bookYes=Array.from(booking.querySelectorAll('.yesno button'))
-          .find(b=>b.textContent.trim()==='Yes')?.classList.contains('selected');
-        const swapYes=Array.from(swapping.querySelectorAll('.yesno button'))
-          .find(b=>b.textContent.trim()==='Yes')?.classList.contains('selected');
-        if(bookYes&&swapYes){
-          swapBtns.forEach(b=>{b.classList.remove('selected');b.setAttribute('aria-pressed','false')});
-          const swapNo=Array.from(swapBtns).find(b=>b.textContent.trim()==='No');
-          if(swapNo){swapNo.classList.add('selected');swapNo.setAttribute('aria-pressed','true')}
+        const grid=document.createElement('div');grid.style.display='grid';grid.style.gridTemplateColumns='repeat(7,1fr)';grid.style.gap='4px';
+        const first=new Date(view.getFullYear(),view.getMonth(),1);
+        let startIndex=first.getDay();if(startIndex===0)startIndex=7;
+        for(let i=1;i<startIndex;i++){const b=document.createElement('div');b.style.color='#bbb';b.style.background='#fafafa';b.style.border='1px solid #eee';b.style.borderRadius='4px';grid.append(b)}
+        const daysInMonth=new Date(view.getFullYear(),view.getMonth()+1,0).getDate();
+        for(let d=1;d<=daysInMonth;d++){
+          const cell=document.createElement('div');cell.textContent=d;
+          cell.style.textAlign='center';cell.style.padding='6px 0';cell.style.borderRadius='4px';cell.style.border='1px solid #eee';cell.style.background='#fff';cell.style.cursor='pointer';
+          const dateObj=new Date(view.getFullYear(),view.getMonth(),d);const key=iso(dateObj);
+          if(selected.has(key)){cell.style.background='#1a73e8';cell.style.color='#fff';cell.style.borderColor='#1a73e8';cell.style.fontWeight='bold'}
+          cell.addEventListener('mousedown',e=>e.stopPropagation());
+          cell.onclick=()=>{if(selected.has(key))selected.delete(key);else selected.add(key);updateInput();render()};
+          grid.append(cell)
         }
+        dropdown.append(grid);
+
+        const footer=document.createElement('div');footer.style.display='flex';footer.style.gap='8px';footer.style.marginTop='8px';
+        const clearBtn=document.createElement('button');clearBtn.textContent='Clear';
+        const closeBtn=document.createElement('button');closeBtn.textContent='Close';
+        [clearBtn,closeBtn].forEach(b=>{b.style.flex='1';b.style.padding='6px';b.style.border='1px solid #ddd';b.style.borderRadius='4px';b.style.cursor='pointer';b.addEventListener('mousedown',e=>e.stopPropagation())});
+        clearBtn.onclick=()=>{selected.clear();updateInput();render()};
+        closeBtn.onclick=()=>{dropdown.style.display='none'};
+        footer.append(clearBtn,closeBtn);dropdown.append(footer)
       }
 
-      recalc();
-    })();
+      input.addEventListener('click',e=>{e.stopPropagation();dropdown.style.display=dropdown.style.display==='block'?'none':'block';if(dropdown.style.display==='block')render()});
+      document.addEventListener('mousedown',e=>{if(!wrapper.contains(e.target))dropdown.style.display='none'})
+    }
+
+    makeMultiDatePicker('unavail','unavailInput','unavailCal');
+    makeMultiDatePicker('instr','instrInput','instrCal');
+  })();
+  </script>
+
+  <script>
+  /* Payment: totals + conflicts + promo (RESTORED) */
+  (function(){
+    const groups     = document.querySelectorAll('.yesno');
+    const promoInput = document.getElementById('promoCode');
+    const totalLine  = document.getElementById('totalLine');
+
+    function money(n){ return `£${n.toFixed(2)}`; }
+
+    function baseSum(){
+      let sum = 0;
+      document.querySelectorAll('.yesno button.selected').forEach(b=>{
+        const price = Number(b.dataset.price||0);
+        if (!isNaN(price)) sum += price;
+      });
+      return sum;
+    }
+
+    function promoDiscount(sum){
+      if (!promoInput) return 0;
+      const code = (promoInput.value||'').trim().toUpperCase();
+      if (!code) return 0;
+      if (code === 'SAVE10') return Math.min(10, sum);
+      if (code === 'SAVE20') return Math.min(20, sum);
+      if (code === 'OFF10')  return +(sum*0.10).toFixed(2);
+      return 0;
+    }
+
+    function recalc(){
+      const sum   = baseSum();
+      const disc  = promoDiscount(sum);
+      const total = Math.max(0, sum - disc);
+      if (totalLine) totalLine.textContent = `Total: ${money(total)}`;
+    }
+
+    groups.forEach(g=>{
+      g.addEventListener('click', e=>{
+        const btn = e.target.closest('button'); if (!btn) return;
+        g.querySelectorAll('button').forEach(b=>{
+          b.classList.remove('selected'); b.setAttribute('aria-pressed','false');
+        });
+        btn.classList.add('selected'); btn.setAttribute('aria-pressed','true');
+        enforceConflicts();
+        recalc();
+      });
+    });
+
+    if (promoInput){
+      promoInput.addEventListener('input',  recalc);
+      promoInput.addEventListener('change', recalc);
+    }
+
+    function enforceConflicts(){
+      const options   = Array.from(document.querySelectorAll('.option'));
+      const booking   = options.find(o=>/Fast Priority Test Booking/i.test(o.textContent));
+      const swapping  = options.find(o=>/Fast Priority Test Swapping/i.test(o.textContent));
+      if (!booking || !swapping) return;
+
+      const swapBtns = swapping.querySelectorAll('.yesno button');
+      const bookYes  = Array.from(booking .querySelectorAll('.yesno button')).find(b=>b.textContent.trim()==='Yes')?.classList.contains('selected');
+      const swapYes  = Array.from(swapping.querySelectorAll('.yesno button')).find(b=>b.textContent.trim()==='Yes')?.classList.contains('selected');
+
+      if (bookYes && swapYes){
+        swapBtns.forEach(b=>{b.classList.remove('selected'); b.setAttribute('aria-pressed','false');});
+        const swapNo = Array.from(swapBtns).find(b=>b.textContent.trim()==='No');
+        if (swapNo){ swapNo.classList.add('selected'); swapNo.setAttribute('aria-pressed','true'); }
+      }
+    }
+
+    recalc();
+  })();
   </script>
 
   <script>
@@ -796,7 +791,6 @@
     })();
   </script>
 
-  <!-- API + UI wiring -->
   <script>
     (() => {
       const API_TOKEN = 'YOUR_REAL_API_TOKEN';
@@ -992,7 +986,7 @@
   </script>
 
   <script>
-  /* ===== Frontend polish: autosave, success strip, better errors, double-submit guard ===== */
+  /* ===== Frontend polish: autosave, success strip, double-submit guard ===== */
   (() => {
     const API_TOKEN = 'YOUR_REAL_API_TOKEN';
     const STORE_KEY = 'dvsa_form_autosave_v1';
@@ -1141,7 +1135,7 @@
   </script>
 
   <script>
-  /* ===== Preflight form check (PayPal-only) ===== */
+  /* ===== Preflight form check (no markup changes) ===== */
   (() => {
     const $  = s => document.querySelector(s);
 
@@ -1238,10 +1232,10 @@
       const allChecked = agreements.every(x=>x && x.checked);
       if(!allChecked) errs.push('Please confirm all agreements and consent.');
 
-      // Require PayPal payment first
-      if(!document.getElementById('payStatus')?.textContent.includes('Paid')){
-        errs.push('Please complete payment with PayPal first.');
-      }
+      // Require payment (PayPal-only)
+      const paid = document.getElementById('payStatus')?.textContent.includes('Paid');
+      if(!paid){ errs.push('Please complete payment first (PayPal).'); }
+
       return errs;
     }
 
@@ -1263,18 +1257,20 @@
   })();
   </script>
 
-  <!-- PayPal SDK (SANDBOX) -->
+  <!-- PayPal SDK (SANDBOX). Swap with your LIVE client-id for production -->
   <script src="https://www.paypal.com/sdk/js?client-id=AW5rAuiuJi7W30wj1pgZY2o-47Gy79rY9RjX1YZOWKxQkkaQ23Dv5Rk9AW4MvCZ-1UldpFxf-01rGKvV&currency=GBP&components=buttons&intent=capture"></script>
 
-  <!-- PayPal wiring -->
   <script>
+  /* PayPal Smart Buttons wiring */
   (function(){
     function amountFromTotalLine(){
       const txt = (document.getElementById('totalLine')?.textContent || '');
       const m   = txt.match(/£([\d.]+)/);
       const v   = m ? parseFloat(m[1]) : 0;
+      // ensure string with 2 decimals
       return v.toFixed(2);
     }
+
     function markPaid(){
       const pill = document.getElementById('payStatus');
       if (pill){ pill.textContent='Payment: Paid'; pill.classList.add('paid'); }
@@ -1282,7 +1278,6 @@
       if (submitBtn){ submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
     }
 
-    // Render the Smart Buttons
     if (window.paypal && document.getElementById('paypal-button-container')){
       paypal.Buttons({
         style: { layout: 'vertical', shape: 'rect' },
@@ -1306,13 +1301,14 @@
       }).render('#paypal-button-container');
     }
 
-    // Make the link jump to the PayPal button
+    // Make the "Pay with PayPal" link jump to the button
     const link = document.getElementById('paypalBtn');
     if (link){
       link.addEventListener('click', function(e){
-        // default anchor behavior is fine; add gentle highlight
+        e.preventDefault();
         const el = document.getElementById('paypal-button-container');
         if (el){
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
           el.style.outline='3px solid #ffe08a';
           setTimeout(()=>{ el.style.outline=''; }, 1200);
         }
