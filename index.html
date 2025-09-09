@@ -1531,6 +1531,43 @@
 
   <!-- PayPal SDK (SANDBOX) -->
 <script src="https://www.paypal.com/sdk/js?client-id=AW5rAuiuJi7W30wj1pgZY2o-47Gy79rY9RjX1YZOWKxQkkaQ23Dv5Rk9AW4MvCZ-1UldpFxf-01rGKvV&currency=GBP&components=buttons&intent=capture"></script>
+<script>
+  (function () {
+    if (!window.paypal) return;
+
+    function amountGBP() {
+      const txt = (document.getElementById('totalLine')?.textContent || '');
+      const m = txt.match(/£([\d.]+)/);
+      return (m ? m[1] : '0.00') || '0.00';
+    }
+
+    paypal.Buttons({
+      style: { layout: 'vertical', color: 'gold', shape: 'rect', label: 'paypal' },
+
+      // Simple client-side order creation for sandbox/live
+      createOrder: function (data, actions) {
+        return actions.order.create({
+          purchase_units: [{ amount: { currency_code: 'GBP', value: amountGBP() } }]
+        });
+      },
+
+      // Capture payment, then unlock the Submit button
+      onApprove: function (data, actions) {
+        return actions.order.capture().then(function () {
+          const pill = document.getElementById('payStatus');
+          if (pill) { pill.textContent = 'Payment: Paid'; pill.classList.add('paid'); }
+          const submitBtn = document.getElementById('submitBtn');
+          if (submitBtn) { submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
+        });
+      },
+
+      onError: function (err) {
+        console.error(err);
+        if (typeof toast === 'function') toast('PayPal error: ' + (err?.message || err), false);
+      }
+    }).render('#paypal-button-container');
+  })();
+</script>
 
   <script>
   (function () {
