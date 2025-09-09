@@ -1597,6 +1597,37 @@
   })();
   </script>
 
+  <!-- ✅ PayPal Buttons initializer (ADDED) -->
+  <script>
+  (function(){
+    function ppAmount(){
+      const txt = (document.getElementById('totalLine')?.textContent || '');
+      const m = txt.match(/£([\d.]+)/);
+      const pounds = m ? parseFloat(m[1]) : 0;
+      return (Math.max(1, pounds || 0)).toFixed(2); // GBP string (min £1)
+    }
+    function markPaid(){
+      const pill = document.getElementById('payStatus');
+      if (pill){ pill.textContent = 'Payment: Paid'; pill.classList.add('paid'); }
+      const submit = document.getElementById('submitBtn');
+      if (submit){ submit.disabled = false; submit.classList.add('enabled'); }
+    }
+    document.addEventListener('DOMContentLoaded', function(){
+      if (!window.paypal || !paypal.Buttons) return;
+      const container = document.getElementById('paypal-button-container');
+      if (!container) return;
+      paypal.Buttons({
+        style: { layout: 'horizontal', height: 40 },
+        createOrder: (data, actions) => actions.order.create({
+          purchase_units: [{ amount: { currency_code: 'GBP', value: ppAmount() } }]
+        }),
+        onApprove: async (data, actions) => { try{ await actions.order.capture(); }catch(_){} markPaid(); },
+        onError: (err) => { console.error('PayPal error:', err); }
+      }).render(container);
+    });
+  })();
+  </script>
+
   <!-- Real Payments Wiring (Flow A: submit -> pay) -->
   <script>
   (function(){
