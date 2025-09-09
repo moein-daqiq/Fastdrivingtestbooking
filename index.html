@@ -497,11 +497,12 @@
           </div>
 
           <div style="display:flex; gap:10px;">
-            <a href="#" id="stripeBtn">Pay with Stripe</a>
+            <a href="#" id="paypalBtn">Pay with PayPal</a>
+            <!-- Stripe button removed in PayPal-only mode -->
           </div>
         </div>
 
-        <!-- Payment Methods (side-by-side) -->
+        <!-- Payment Methods (PayPal only) -->
         <div id="payment-section" class="payment-row">
           <div class="pay-frame paypal">
             <div class="pay-methods">
@@ -512,15 +513,7 @@
               <div class="small note">Pay first with PayPal. After success, the status will turn <strong>Paid</strong>, then you can submit.</div>
             </div>
           </div>
-          <div class="pay-frame stripe">
-            <div class="pay-methods">
-              <label><input type="radio" name="payMethod" value="stripe"> Card (Stripe)</label>
-            </div>
-            <div class="pay-actions">
-              <div id="stripeCardInline"></div>
-              <div class="small note">With Stripe, you can submit first. On submit we’ll take you to Stripe with the exact total.</div>
-            </div>
-          </div>
+          <!-- Stripe frame removed -->
         </div>
 
         <div class="submit-row">
@@ -627,7 +620,7 @@
       function markValidity(input, isValid, message){
         const label = findLabelFor(input);
         const hasVal = (input.value || '').trim() !== '';
-        input.classList.toggle('error, !isValid && hasVal');
+        input.classList.toggle('error', !isValid && hasVal);
         input.setAttribute('aria-invalid', (!isValid && hasVal) ? 'true' : 'false');
         if(label){
           if(!isValid && hasVal){
@@ -956,6 +949,7 @@
           }
         }
       }
+
       const indicator=document.getElementById('paymentIndicator');
       function showIndicator(success,method){
         if(!indicator)return;
@@ -965,14 +959,16 @@
         indicator.className='indicator '+(success?'success':'fail');
         setTimeout(()=>{indicator.style.opacity=0;setTimeout(()=>{indicator.style.display='none'},1000)},2500);
       }
+
+      // PayPal CTA (scrolls to real buttons)
       const paypalBtn=document.getElementById('paypalBtn');
       if(paypalBtn)paypalBtn.addEventListener('click',e=>{
         e.preventDefault();
+        const target = document.getElementById('paypal-button-container');
+        if(target){ target.scrollIntoView({behavior:'smooth', block:'center'}); }
         showIndicator(true,'PayPal');
-        document.getElementById('payStatus').textContent='Payment: Paid';
-        document.getElementById('payStatus').classList.add('paid');
-        gateSubmit();
       });
+
       const submitBtn=document.getElementById('submitBtn');
       if(submitBtn)submitBtn.addEventListener('click',e=>{
         const swapSelected = document.getElementById('btnSwap')?.classList.contains('selected');
@@ -1218,14 +1214,12 @@
           if (id) {
             localStorage.setItem('dvsa_last_search_id', id);
             ensureStopButton();
-            // Fire event so Stripe flow can auto-redirect if needed
-            document.dispatchEvent(new CustomEvent('dvsa:search-created', { detail: { search_id: id }}));
           }
           toast(id ? `Search created: ${id}` : 'Search created', true);
           console.log('Gateway response:', j);
         } catch (err) {
           console.error(err);
-          toast(`API error: ${err.message || err}`, false);
+          toast(`API error: ${err.message || err}, false`);
         } finally {
           btn.disabled = false; btn.classList.add('enabled');
         }
@@ -1503,7 +1497,7 @@
         if(tp.length===0){ errs.push('Booking selected: enter your theory pass number.'); markErr(document.getElementById('theoryPass'),'Enter your theory pass number.'); }
       }
 
-      // PayPal must be paid; Stripe can submit first
+      // PayPal must be paid
       const chosen = (document.querySelector('input[name="payMethod"]:checked')||{}).value;
       if(chosen==='paypal'){
         if(!document.getElementById('payStatus')?.textContent.includes('Paid')){
@@ -1531,164 +1525,79 @@
   })();
   </script>
 
-  <!-- Stripe.js -->
-  <script src="https://js.stripe.com/v3/"></script>
-
   <!-- PayPal SDK (SANDBOX) -->
   <script src="https://www.paypal.com/sdk/js?client-id=AW5rAuiuJi7W30wj1pgZY2o-47Gy79rY9RjX1YZOWKxQkkaQ23Dv5Rk9AW4MvCZ-1UldpFxf-01rGKvV&currency=GBP&components=buttons&intent=capture"></script>
 
-  <!-- PayPal Buttons initializer (ADDED) -->
+  <!-- Real PayPal Buttons -->
   <script>
-    (function () {
-      if (!window.paypal) return;
+  (function () {
+    const AUTH = 'YOUR_REAL_API_TOKEN'; // optional if your API requires it
 
-      function amountGBP() {
-        const txt = (document.getElementById('totalLine')?.textContent || '');
-        const m = txt.match(/£([\d.]+)/);
-        const pounds = m ? parseFloat(m[1]) : 0;
-        const val = Math.max(1.00, pounds); // PayPal can't take £0.00
-        return val.toFixed(2);
-      }
+    function getTotalGBP() {
+      const txt = (document.getElementById('totalLine')?.textContent || '');
+      const m = txt.match(/£([\d.]+)/);
+      const pounds = m ? m[1] : '0.00';
+      return Number.parseFloat(pounds || '0').toFixed(2);
+    }
+
+    function markPaidUI() {
+      const pill = document.getElementById('payStatus');
+      if (pill) { pill.textContent = 'Payment: Paid'; pill.classList.add('paid'); }
+      const submitBtn = document.getElementById('submitBtn');
+      if (submitBtn) { submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
+    }
+
+    const container = document.getElementById('paypal-button-container');
+    if (window.paypal && container) {
+      const searchId = localStorage.getItem('dvsa_last_search_id');
 
       paypal.Buttons({
-        style: { layout: 'vertical', color: 'gold', shape: 'rect', label: 'paypal' },
-        createOrder: function (data, actions) {
+        style: { layout: 'vertical', shape: 'rect' },
+        createOrder: (data, actions) => {
+          const value = getTotalGBP();
           return actions.order.create({
-            purchase_units: [{ amount: { currency_code: 'GBP', value: amountGBP() } }]
+            purchase_units: [{
+              amount: { currency_code: 'GBP', value },
+              description: 'FastDrivingTestFinder booking'
+            }],
+            application_context: { shipping_preference: 'NO_SHIPPING' }
           });
         },
-        onApprove: function (data, actions) {
-          return actions.order.capture().then(function () {
-            const pill = document.getElementById('payStatus');
-            if (pill) { pill.textContent = 'Payment: Paid'; pill.classList.add('paid'); }
-            const submitBtn = document.getElementById('submitBtn');
-            if (submitBtn) { submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
-            if (typeof toast === 'function') toast('PayPal payment captured', true);
-          });
+        onApprove: async (data, actions) => {
+          try {
+            const details = await actions.order.capture();
+
+            // (Optional) notify your backend
+            try {
+              await fetch(`${API_BASE}/pay/paypal-capture`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${AUTH}`
+                },
+                body: JSON.stringify({
+                  search_id: searchId ? Number(searchId) : null,
+                  order_id: data.orderID,
+                  capture: details
+                })
+              });
+            } catch (e) {
+              console.warn('Notify backend failed (ok for initial tests):', e);
+            }
+
+            markPaidUI();
+            if (typeof toast === 'function') toast('PayPal payment completed ✔', true);
+          } catch (err) {
+            console.error(err);
+            if (typeof toast === 'function') toast('PayPal error: ' + (err?.message || err), false);
+          }
         },
-        onError: function (err) {
+        onError: (err) => {
           console.error(err);
           if (typeof toast === 'function') toast('PayPal error: ' + (err?.message || err), false);
         }
       }).render('#paypal-button-container');
-    })();
-  </script>
-
-  <script>
-  (function () {
-    // Replace with your real Stripe *publishable* key (looks like pk_test_...)
-    const STRIPE_PK = "pk_test_51S4HI5KDKDIajo9Ar7Cdz4BcgBBpcrPKGnWvxEqucT1rmJD0REiPnnX9pbEMxp9F90zZJHLbRMcxrSRq9ZpGshRA00zK3mO0L0"; // Use pk_test_xxx for testing
-
-    function toast(msg, ok = true) {
-      let t = document.getElementById('apiToast');
-      if (!t) {
-        t = document.createElement('div');
-        t.id = 'apiToast';
-        t.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.15);transition:opacity .3s';
-        document.body.appendChild(t);
-      }
-      t.style.background = ok ? '#ecfdf5' : '#fef2f2';
-      t.style.color      = ok ? '#065f46' : '#991b1b';
-      t.textContent = msg;
-      t.style.opacity = '1';
-      setTimeout(()=>{t.style.opacity='0'}, 3500);
     }
-
-    function amountFromTotalLine() {
-      const txt = (document.getElementById('totalLine')?.textContent || '');
-      const m = txt.match(/£([\d.]+)/);
-      const pounds = m ? parseFloat(m[1]) : 0;
-      return Math.max(100, Math.round(pounds * 100)); // min £1.00
-    }
-
-    const btn = document.getElementById('stripeBtn');
-    if (!btn) return;
-
-    btn.addEventListener('click', async (e) => {
-      e.preventDefault();
-
-      const searchId = localStorage.getItem('dvsa_last_search_id');
-      if (!searchId) {
-        toast('Please submit the form first so we can create your search.', false);
-        return;
-      }
-
-      const amount_cents = amountFromTotalLine();
-
-      try {
-        const r = await fetch(`${API_BASE}/pay/create-checkout`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            search_id: Number(searchId),
-            amount_cents,
-            currency: 'gbp'
-          })
-        });
-        const j = await r.json();
-        if (!r.ok) throw new Error(j?.detail || JSON.stringify(j));
-
-        const stripe = Stripe(STRIPE_PK);
-        const res = await stripe.redirectToCheckout({ sessionId: j.session_id });
-        if (res.error) throw new Error(res.error.message || 'Stripe redirection failed');
-      } catch (err) {
-        console.error(err);
-        toast('Stripe error: ' + (err?.message || err), false);
-      }
-    });
-  })();
-  </script>
-
-  <!-- Real Payments Wiring (Flow A: submit -> pay) -->
-  <script>
-  (function(){
-    const AUTH = (typeof API_TOKEN !== 'undefined' ? API_TOKEN : 'YOUR_REAL_API_TOKEN');
-    const STRIPE_PK_CONST = (typeof STRIPE_PK !== 'undefined' ? STRIPE_PK : 'pk_live_REPLACE_THIS_WITH_YOUR_KEY');
-
-    async function redirectToStripeCheckout(searchId){
-      const el = document.getElementById('grandTotal') || document.querySelector('[data-total]');
-      let amount_cents = 0;
-      if(el){
-        const m = String(el.textContent||'').match(/([\d,.]+)/);
-        const pounds = m ? parseFloat(m[1].replace(/,/g,'')) : 0;
-        amount_cents = Math.round(pounds*100);
-      }
-
-      const r = await fetch(`${API_BASE}/pay/create-checkout`, {
-        method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':`Bearer ${AUTH}`},
-        body: JSON.stringify({ search_id: Number(searchId), amount_cents, currency:'gbp' })
-      });
-      const j = await r.json();
-      if(!r.ok) throw new Error(j?.detail || JSON.stringify(j));
-
-      const stripe = Stripe(STRIPE_PK_CONST);
-      const res = await stripe.redirectToCheckout({ sessionId: j.session_id });
-      if(res.error) throw new Error(res.error.message || 'Stripe redirection failed');
-    }
-
-    window.__PAYMENT_HELPERS__ = { redirectToStripeCheckout };
-  })();
-  </script>
-
-  <!-- PayPal SDK (commented out to avoid 400 until you add a real client id) -->
-
-
-  <script>
-  (function(){
-    document.addEventListener('dvsa:search-created', async function(e){
-      const chosen = (document.querySelector('input[name="payMethod"]:checked')||{}).value;
-      const pill = document.getElementById('payStatus');
-      if(chosen==='stripe' && pill && !pill.textContent.includes('Paid')){
-        try{
-          const sid = e.detail && e.detail.search_id;
-          await window.__PAYMENT_HELPERS__.redirectToStripeCheckout(sid);
-        }catch(err){
-          console.error(err);
-          if(typeof toast==='function'){ toast(err.message || 'Stripe redirect failed', false); }
-        }
-      }
-    });
   })();
   </script>
 </body>
