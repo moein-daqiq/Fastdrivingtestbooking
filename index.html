@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!DOCTYPE html> 
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -543,7 +543,7 @@
         function normalize(){
           let digits = phoneInput.value.replace(/\D/g,'');
           if(digits.startsWith('44')) digits = digits.slice(2);
-          if(digits.startsWith('0')) digits = digits.slice(1);
+          if(digits.startsWith('0'))  digits = digits.slice(1);
           digits = digits.slice(0,10);
           phoneInput.value = digits.length ? ('+44 ' + digits) : '+44';
           const ok = digits.length === 10;
@@ -1078,7 +1078,7 @@
   <script src="https://www.paypal.com/sdk/js?client-id=AW5rAuiuJi7W30wj1pgZY2o-47Gy79rY9RjX1YZOWKxQkkaQ23Dv5Rk9AW4MvCZ-1UldpFxf-01rGKvV&currency=GBP&components=buttons&intent=capture&enable-funding=card"></script>
 
   <script>
-  /* PayPal Smart Buttons wiring — gold PayPal + Card side-by-side */
+  /* PayPal Smart Buttons wiring — gold PayPal + Card side-by-side (now with server verify) */
   (function(){
     function amountFromTotalLine(){
       const txt = (document.getElementById('totalLine')?.textContent || '');
@@ -1105,10 +1105,27 @@
             purchase_units: [{ amount: { currency_code: 'GBP', value } }]
           });
         },
-        onApprove: function(_data, actions){
-          return actions.order.capture().then(function(){
+        onApprove: async function(data){
+          try{
+            const resp = await fetch(`${API_BASE}/pay/paypal-capture-verify`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                order_id: data.orderID,
+                expected_gbp: amountFromTotalLine()
+              })
+            });
+            if(!resp.ok){
+              const txt = await resp.text();
+              throw new Error(txt || `HTTP ${resp.status}`);
+            }
             markPaid();
-          });
+          }catch(err){
+            console.error(err);
+            if (typeof toast === 'function'){
+              toast('PayPal verification error: ' + (err?.message || err), false);
+            }
+          }
         },
         onError: function(err){
           console.error(err);
