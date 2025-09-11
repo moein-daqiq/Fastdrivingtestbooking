@@ -307,4 +307,110 @@ def pay_cancel():
 # ------------------------------------------------------------------------------
 
 # No `if __name__ == "__main__":` block needed, but you can add it if you prefer.
+# ==== PayPal LIVE capture + verify (FastAPI) ====
+import os
+import requests
+from fastapi import HTTPException
+
+PAYPAL_CLIENT_ID = os.environ.get("PAYPAL_CLIENT_ID", "")
+PAYPAL_SECRET    = os.environ.get("PAYPAL_SECRET", "")
+
+def _paypal_access_token() -> str:
+    if not PAYPAL_CLIENT_ID or not PAYPAL_SECRET:
+        raise HTTPException(status_code=500, detail="PayPal env vars missing")
+    r = requests.post(
+        "https://api-m.paypal.com/v1/oauth2/token",
+        data={"grant_type": "client_credentials"},
+        headers={"Accept": "application/json", "Accept-Language": "en_US"},
+        auth=(PAYPAL_CLIENT_ID, PAYPAL_SECRET),
+        timeout=20,
+    )
+    if not r.ok:
+        raise HTTPException(status_code=500, detail="PayPal OAuth failed")
+    return r.json()["access_token"]
+
+@app.post("/api/pay/paypal-capture-verify")
+def paypal_capture_verify(payload: dict):
+    """
+    Body: { "order_id": "<paypal order id>", "expected_gbp": "12.34" }
+    Returns 200 only if the order is COMPLETED and GBP amount matches.
+    """
+    order_id = (payload or {}).get("order_id")
+    expected = (payload or {}).get("expected_gbp")
+    if not order_id:
+        raise HTTPException(status_code=400, detail="order_id required")
+
+    token = _paypal_access_token()
+
+    # 1) Try to CAPTURE
+    cap = requests.post(
+        f"https://api-m.paypal.com/v2/checkout/orders/{order_id}/capture",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "PayPal-Request-Id": order_id,  # idempotency
+        },
+        timeout=30,
+    )
+    data = cap.json()
+
+    # If already captured, fall back to GET the order
+    if not cap.ok:
+        reason = (data.get("details", [{}])[0].get("issue")
+                  if isinstance(data, dict) else "")
+        if reason == "ORDER_ALREADY_CAPTURED":
+            getr = requests.get(
+                f"https://api-m.paypal.com/v2/checkout/orders/{order_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=20,
+            )
+            if not getr.ok:
+                raise HTTPException(status_code=400, detail=getr.text)
+            data = getr.json()
+        else:
+            raise HTTPException(status_code=400, detail=data)
+
+    # 2) Verify status + amount (GBP)
+    status = data.get("status")
+    if status != "COMPLETED":
+        raise HTTPException(status_code=400, detail=f"Unexpected status: {status}")
+
+    pu = (data.get("purchase_units") or [None])[0] or {}
+    captures = ((pu.get("payments") or {}).get("captures")) or []
+    total = 0.0
+    currency = "GBP"
+
+    if captures:
+        for c in captures:
+            amt = c.get("amount") or {}
+            currency = amt.get("currency_code", currency)
+            try:
+                total += float(amt.get("value") or 0)
+            except Exception:
+                pass
+    else:
+        amt = pu.get("amount") or {}
+        currency = amt.get("currency_code", currency)
+        try:
+            total = float(amt.get("value") or 0)
+        except Exception:
+            total = 0.0
+
+    if currency != "GBP":
+        raise HTTPException(status_code=400, detail=f"Unexpected currency: {currency}")
+
+    if expected:
+        try:
+            if round(float(expected), 2) != round(total, 2):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Amount mismatch: got {total:.2f}, expected {float(expected):.2f}"
+                )
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid expected_gbp")
+
+    return {"ok": True, "order_id": order_id, "status": status,
+            "amount": f"{total:.2f}", "currency": currency}
+# ==== /PayPal ====
+
 
