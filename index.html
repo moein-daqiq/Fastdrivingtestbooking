@@ -14,6 +14,9 @@
   <!-- Single source of truth for API URL — do not redefine elsewhere -->
   <script>var API_BASE = "https://api.fastdrivingtestfinder.co.uk/api";</script>
 
+  <!-- Clear any previously autosaved draft so fields show placeholders, not old data -->
+  <script>(function(){try{localStorage.removeItem('dvsa_form_autosave_v1');}catch(e){}})();</script>
+
   <style>
     :root{
       --line:#e5e7eb; --ink:#0f172a; --muted:#475569;
@@ -24,11 +27,8 @@
       --tint-slate: rgba(15,23,42,.033);
     }
 
-    body{
-      margin:0;
-      font-family:"Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif;
-      background:#f7fafc;color:var(--ink);line-height:1.45;
-    }
+    body{ margin:0;font-family:"Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif;
+      background:#f7fafc;color:var(--ink);line-height:1.45; }
     .wrap{max-width:760px;margin:10px auto;background:#fff;border:1px solid var(--line);
       box-shadow:0 2px 16px rgba(15,23,42,.06)}
 
@@ -184,44 +184,35 @@
     <section id="applicant-details" class="panel">
       <div class="row heading"><label class="small">Applicant Details:</label></div>
 
-      <div class="fields" style="display:grid;grid-template-columns:200px 1fr;column-gap:16px;row-gap:10px;align-items:center">
-        <div class="field-row">
-          <label class="req" for="surname">Surname(s):</label>
-          <input type="text" id="surname" placeholder="Exactly as shown on your driving licence (field 1)"/>
+      <!-- EXACT two-column label/input grid to match screenshot -->
+      <div class="fields" style="display:grid;grid-template-columns:220px 1fr;column-gap:16px;row-gap:10px;align-items:center">
+        <label class="req" for="surname">Surname(s):</label>
+        <input type="text" id="surname" placeholder="Exactly as shown on your driving licence (field 1)"/>
+
+        <label class="req" for="firstname">First and Middle Name(s):</label>
+        <input type="text" id="firstname" placeholder="Exactly as shown on your driving licence (field 2)"/>
+
+        <label class="req" for="drivingLicence">Driving Licence No:</label>
+        <input type="text" id="drivingLicence" placeholder="FIRST 16 CHARACTERS ONLY (EXCLUDE THE LAST 2)" maxlength="16"/>
+
+        <label class="req" for="address">Address:</label>
+        <input type="text" id="address" placeholder="House number and street name"/>
+
+        <label for="town">Town/City:</label>
+        <input type="text" id="town" placeholder="Town/City"/>
+
+        <label class="req" for="postcode">Postcode:</label>
+        <input type="text" id="postcode" placeholder="UK postcode (e.g., SW1A 1AA)" inputmode="text" autocomplete="postal-code"/>
+
+        <label class="req" for="email">Email Address:</label>
+        <input type="email" id="email" placeholder="If the email is incorrect, you will not receive a confirmation" autocomplete="email"/>
+
+        <label class="req" for="phoneRaw">UK WhatsApp Phone No:</label>
+        <div class="phone-mask">
+          <input type="tel" id="phoneRaw" autocomplete="off" placeholder="+44"/>
+          <div class="mask-text"><span class="fixed">+44</span><span id="phoneDigits" aria-hidden="true"></span></div>
         </div>
-        <div class="field-row">
-          <label class="req" for="firstname">First and Middle Name(s):</label>
-          <input type="text" id="firstname" placeholder="Exactly as shown on your driving licence (field 2)"/>
-        </div>
-        <div class="field-row">
-          <label class="req" for="drivingLicence">Driving Licence No:</label>
-          <!-- placeholder updated to match screenshot (UPPERCASE) -->
-          <input type="text" id="drivingLicence" placeholder="FIRST 16 CHARACTERS ONLY (EXCLUDE THE LAST 2)" maxlength="16"/>
-        </div>
-        <div class="field-row">
-          <label class="req" for="address">Address:</label>
-          <input type="text" id="address" placeholder="House number and street name"/>
-        </div>
-        <div class="field-row">
-          <label for="town">Town/City:</label>
-          <input type="text" id="town" placeholder="Town/City"/>
-        </div>
-        <div class="field-row">
-          <label class="req" for="postcode">Postcode:</label>
-          <input type="text" id="postcode" placeholder="UK postcode (e.g., SW1A 1AA)" inputmode="text" autocomplete="postal-code"/>
-        </div>
-        <div class="field-row">
-          <label class="req" for="email">Email Address:</label>
-          <input type="email" id="email" placeholder="If the email is incorrect, you will not receive a confirmation" autocomplete="email"/>
-        </div>
-        <div class="field-row">
-          <label class="req" for="phoneRaw">UK WhatsApp Phone No:</label>
-          <div class="phone-mask">
-            <!-- placeholder + default now exactly “+44” -->
-            <input type="tel" id="phoneRaw" autocomplete="off" placeholder="+44"/>
-            <div class="mask-text"><span class="fixed">+44</span><span id="phoneDigits" aria-hidden="true"></span></div>
-          </div>
-        </div>
+
         <div class="wide-note" style="grid-column:2/3;color:#475569;font-size:12px;margin-top:4px">If you do not have a WhatsApp number, the system will not send a confirmation.</div>
       </div>
     </section>
@@ -377,7 +368,6 @@
         <p><b>Payment:</b><br>
         Please read the information below and answer each “Yes/No” question accurately so the correct amount is calculated.</p>
 
-        <!-- Only 1–2 kept, £30 each -->
         <div class="option row">
           <div class="option-text" style="flex:1">1. High-priority searching? +£30<br>
           <small>We will run a separate high-priority search and book the first suitable DVSA slot for you. Otherwise, your request stays in the standard queue.</small></div>
@@ -401,7 +391,6 @@
           <input type="text" id="promoCode" placeholder="Enter promo code (optional)"/>
         </div>
 
-        <!-- PayPal Smart Buttons (gold PayPal + Card side-by-side) -->
         <div class="pp-row">
           <div id="paypal-gold" class="pp-col"></div>
           <div id="paypal-card" class="pp-col"></div>
@@ -543,7 +532,7 @@
         function normalize(){
           let digits = phoneInput.value.replace(/\D/g,'');
           if(digits.startsWith('44')) digits = digits.slice(2);
-          if(digits.startsWith('0'))  digits = digits.slice(1);
+          if(digits.startsWith('0')) digits = digits.slice(1);
           digits = digits.slice(0,10);
           phoneInput.value = digits.length ? ('+44 ' + digits) : '+44';
           const ok = digits.length === 10;
@@ -705,7 +694,14 @@
       const busy = busyCentresSurcharge();
       const gross = yesno + bookSwap + busy;
       const disc = promoDiscount(gross);
-      const total = Math.max(0, gross - disc);
+      let total = Math.max(0, gross - disc);
+
+      // Enforce minimums
+      const isBook = document.getElementById('btnBook')?.classList.contains('selected');
+      const isSwap = document.getElementById('btnSwap')?.classList.contains('selected');
+      if (isBook) total = Math.max(150, total);
+      if (isSwap) total = Math.max(70, total);
+
       if (totalLine) totalLine.textContent = `Total: ${money(total)}`;
     }
 
@@ -772,7 +768,6 @@
         setTimeout(()=>{ t.style.opacity='0' }, 3500);
       };
 
-      // Small "API ✓" badge next to subtitle when health passes
       async function healthCheck() {
         try {
           const r = await fetch(`${API_BASE}/health`);
@@ -792,7 +787,6 @@
         return false;
       }
 
-      // Create a floating "Stop searching" button (appears when a search id exists)
       function ensureStopButton() {
         if (document.getElementById('stopSearchBtn')) return;
         const btn = document.createElement('button');
@@ -1078,7 +1072,7 @@
   <script src="https://www.paypal.com/sdk/js?client-id=AW5rAuiuJi7W30wj1pgZY2o-47Gy79rY9RjX1YZOWKxQkkaQ23Dv5Rk9AW4MvCZ-1UldpFxf-01rGKvV&currency=GBP&components=buttons&intent=capture&enable-funding=card"></script>
 
   <script>
-  /* PayPal Smart Buttons wiring — gold PayPal + Card side-by-side (now with server verify) */
+  /* PayPal Smart Buttons wiring — gold PayPal + Card side-by-side */
   (function(){
     function amountFromTotalLine(){
       const txt = (document.getElementById('totalLine')?.textContent || '');
@@ -1094,38 +1088,36 @@
       if (submitBtn){ submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
     }
 
+    function requireBookingTypeOrReject(){
+      const isBook = document.getElementById('btnBook')?.classList.contains('selected');
+      const isSwap = document.getElementById('btnSwap')?.classList.contains('selected');
+      if (!isBook && !isSwap){
+        if (typeof toast === 'function'){
+          toast('Please select Book (£150) or Swap (£70) first.', false);
+        }
+        return false;
+      }
+      return true;
+    }
+
     function renderPayPal(){
       if (!window.paypal) return;
 
       const common = {
         style: { layout: 'vertical', shape: 'rect', height: 45, tagline: false },
         createOrder: function(_data, actions){
+          if (!requireBookingTypeOrReject()){
+            return Promise.reject(new Error('booking type required'));
+          }
           const value = amountFromTotalLine();
           return actions.order.create({
             purchase_units: [{ amount: { currency_code: 'GBP', value } }]
           });
         },
-        onApprove: async function(data){
-          try{
-            const resp = await fetch(`${API_BASE}/pay/paypal-capture-verify`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                order_id: data.orderID,
-                expected_gbp: amountFromTotalLine()
-              })
-            });
-            if(!resp.ok){
-              const txt = await resp.text();
-              throw new Error(txt || `HTTP ${resp.status}`);
-            }
+        onApprove: function(_data, actions){
+          return actions.order.capture().then(function(){
             markPaid();
-          }catch(err){
-            console.error(err);
-            if (typeof toast === 'function'){
-              toast('PayPal verification error: ' + (err?.message || err), false);
-            }
-          }
+          });
         },
         onError: function(err){
           console.error(err);
@@ -1148,6 +1140,23 @@
       renderPayPal();
     }
   })();
+  </script>
+
+  <!-- Force both booking buttons to be UNSELECTED on load (untoggle Swap default) -->
+  <script>
+    (function(){
+      function clearBookingToggles(){
+        ['btnBook','btnSwap'].forEach(id=>{
+          const el=document.getElementById(id);
+          if(el){ el.classList.remove('selected'); el.setAttribute('aria-pressed','false'); }
+        });
+      }
+      if (document.readyState === 'loading'){
+        document.addEventListener('DOMContentLoaded', clearBookingToggles);
+      } else {
+        clearBookingToggles();
+      }
+    })();
   </script>
 </body>
 </html>
