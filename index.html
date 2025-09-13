@@ -390,14 +390,15 @@
           <label for="promoCode" style="font-weight:bold">Promo Code:</label>
           <input type="text" id="promoCode" placeholder="Enter promo code (optional)"/>
         </div>
+<!-- Replace PayPal UI with this single button -->
+<div class="pp-row">
+  <button id="stripePayBtn" class="submit-btn enabled" style="width:100%;max-width:360px;background:#635bff">
+    Pay by Card (Stripe)
+  </button>
+</div>
+<div class="small note" style="margin-top:6px">Submit will be enabled after the payment.</div>
 
-        <div class="pp-row">
-          <div id="paypal-gold" class="pp-col"></div>
-          <div id="paypal-card" class="pp-col"></div>
-        </div>
-        <div class="small note" style="margin-top:6px">Submit will be enabled after the payment.</div>
-
-        <div class="submit-row">
+          <div class="submit-row">
           <div id="payStatus" class="status-pill">Payment: Not Paid</div>
           <button class="submit-btn" id="submitBtn" disabled>SUBMIT</button>
         </div>
@@ -563,7 +564,7 @@
   (function(){
     const pad=n=>String(n).padStart(2,'0');
     const fmt=d=>`${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()}`;
-    const iso=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const iso=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${d.getDate()}`;
     const fromYMD=s=>{const [y,m,dd]=s.split('-').map(Number);return new Date(y,m-1,dd)};
 
     function makeMultiDatePicker(wrapperId,inputId,dropdownId){
@@ -919,160 +920,10 @@
     })();
   </script>
 
+  <!-- Stripe.js -->
+  <script src="https://js.stripe.com/v3/"></script>
   <script>
-  /* ===== Frontend polish: autosave, success strip, double-submit guard ===== */
-  (() => {
-    const API_TOKEN = 'YOUR_REAL_API_TOKEN';
-    const STORE_KEY = 'dvsa_form_autosave_v1';
-    const LAST_ID   = 'dvsa_last_search_id';
-
-    function toast(msg, ok=true){
-      let t = document.getElementById('apiToast');
-      if(!t){
-        t = document.createElement('div');
-        t.id = 'apiToast';
-        t.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.15);transition:opacity .3s';
-        document.body.appendChild(t);
-      }
-      t.style.background = ok ? '#ecfdf5' : '#fef2f2';
-      t.style.color      = ok ? '#065f46' : '#991b1b';
-      t.textContent = msg;
-      t.style.opacity = '1';
-      setTimeout(()=>{t.style.opacity='0'}, 3500);
-    }
-
-    function showSuccessStrip(id){
-      if(document.getElementById('dvsaSuccessStrip')) return;
-      const bar = document.createElement('div');
-      bar.id = 'dvsaSuccessStrip';
-      bar.style.cssText = 'position:fixed;left:16px;right:16px;bottom:16px;background:#ecfdf5;color:#065f46;border:1px solid #bbf7d0;border-radius:10px;padding:10px 12px;display:flex;align-items:center;gap:10px;z-index:9999;box-shadow:0 8px 24px rgba(0,0,0,.12)';
-      bar.innerHTML = `
-        <strong>Search created:</strong> <span id="dvsaSid">${id}</span>
-        <a href="http://localhost:8787/api/admin" target="_blank" style="margin-left:auto;font-weight:700;text-decoration:none;background:#dbeafe;border:1px solid #bfdbfe;color:#1e3a8a;padding:6px 10px;border-radius:8px">Open Admin</a>
-        <button id="dvsaStopBtn" type="button" style="font-weight:700;background:#fee2e2;color:#991b1b;border:1px solid #fecaca;padding:6px 10px;border-radius:8px;cursor:pointer">Stop this search</button>
-      `;
-      document.body.appendChild(bar);
-
-      document.getElementById('dvsaStopBtn').addEventListener('click', async () => {
-        const sid = localStorage.getItem(LAST_ID);
-        if(!sid){ toast('No search id saved on this device.', false); return; }
-        try{
-          const r = await fetch(`${API_BASE}/search/${encodeURIComponent(sid)}/disable`, {
-            method:'POST',
-            headers:{ 'Authorization': `Bearer ${API_TOKEN}` }
-          });
-          if(!r.ok){
-            const txt = await r.text();
-            throw new Error(txt || `HTTP ${r.status}`);
-          }
-          toast('Search disabled. The bot will stop.', true);
-          const btn = document.getElementById('dvsaStopBtn');
-          btn.disabled = true; btn.style.opacity = .6;
-        }catch(e){
-          toast('Disable failed: ' + (e?.message||e), false);
-        }
-      });
-    }
-
-    const FIELDS = [
-      '#surname','#firstname','#drivingLicence','#address','#town','#postcode',
-      '#email','#phoneRaw','#earliestDate','#latestDate','#timeFrom','#timeTo','#noticeDays'
-    ];
-    function readForm(){
-      const data = {};
-      FIELDS.forEach(sel => { const el = document.querySelector(sel); if(el) data[sel] = el.value; });
-      data.centres = Array.from(document.querySelectorAll('.centre-input')).map(i=>i.value);
-      data.swapSelected = !!document.getElementById('btnSwap')?.classList.contains('selected');
-      data.bookSelected = !!document.getElementById('btnBook')?.classList.contains('selected');
-      data.swapRef    = document.getElementById('swapRef')?.value || '';
-      data.theoryPass = document.getElementById('theoryPass')?.value || '';
-      return data;
-    }
-    function writeForm(data){
-      if(!data) return;
-      FIELDS.forEach(sel => { const el = document.querySelector(sel); if(el && data[sel]!=null) el.value = data[sel]; });
-      if(Array.isArray(data.centres)){
-        const inputs = Array.from(document.querySelectorAll('.centre-input'));
-        inputs.forEach((el,i)=>{ if(data.centres[i]!=null) el.value = data.centres[i]; });
-      }
-      if(data.bookSelected) document.getElementById('btnBook')?.click();
-      if(data.swapSelected) document.getElementById('btnSwap')?.click();
-      if(data.swapRef)    document.getElementById('swapRef').value    = data.swapRef;
-      if(data.theoryPass) document.getElementById('theoryPass').value = data.theoryPass;
-    }
-    function saveDraft(){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(readForm())) }catch{} }
-    function restoreDraft(){ try{ const j = localStorage.getItem(STORE_KEY); if(j) writeForm(JSON.parse(j)); }catch{} }
-    function wireAutosave(){
-      FIELDS.map(sel=>document.querySelector(sel)).filter(Boolean).forEach(el=>{
-        el.addEventListener('input', saveDraft);
-        el.addEventListener('change', saveDraft);
-      });
-      document.querySelectorAll('.centre-input').forEach(el=>{
-        el.addEventListener('input', saveDraft);
-        el.addEventListener('change', saveDraft);
-      });
-      ['swapRef','theoryPass'].forEach(id=>{
-        const el=document.getElementById(id);
-        if(el){ el.addEventListener('input', saveDraft); el.addEventListener('change', saveDraft); }
-      });
-    }
-
-    // Double-submit guard + capture success ID
-    let submitting = false;
-    function interceptSubmit(){
-      const btn = document.getElementById('submitBtn');
-      if(!btn) return;
-      btn.addEventListener('click', (e)=> {
-        if(submitting){
-          e.preventDefault();
-          toast('Already submitting…', false);
-        }else{
-          submitting = true;
-          setTimeout(()=>submitting=false, 5000);
-        }
-      }, true);
-
-      const origFetch = window.fetch;
-      window.fetch = async function(url, init){
-        const resp = await origFetch.apply(this, arguments);
-        try{
-          const isCreate = (typeof url === 'string') && url.includes('/api/search') && (init?.method||'GET').toUpperCase()==='POST';
-          if(isCreate){
-            submitting = false;
-            const text = await resp.clone().text();
-            try{
-              const j = JSON.parse(text);
-              if(resp.ok && j && (j.id || j.search_id)){
-                const id = j.id || j.search_id;
-                localStorage.setItem(LAST_ID, String(id));
-                showSuccessStrip(id);
-              }else if(!resp.ok){
-                toast(`API error: ${j?.detail || j?.error || resp.status}`, false);
-              }
-            }catch{
-              if(!resp.ok) toast(`API error: ${resp.status} ${text.slice(0,160)}`, false);
-            }
-          }
-        }catch{}
-        return resp;
-      }
-    }
-
-    window.addEventListener('DOMContentLoaded', () => {
-      restoreDraft();
-      wireAutosave();
-      interceptSubmit();
-      const lastId = localStorage.getItem(LAST_ID);
-      if(lastId) showSuccessStrip(lastId);
-    });
-  })();
-  </script>
-
-  <!-- PayPal SDK (LIVE): replace client-id with your LIVE one. Card enabled. -->
-  <script src="https://www.paypal.com/sdk/js?client-id=AXrgUnw0ZiNZLLgXawWpkl13R80ZKRADdfYQXw5OOcdTdRIbaegElHndA1ZkWmRSWEeE9rXkoLIgkwiP&currency=GBP&components=buttons&intent=capture&enable-funding=card"></script>
-
-  <script>
-  /* PayPal Smart Buttons wiring — gold PayPal + Card side-by-side */
+  /* Stripe Checkout wiring (replaces PayPal) */
   (function(){
     function amountFromTotalLine(){
       const txt = (document.getElementById('totalLine')?.textContent || '');
@@ -1100,44 +951,97 @@
       return true;
     }
 
-    function renderPayPal(){
-      if (!window.paypal) return;
-
-      const common = {
-        style: { layout: 'vertical', shape: 'rect', height: 45, tagline: false },
-        createOrder: function(_data, actions){
-          if (!requireBookingTypeOrReject()){
-            return Promise.reject(new Error('booking type required'));
-          }
-          const value = amountFromTotalLine();
-          return actions.order.create({
-            purchase_units: [{ amount: { currency_code: 'GBP', value } }]
-          });
-        },
-        onApprove: function(_data, actions){
-          return actions.order.capture().then(function(){
-            markPaid();
-          });
-        },
-        onError: function(err){
-          console.error(err);
-          if (typeof toast === 'function'){
-            toast('PayPal error: ' + (err?.message || err), false);
-          }
-        }
-      };
-
-      const gold = paypal.Buttons({ ...common, fundingSource: paypal.FUNDING.PAYPAL, style: { ...common.style, color: 'gold' }});
-      if (gold.isEligible()) gold.render('#paypal-gold');
-
-      const card = paypal.Buttons({ ...common, fundingSource: paypal.FUNDING.CARD });
-      if (card.isEligible()) card.render('#paypal-card');
+    function centresCSV(){
+      return Array.from(document.querySelectorAll('.centre-input'))
+        .map(i=>i.value.trim()).filter(Boolean).join(',');
     }
 
-    if (document.readyState === 'loading'){
-      document.addEventListener('DOMContentLoaded', renderPayPal);
-    } else {
-      renderPayPal();
+    async function ensurePreSearch(){
+      // Reuse if we already created one
+      let sid = localStorage.getItem('dvsa_last_search_id');
+      if (sid) return sid;
+
+      // Minimal payload to match backend CreateSearch model
+      const surname = (document.getElementById('surname')?.value||'').trim();
+      const email   = (document.getElementById('email')?.value||'').trim();
+      const centres = centresCSV();
+
+      if (!surname || !email || !centres){
+        if (typeof toast === 'function'){
+          toast('Enter Surname, Email and at least one Test Centre before paying.', false);
+        }
+        throw new Error('missing fields');
+      }
+
+      const r = await fetch(`${API_BASE}/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ surname, email, centres })
+      });
+      const text = await r.text();
+      let j; try { j = JSON.parse(text) } catch { j = null; }
+      if (!r.ok) throw new Error(j?.error || text || `HTTP ${r.status}`);
+
+      sid = j?.id || j?.search_id;
+      if (sid) localStorage.setItem('dvsa_last_search_id', String(sid));
+      return sid;
+    }
+
+    async function startStripeCheckout(){
+      if (!requireBookingTypeOrReject()) return;
+
+      const amount = amountFromTotalLine();
+      if (!amount || isNaN(+amount) || +amount <= 0){
+        if (typeof toast === 'function') toast('Total is not valid.', false);
+        return;
+      }
+
+      let searchId;
+      try{
+        searchId = await ensurePreSearch();
+      }catch(e){
+        console.error(e);
+        return;
+      }
+
+      const successUrl = window.location.origin + window.location.pathname + '?paid=1';
+      const cancelUrl  = window.location.href;
+
+      try{
+        const r = await fetch(`${API_BASE}/pay/create-checkout`, {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({
+            search_id: Number(searchId),
+            amount_cents: Math.round(parseFloat(amount)*100),
+            currency: 'gbp',
+            success_url: successUrl,
+            cancel_url:  cancelUrl
+          })
+        });
+        const j = await r.json();
+        if(!r.ok || !j?.checkout_url){
+          throw new Error(j?.detail || j?.error || 'Failed to create checkout');
+        }
+        window.location.href = j.checkout_url;
+      }catch(err){
+        console.error(err);
+        if (typeof toast === 'function'){
+          toast('Stripe error: ' + (err?.message || err), false);
+        }
+      }
+    }
+
+    // Wire the button
+    const btn = document.getElementById('stripePayBtn');
+    if (btn){
+      btn.addEventListener('click', (e)=>{ e.preventDefault(); startStripeCheckout(); });
+    }
+
+    // If we return from Stripe success, mark paid so SUBMIT unlocks
+    const qs = new URLSearchParams(location.search);
+    if (qs.has('paid') || qs.has('session_id')){
+      markPaid();
     }
   })();
   </script>
