@@ -149,6 +149,14 @@ class CheckoutRequest(BaseModel):
     cancel_url: Optional[str] = None
 
 
+# NEW: for embedded Stripe Elements
+class IntentRequest(BaseModel):
+    amount_cents: int = Field(..., ge=100, le=100000)
+    currency: str = Field(default="gbp", pattern=r"^[a-z]{3}$")
+    # Optional: if you pass a search_id we’ll store it in metadata
+    search_id: Optional[int] = None
+
+
 # ==============================================================================
 # Core routes
 # ==============================================================================
@@ -292,9 +300,37 @@ def create_checkout(req: CheckoutRequest):
     return {"ok": True, "checkout_url": session.url, "session_id": session.id}
 
 
+# NEW: Stripe PaymentIntent for embedded Stripe Elements (stays on your page)
+@app.post("/api/pay/create-intent")
+def create_intent(req: IntentRequest):
+    """
+    Creates a PaymentIntent and returns its client_secret for Stripe Elements.
+
+    If `search_id` is provided, it's stored in metadata so the webhook can
+    mark the corresponding search as paid on `payment_intent.succeeded`.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Stripe is not configured (missing STRIPE_SECRET_KEY).")
+
+    try:
+        metadata = {}
+        if req.search_id is not None:
+            metadata["search_id"] = str(req.search_id)
+
+        intent = stripe.PaymentIntent.create(
+            amount=int(req.amount_cents),
+            currency=req.currency.lower(),
+            automatic_payment_methods={"enabled": True},
+            metadata=metadata or None,
+        )
+        return {"client_secret": intent.client_secret}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
+
+
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request):
-    """Verify Stripe signature and update DB on successful Checkout."""
+    """Verify Stripe signature and update DB on successful Checkout/Elements."""
     if not STRIPE_WEBHOOK_SECRET:
         raise HTTPException(status_code=500, detail="Missing STRIPE_WEBHOOK_SECRET.")
 
@@ -308,9 +344,25 @@ async def stripe_webhook(request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Webhook signature error: {e}")
 
+    # Hosted Checkout success
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         search_id = session.get("client_reference_id")
+        if search_id:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE searches SET paid=1, status=?, last_event=? WHERE id=?",
+                ("paid", f"paid {now_iso()}", int(search_id)),
+            )
+            conn.commit()
+            conn.close()
+
+    # Embedded Elements (PaymentIntent) success
+    elif event["type"] == "payment_intent.succeeded":
+        intent = event["data"]["object"]
+        md = (intent.get("metadata") or {})
+        search_id = md.get("search_id")
         if search_id:
             conn = get_conn()
             cur = conn.cursor()
