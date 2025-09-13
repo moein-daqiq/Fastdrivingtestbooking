@@ -391,7 +391,6 @@
           <input type="text" id="promoCode" placeholder="Enter promo code (optional)"/>
         </div>
 
-        <!-- Pay button (opens on-page card form) -->
         <div class="pp-row">
           <button id="stripePayBtn" class="submit-btn enabled" style="width:100%;max-width:360px;background:#635bff">
             Pay by Card (Stripe)
@@ -873,8 +872,15 @@
       }
 
       async function submitToApi() {
-        const btn = $('#submitBtn');
-        if (!btn || btn.disabled) return;
+        const btn = document.getElementById('submitBtn');
+        if (!btn) return;
+
+        // HARD GATE: refuse to submit unless payment is marked paid
+        const paid = document.getElementById('payStatus')?.classList.contains('paid');
+        if (!paid) {
+          toast('Please complete payment first.', false);
+          return;
+        }
 
         const p = collectPayload();
 
@@ -883,7 +889,7 @@
         if (!p.surname || !p.licence_number)    return toast('Enter surname and licence number.', false);
         if (!p.email)                           return toast('Enter your email.', false);
         if (!p.phone)                           return toast('Enter your WhatsApp phone.', false);
-        if ($('#btnSwap')?.classList.contains('selected') && !/^\d{8}$/.test($('#swapRef')?.value||'')) {
+        if (document.getElementById('btnSwap')?.classList.contains('selected') && !/^\d{8}$/.test(document.getElementById('swapRef')?.value||'')) {
           return toast('Swap selected: add the 8-digit DVSA booking reference.', false);
         }
 
@@ -912,15 +918,21 @@
           console.error(err);
           toast(`API error: ${err.message || err}`, false);
         } finally {
+          // keep enabled for resubmission if needed
           btn.disabled = false; btn.classList.add('enabled');
         }
       }
 
       window.addEventListener('DOMContentLoaded', async () => {
         await healthCheck();
+
+        // keep submit disabled until markPaid()
+        const sb = document.getElementById('submitBtn');
+        if (sb) { sb.disabled = true; sb.classList.remove('enabled'); }
+
         if (currentSearchId()) ensureStopButton();
 
-        const btn = $('#submitBtn');
+        const btn = document.getElementById('submitBtn');
         if (btn) {
           btn.addEventListener('click', (e) => {
             e.preventDefault();
@@ -1007,7 +1019,7 @@
       return sid;
     }
 
-    let stripe, elements, paymentElement, clientSecret;
+    let stripe, elements, paymentElement;
 
     async function openStripePanel(){
       if (STRIPE_PUBLISHABLE_KEY === 'YOUR_STRIPE_PUBLISHABLE_KEY'){
@@ -1058,7 +1070,6 @@
         paymentElement.mount('#payment-element');
         document.getElementById('stripePanel').style.display = 'block';
         document.getElementById('stripePanel').scrollIntoView({behavior:'smooth', block:'center'});
-        clientSecret = cs;
         showMsg('', true);
       }catch(err){
         console.error(err);
@@ -1093,11 +1104,8 @@
       }
     }
 
-    const openBtn = document.getElementById('stripePayBtn');
-    if (openBtn) openBtn.addEventListener('click', (e)=>{ e.preventDefault(); openStripePanel(); });
-
-    const confirmBtn = document.getElementById('stripeConfirmBtn');
-    if (confirmBtn) confirmBtn.addEventListener('click', (e)=>{ e.preventDefault(); confirmStripePayment(); });
+    document.getElementById('stripePayBtn')?.addEventListener('click', (e)=>{ e.preventDefault(); openStripePanel(); });
+    document.getElementById('stripeConfirmBtn')?.addEventListener('click', (e)=>{ e.preventDefault(); confirmStripePayment(); });
   })();
   </script>
 
