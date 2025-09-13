@@ -1,4 +1,4 @@
-<!DOCTYPE html> 
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -13,6 +13,8 @@
 
   <!-- Single source of truth for API URL — do not redefine elsewhere -->
   <script>var API_BASE = "https://api.fastdrivingtestfinder.co.uk/api";</script>
+  <!-- Stripe publishable key (required for on-page element) -->
+  <script>window.STRIPE_PUBLISHABLE_KEY = "pk_live_or_test_here";</script>
 
   <!-- Clear any previously autosaved draft so fields show placeholders, not old data -->
   <script>(function(){try{localStorage.removeItem('dvsa_form_autosave_v1');}catch(e){}})();</script>
@@ -148,9 +150,15 @@
     .submit-btn{flex:1;background:#2563eb;color:#fff;padding:10px;border:none;font-size:15px;border-radius:4px;cursor:pointer;opacity:.6}
     .submit-btn.enabled{opacity:1}
 
-    /* PayPal buttons side-by-side */
+    /* PayPal/Stripe row */
     .pp-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px}
     .pp-col{flex:1;min-width:220px}
+
+    /* Stripe panel */
+    #stripePanel{
+      display:none;margin-top:12px;padding:12px;border:1px dashed var(--line);
+      border-radius:10px;background:#fff;
+    }
   </style>
 </head>
 <body>
@@ -391,19 +399,20 @@
           <input type="text" id="promoCode" placeholder="Enter promo code (optional)"/>
         </div>
 
+        <!-- Stripe pay button -->
         <div class="pp-row">
           <button id="stripePayBtn" class="submit-btn enabled" style="width:100%;max-width:360px;background:#635bff">
             Pay by Card (Stripe)
           </button>
         </div>
 
-        <!-- On-page Stripe Payment Element -->
-        <div id="stripePanel" style="display:none;max-width:420px;margin-top:10px">
-          <div id="payment-element"></div>
-          <button id="stripeConfirmBtn" class="submit-btn enabled" style="width:100%;margin-top:10px;background:#635bff">
-            Pay Now
-          </button>
+        <!-- Stripe on-page panel (hidden until clicked) -->
+        <div id="stripePanel">
           <div id="stripeMsg" class="indicator" style="display:none"></div>
+          <div id="payment-element" style="margin-top:8px"></div>
+          <button id="stripeConfirmBtn" class="submit-btn enabled" style="margin-top:12px;width:100%;max-width:360px">
+            Pay now
+          </button>
         </div>
 
         <div class="small note" style="margin-top:6px">Submit will be enabled after the payment.</div>
@@ -873,14 +882,7 @@
 
       async function submitToApi() {
         const btn = document.getElementById('submitBtn');
-        if (!btn) return;
-
-        // HARD GATE: refuse to submit unless payment is marked paid
-        const paid = document.getElementById('payStatus')?.classList.contains('paid');
-        if (!paid) {
-          toast('Please complete payment first.', false);
-          return;
-        }
+        if (!btn || btn.disabled) return;
 
         const p = collectPayload();
 
@@ -918,18 +920,13 @@
           console.error(err);
           toast(`API error: ${err.message || err}`, false);
         } finally {
-          // keep enabled for resubmission if needed
-          btn.disabled = false; btn.classList.add('enabled');
+          /* Intentionally NOT re-enabling submit here.
+             It will be enabled only after successful Stripe payment (markPaid()). */
         }
       }
 
       window.addEventListener('DOMContentLoaded', async () => {
         await healthCheck();
-
-        // keep submit disabled until markPaid()
-        const sb = document.getElementById('submitBtn');
-        if (sb) { sb.disabled = true; sb.classList.remove('enabled'); }
-
         if (currentSearchId()) ensureStopButton();
 
         const btn = document.getElementById('submitBtn');
@@ -948,7 +945,13 @@
   <script>
   /* Stripe Payment Element (on-page, no redirect) */
   (function(){
-    const STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || 'YOUR_STRIPE_PUBLISHABLE_KEY';
+    const STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || '';
+    const panel   = document.getElementById('stripePanel');
+    const msgBox  = document.getElementById('stripeMsg');
+    const payBtn  = document.getElementById('stripePayBtn');
+    const confBtn = document.getElementById('stripeConfirmBtn');
+
+    let stripe, elements, paymentElement, lastClientSecret = '';
 
     function amountFromTotalLine(){
       const txt = (document.getElementById('totalLine')?.textContent || '');
@@ -964,22 +967,20 @@
       if (submitBtn){ submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
     }
 
-    function showMsg(msg, ok){
-      const box = document.getElementById('stripeMsg');
-      if (!box) return;
-      box.textContent = msg || '';
-      box.style.display = msg ? 'block' : 'none';
-      box.classList.remove('success','fail');
-      box.classList.add(ok ? 'success' : 'fail');
+    function showMsg(text, ok=false){
+      panel.style.display = 'block';                 // open so user sees feedback
+      if (!msgBox) return;
+      msgBox.textContent = text || '';
+      msgBox.style.display = text ? 'block' : 'none';
+      msgBox.classList.remove('success','fail');
+      msgBox.classList.add(ok ? 'success' : 'fail');
     }
 
     function requireBookingTypeOrReject(){
       const isBook = document.getElementById('btnBook')?.classList.contains('selected');
       const isSwap = document.getElementById('btnSwap')?.classList.contains('selected');
       if (!isBook && !isSwap){
-        if (typeof toast === 'function'){
-          toast('Please select Book (£150) or Swap (£70) first.', false);
-        }
+        showMsg('Please select Book (£150) or Swap (£70) first.');
         return false;
       }
       return true;
@@ -999,9 +1000,7 @@
       const centres = centresCSV();
 
       if (!surname || !email || !centres){
-        if (typeof toast === 'function'){
-          toast('Enter Surname, Email and at least one Test Centre before paying.', false);
-        }
+        showMsg('Enter Surname, Email and at least one Test Centre before paying.');
         throw new Error('missing fields');
       }
 
@@ -1019,18 +1018,18 @@
       return sid;
     }
 
-    let stripe, elements, paymentElement;
-
     async function openStripePanel(){
-      if (STRIPE_PUBLISHABLE_KEY === 'YOUR_STRIPE_PUBLISHABLE_KEY'){
-        showMsg('Stripe publishable key is not set on this page.', false);
+      panel.style.display = 'block'; // open first so errors are visible
+
+      if (!STRIPE_PUBLISHABLE_KEY){
+        showMsg('Stripe publishable key is missing on this page. Add window.STRIPE_PUBLISHABLE_KEY in <head>.');
         return;
       }
       if (!requireBookingTypeOrReject()) return;
 
       const amount = amountFromTotalLine();
       if (!amount || isNaN(+amount) || +amount <= 0){
-        if (typeof toast === 'function') toast('Total is not valid.', false);
+        showMsg('Total is not valid.');
         return;
       }
 
@@ -1038,8 +1037,7 @@
       try { searchId = await ensurePreSearch(); }
       catch (e) { console.error(e); return; }
 
-      // Create a PaymentIntent on the server for the exact amount
-      let cs = '';
+      // Create a PaymentIntent (server)
       try{
         const r = await fetch(`${API_BASE}/pay/create-intent`, {
           method:'POST',
@@ -1052,38 +1050,36 @@
         });
         const j = await r.json();
         if(!r.ok || !j?.client_secret){
-          throw new Error(j?.detail || j?.error || 'Failed to create intent');
+          throw new Error(j?.detail || j?.error || 'Failed to create payment intent');
         }
-        cs = j.client_secret;
+        lastClientSecret = j.client_secret;
       }catch(err){
         console.error(err);
-        showMsg('Stripe error: ' + (err?.message || err), false);
+        showMsg('Stripe error: ' + (err?.message || err));
         return;
       }
 
-      // Mount the Payment Element
+      // Mount Payment Element
       try{
         stripe = Stripe(STRIPE_PUBLISHABLE_KEY);
-        elements = stripe.elements({ clientSecret: cs });
+        elements = stripe.elements({ clientSecret: lastClientSecret });
         if (paymentElement) paymentElement.unmount();
         paymentElement = elements.create('payment');
         paymentElement.mount('#payment-element');
-        document.getElementById('stripePanel').style.display = 'block';
-        document.getElementById('stripePanel').scrollIntoView({behavior:'smooth', block:'center'});
         showMsg('', true);
+        document.getElementById('stripePanel').scrollIntoView({behavior:'smooth', block:'center'});
       }catch(err){
         console.error(err);
-        showMsg('Stripe initialisation failed.', false);
+        showMsg('Stripe initialisation failed.');
       }
     }
 
     async function confirmStripePayment(){
       if (!stripe || !elements){
-        showMsg('Payment form is not ready yet.', false);
+        showMsg('Payment form is not ready yet.');
         return;
       }
-      const btn = document.getElementById('stripeConfirmBtn');
-      btn.disabled = true;
+      confBtn.disabled = true;
 
       const {error, paymentIntent} = await stripe.confirmPayment({
         elements,
@@ -1091,21 +1087,21 @@
       });
 
       if (error){
-        showMsg(error.message || 'Payment failed.', false);
-        btn.disabled = false;
+        showMsg(error.message || 'Payment failed.');
+        confBtn.disabled = false;
         return;
       }
       if (paymentIntent && paymentIntent.status === 'succeeded'){
         showMsg('Payment successful.', true);
         markPaid();
       }else{
-        showMsg('Payment was not completed.', false);
-        btn.disabled = false;
+        showMsg('Payment was not completed.');
+        confBtn.disabled = false;
       }
     }
 
-    document.getElementById('stripePayBtn')?.addEventListener('click', (e)=>{ e.preventDefault(); openStripePanel(); });
-    document.getElementById('stripeConfirmBtn')?.addEventListener('click', (e)=>{ e.preventDefault(); confirmStripePayment(); });
+    payBtn?.addEventListener('click', (e)=>{ e.preventDefault(); openStripePanel(); });
+    confBtn?.addEventListener('click', (e)=>{ e.preventDefault(); confirmStripePayment(); });
   })();
   </script>
 
