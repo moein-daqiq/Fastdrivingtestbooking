@@ -362,7 +362,7 @@
       </div>
     </section>
 
-    <!-- ===================== Payment (PayPal-only) ===================== -->
+    <!-- ===================== Payment (Stripe on-page) ===================== -->
     <section class="panel">
       <div class="section">
         <p><b>Payment:</b><br>
@@ -390,15 +390,26 @@
           <label for="promoCode" style="font-weight:bold">Promo Code:</label>
           <input type="text" id="promoCode" placeholder="Enter promo code (optional)"/>
         </div>
-<!-- Replace PayPal UI with this single button -->
-<div class="pp-row">
-  <button id="stripePayBtn" class="submit-btn enabled" style="width:100%;max-width:360px;background:#635bff">
-    Pay by Card (Stripe)
-  </button>
-</div>
-<div class="small note" style="margin-top:6px">Submit will be enabled after the payment.</div>
 
-          <div class="submit-row">
+        <!-- Pay button (opens on-page card form) -->
+        <div class="pp-row">
+          <button id="stripePayBtn" class="submit-btn enabled" style="width:100%;max-width:360px;background:#635bff">
+            Pay by Card (Stripe)
+          </button>
+        </div>
+
+        <!-- On-page Stripe Payment Element -->
+        <div id="stripePanel" style="display:none;max-width:420px;margin-top:10px">
+          <div id="payment-element"></div>
+          <button id="stripeConfirmBtn" class="submit-btn enabled" style="width:100%;margin-top:10px;background:#635bff">
+            Pay Now
+          </button>
+          <div id="stripeMsg" class="indicator" style="display:none"></div>
+        </div>
+
+        <div class="small note" style="margin-top:6px">Submit will be enabled after the payment.</div>
+
+        <div class="submit-row">
           <div id="payStatus" class="status-pill">Payment: Not Paid</div>
           <button class="submit-btn" id="submitBtn" disabled>SUBMIT</button>
         </div>
@@ -923,8 +934,10 @@
   <!-- Stripe.js -->
   <script src="https://js.stripe.com/v3/"></script>
   <script>
-  /* Stripe Checkout wiring (replaces PayPal) */
+  /* Stripe Payment Element (on-page, no redirect) */
   (function(){
+    const STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || 'YOUR_STRIPE_PUBLISHABLE_KEY';
+
     function amountFromTotalLine(){
       const txt = (document.getElementById('totalLine')?.textContent || '');
       const m   = txt.match(/£([\d.]+)/);
@@ -937,6 +950,15 @@
       if (pill){ pill.textContent='Payment: Paid'; pill.classList.add('paid'); }
       const submitBtn = document.getElementById('submitBtn');
       if (submitBtn){ submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
+    }
+
+    function showMsg(msg, ok){
+      const box = document.getElementById('stripeMsg');
+      if (!box) return;
+      box.textContent = msg || '';
+      box.style.display = msg ? 'block' : 'none';
+      box.classList.remove('success','fail');
+      box.classList.add(ok ? 'success' : 'fail');
     }
 
     function requireBookingTypeOrReject(){
@@ -957,11 +979,9 @@
     }
 
     async function ensurePreSearch(){
-      // Reuse if we already created one
       let sid = localStorage.getItem('dvsa_last_search_id');
       if (sid) return sid;
 
-      // Minimal payload to match backend CreateSearch model
       const surname = (document.getElementById('surname')?.value||'').trim();
       const email   = (document.getElementById('email')?.value||'').trim();
       const centres = centresCSV();
@@ -987,7 +1007,13 @@
       return sid;
     }
 
-    async function startStripeCheckout(){
+    let stripe, elements, paymentElement, clientSecret;
+
+    async function openStripePanel(){
+      if (STRIPE_PUBLISHABLE_KEY === 'YOUR_STRIPE_PUBLISHABLE_KEY'){
+        showMsg('Stripe publishable key is not set on this page.', false);
+        return;
+      }
       if (!requireBookingTypeOrReject()) return;
 
       const amount = amountFromTotalLine();
@@ -997,52 +1023,81 @@
       }
 
       let searchId;
-      try{
-        searchId = await ensurePreSearch();
-      }catch(e){
-        console.error(e);
-        return;
-      }
+      try { searchId = await ensurePreSearch(); }
+      catch (e) { console.error(e); return; }
 
-      const successUrl = window.location.origin + window.location.pathname + '?paid=1';
-      const cancelUrl  = window.location.href;
-
+      // Create a PaymentIntent on the server for the exact amount
+      let cs = '';
       try{
-        const r = await fetch(`${API_BASE}/pay/create-checkout`, {
+        const r = await fetch(`${API_BASE}/pay/create-intent`, {
           method:'POST',
           headers:{ 'Content-Type':'application/json' },
           body: JSON.stringify({
-            search_id: Number(searchId),
             amount_cents: Math.round(parseFloat(amount)*100),
             currency: 'gbp',
-            success_url: successUrl,
-            cancel_url:  cancelUrl
+            search_id: Number(searchId)
           })
         });
         const j = await r.json();
-        if(!r.ok || !j?.checkout_url){
-          throw new Error(j?.detail || j?.error || 'Failed to create checkout');
+        if(!r.ok || !j?.client_secret){
+          throw new Error(j?.detail || j?.error || 'Failed to create intent');
         }
-        window.location.href = j.checkout_url;
+        cs = j.client_secret;
       }catch(err){
         console.error(err);
-        if (typeof toast === 'function'){
-          toast('Stripe error: ' + (err?.message || err), false);
-        }
+        showMsg('Stripe error: ' + (err?.message || err), false);
+        return;
+      }
+
+      // Mount the Payment Element
+      try{
+        stripe = Stripe(STRIPE_PUBLISHABLE_KEY);
+        elements = stripe.elements({ clientSecret: cs });
+        if (paymentElement) paymentElement.unmount();
+        paymentElement = elements.create('payment');
+        paymentElement.mount('#payment-element');
+        document.getElementById('stripePanel').style.display = 'block';
+        document.getElementById('stripePanel').scrollIntoView({behavior:'smooth', block:'center'});
+        clientSecret = cs;
+        showMsg('', true);
+      }catch(err){
+        console.error(err);
+        showMsg('Stripe initialisation failed.', false);
       }
     }
 
-    // Wire the button
-    const btn = document.getElementById('stripePayBtn');
-    if (btn){
-      btn.addEventListener('click', (e)=>{ e.preventDefault(); startStripeCheckout(); });
+    async function confirmStripePayment(){
+      if (!stripe || !elements){
+        showMsg('Payment form is not ready yet.', false);
+        return;
+      }
+      const btn = document.getElementById('stripeConfirmBtn');
+      btn.disabled = true;
+
+      const {error, paymentIntent} = await stripe.confirmPayment({
+        elements,
+        redirect: 'if_required'
+      });
+
+      if (error){
+        showMsg(error.message || 'Payment failed.', false);
+        btn.disabled = false;
+        return;
+      }
+      if (paymentIntent && paymentIntent.status === 'succeeded'){
+        showMsg('Payment successful.', true);
+        markPaid();
+      }else{
+        showMsg('Payment was not completed.', false);
+        btn.disabled = false;
+      }
     }
 
-    // If we return from Stripe success, mark paid so SUBMIT unlocks
-    const qs = new URLSearchParams(location.search);
-    if (qs.has('paid') || qs.has('session_id')){
-      markPaid();
-    }
+    const openBtn = document.getElementById('stripePayBtn');
+    if (openBtn) openBtn.addEventListener('click', (e)=>{ e.preventDefault(); openStripePanel(); });
+
+    const confirmBtn = document.getElementById('stripeConfirmBtn');
+    if (confirmBtn) confirmBtn.addEventListener('click', (e)=>{ e.preventDefault(); confirmStripePayment(); });
   })();
   </script>
 
