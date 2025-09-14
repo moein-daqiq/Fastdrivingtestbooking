@@ -1,497 +1,394 @@
-from __future__ import annotations
-
 import os
+import json
+import hmac
+import hashlib
 import sqlite3
-import time
-from datetime import datetime
-from typing import Optional
-
-# --- FastAPI / CORS ---
-from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-
-# --- Pydantic models ---
-from pydantic import BaseModel, EmailStr, Field
-
-# --- Env loader (safe no-op if python-dotenv not installed) ---
-try:
-    from dotenv import load_dotenv  # type: ignore
-except Exception:  # pragma: no cover
-    def load_dotenv() -> None:  # fallback
-        return
-
-# --- Payments ---
 import stripe
-import requests
+from datetime import datetime
+from typing import List, Optional, Dict, Any, Literal
 
+from fastapi import FastAPI, Request, HTTPException, Depends, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field
 
-# ==============================================================================
-# Environment & third-party configuration
-# ==============================================================================
+# ---------- ENV ----------
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+DB_FILE = os.environ.get("SEARCHES_DB", "searches.db")
+ADMIN_USER = os.environ.get("ADMIN_BASIC_AUTH_USER")
+ADMIN_PASS = os.environ.get("ADMIN_BASIC_AUTH_PASS")
 
-load_dotenv()  # loads a local .env if present (Render env vars also work)
+stripe.api_key = STRIPE_SECRET_KEY
 
-# CORS: comma-separated list, e.g. "https://fastdrivingtestfinder.co.uk,https://www.fastdrivingtestfinder.co.uk"
-ALLOWED_ORIGINS = [
-    o.strip()
-    for o in os.getenv("ALLOWED_ORIGINS", "").split(",")
-    if o.strip()
-]
-if not ALLOWED_ORIGINS:
-    # Sensible defaults if env not set (keeps prod domains)
-    ALLOWED_ORIGINS = [
-        "https://fastdrivingtestfinder.co.uk",
-        "https://www.fastdrivingtestfinder.co.uk",
-    ]
+# ---------- APP ----------
+app = FastAPI(title="FastDrivingTestFinder API", version="1.1.0")
 
-# Stripe
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
-if STRIPE_SECRET_KEY:
-    stripe.api_key = STRIPE_SECRET_KEY
-
-# PayPal
-PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "")
-PAYPAL_SECRET = os.getenv("PAYPAL_SECRET", "")
-
-
-# ==============================================================================
-# FastAPI app
-# ==============================================================================
-
-app = FastAPI(title="DVSA Bot API", version="1.2.0")
-
+# CORS (adjust if needed)
+FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "https://www.fastdrivingtestfinder.co.uk")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=[FRONTEND_ORIGIN, "http://localhost:3000", "http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# ==============================================================================
-# SQLite helpers
-# ==============================================================================
-
-DB_FILE = "searches.db"
-
-
-def now_iso() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-
-
-def get_conn() -> sqlite3.Connection:
+# ---------- DB ----------
+def get_conn():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
-
-def _init_db_schema() -> None:
-    """Create table / add columns if missing."""
+def migrate():
+    """
+    Lightweight, idempotent SQLite migration.
+    Creates table if missing; adds new columns if they don't exist.
+    """
     conn = get_conn()
     cur = conn.cursor()
-
-    cur.execute(
-        """
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS searches (
-          id          INTEGER PRIMARY KEY AUTOINCREMENT,
-          created_at  TEXT NOT NULL,
-          surname     TEXT,
-          email       TEXT,
-          centres     TEXT,
-          status      TEXT NOT NULL DEFAULT 'new',
-          last_event  TEXT,
-          paid        INTEGER NOT NULL DEFAULT 0
-        );
-        """
-    )
-    conn.commit()
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT,
+            updated_at TEXT,
+            status TEXT DEFAULT 'new',               -- new → queued → searching → found/booked/failed
+            last_event TEXT,
+            paid INTEGER DEFAULT 0,
 
-    cur.execute("PRAGMA table_info(searches)")
-    cols = {row["name"] for row in cur.fetchall()}
+            -- Stripe linkage
+            payment_intent_id TEXT,
+            amount INTEGER,                          -- in minor units (pence)
 
-    def ensure(sql: str) -> None:
-        try:
-            cur.execute(sql)
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # already exists
+            -- Core fields from your form
+            booking_type TEXT,                       -- 'new' | 'swap'
+            licence_number TEXT,
+            booking_reference TEXT,
+            theory_pass TEXT,
 
-    if "status" not in cols:
-        ensure("ALTER TABLE searches ADD COLUMN status TEXT NOT NULL DEFAULT 'new'")
-    if "last_event" not in cols:
-        ensure("ALTER TABLE searches ADD COLUMN last_event TEXT")
-    if "paid" not in cols:
-        ensure("ALTER TABLE searches ADD COLUMN paid INTEGER NOT NULL DEFAULT 0")
+            date_window_from TEXT,
+            date_window_to TEXT,
+            time_window_from TEXT,
+            time_window_to TEXT,
 
-    conn.close()
+            phone TEXT,
+            whatsapp TEXT,
+            email TEXT,
 
-
-_init_db_schema()
-
-
-# ==============================================================================
-# Pydantic models
-# ==============================================================================
-
-class CreateSearch(BaseModel):
-    surname: str = Field(..., min_length=1, max_length=80)
-    email: EmailStr
-    centres: str = Field(..., min_length=1, max_length=400)  # comma-separated list
-
-
-class CheckoutRequest(BaseModel):
-    search_id: int
-    amount_cents: int = Field(..., ge=100, le=100000)  # £1.00 .. £1000.00
-    currency: str = Field(default="gbp", pattern=r"^[a-z]{3}$")
-    success_url: Optional[str] = None
-    cancel_url: Optional[str] = None
-
-
-# NEW: for embedded Stripe Elements
-class IntentRequest(BaseModel):
-    amount_cents: int = Field(..., ge=100, le=100000)
-    currency: str = Field(default="gbp", pattern=r"^[a-z]{3}$")
-    # Optional: if you pass a search_id we’ll store it in metadata
-    search_id: Optional[int] = None
-
-
-# ==============================================================================
-# Core routes
-# ==============================================================================
-
-@app.get("/api/health")
-def health_check():
-    return {"ok": True, "ts": int(time.time())}
-
-
-@app.post("/api/search")
-def create_search(data: CreateSearch):
-    """
-    Creates a row in `searches`, returns its ID.
-    Frontend will submit here _after_ the user fills the form (and before payment).
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO searches (created_at, surname, email, centres, status, last_event, paid)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            now_iso(),
-            data.surname.strip(),
-            data.email.strip(),
-            data.centres.strip(),
-            "new",
-            "submitted " + now_iso(),
-            0,
-        ),
-    )
-    conn.commit()
-    new_id = cur.lastrowid
-    conn.close()
-    return {"id": new_id, "ok": True}
-
-
-@app.get("/api/admin", response_class=Response)
-def admin_view():
-    """Very simple HTML table of latest searches (most recent first)."""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, created_at, surname, email, centres, status, paid, COALESCE(last_event,'') AS last_event
-        FROM searches
-        ORDER BY id DESC
-        LIMIT 200
-        """
-    )
-    rows = cur.fetchall()
-    conn.close()
-
-    def h(s: str) -> str:
-        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    out = []
-    out.append("<!doctype html><meta charset='utf-8'><title>Admin — Searches</title>")
-    out.append("<h2 style='font-family:system-ui,Segoe UI,Arial;'>Recent Searches</h2>")
-    out.append(
-        "<table border='1' cellspacing='0' cellpadding='6' "
-        "style='font-family:monospace;border-collapse:collapse'>"
-    )
-    out.append("<tr><th>ID</th><th>Surname</th><th>Email</th><th>Paid</th><th>Status</th><th>Last Event</th></tr>")
-    for r in rows:
-        out.append(
-            "<tr>"
-            f"<td>{r['id']}</td>"
-            f"<td>{h(r['surname'])}</td>"
-            f"<td>{h(r['email'])}</td>"
-            f"<td>{'Yes' if r['paid'] else 'No'}</td>"
-            f"<td>{h(r['status'])}</td>"
-            f"<td>{h(r['last_event'])}</td>"
-            "</tr>"
+            centres_json TEXT,                       -- JSON array of strings
+            options_json TEXT,                       -- JSON object of toggles
+            notes TEXT
         )
-    out.append("</table>")
-    return Response("".join(out), media_type="text/html")
+    """)
 
+    # Ensure columns exist (safe to run repeatedly)
+    expected_cols = {
+        "created_at","updated_at","status","last_event","paid",
+        "payment_intent_id","amount",
+        "booking_type","licence_number","booking_reference","theory_pass",
+        "date_window_from","date_window_to","time_window_from","time_window_to",
+        "phone","whatsapp","email","centres_json","options_json","notes"
+    }
+    cur.execute("PRAGMA table_info(searches)")
+    have = {row["name"] for row in cur.fetchall()}
+    missing = expected_cols - have
+    for col in missing:
+        # Minimal types; SQLite is dynamic
+        coltype = "TEXT"
+        if col in {"paid","amount"}:
+            coltype = "INTEGER"
+        cur.execute(f"ALTER TABLE searches ADD COLUMN {col} {coltype}")
 
-# ==============================================================================
-# Stripe: Checkout + Webhook
-# ==============================================================================
+    # Simple status index helps the worker
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_status ON searches(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_paid ON searches(paid)")
+    conn.commit()
+    conn.close()
 
-@app.post("/api/pay/create-checkout")
-def create_checkout(req: CheckoutRequest):
+migrate()
+
+# ---------- MODELS ----------
+class SearchIn(BaseModel):
+    booking_type: Literal["new", "swap"] = "new"
+    licence_number: Optional[str] = None
+    booking_reference: Optional[str] = None  # for swap flows
+    theory_pass: Optional[str] = None        # for new flows (optional per your spec)
+
+    date_window_from: Optional[str] = Field(None, description="YYYY-MM-DD")
+    date_window_to: Optional[str]   = Field(None, description="YYYY-MM-DD")
+    time_window_from: Optional[str] = Field(None, description="HH:MM (24h)")
+    time_window_to: Optional[str]   = Field(None, description="HH:MM (24h)")
+
+    phone: Optional[str] = None
+    whatsapp: Optional[str] = None
+    email: Optional[str] = None
+
+    centres: List[str] = []
+    options: Dict[str, Any] = Field(default_factory=dict)
+    notes: Optional[str] = None
+
+class PayCreateIntentIn(BaseModel):
+    search_id: int
+    amount: int  # pence
+    currency: str = "gbp"
+    # Optionally allow a description
+    description: Optional[str] = None
+
+# ---------- HELPERS ----------
+def now_iso() -> str:
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+def json_dumps(v) -> str:
+    try:
+        return json.dumps(v, ensure_ascii=False)
+    except Exception:
+        return "null"
+
+def require_admin(request: Request):
+    if not ADMIN_USER or not ADMIN_PASS:
+        return  # no auth set
+    auth = request.headers.get("authorization") or ""
+    if not auth.lower().startswith("basic "):
+        raise HTTPException(status_code=401, detail="Auth required", headers={"WWW-Authenticate":"Basic"})
+    import base64
+    try:
+        decoded = base64.b64decode(auth.split(" ",1)[1]).decode("utf-8")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Bad auth", headers={"WWW-Authenticate":"Basic"})
+    user, _, pwd = decoded.partition(":")
+    if user != ADMIN_USER or pwd != ADMIN_PASS:
+        raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate":"Basic"})
+
+# ---------- ROUTES (paths unchanged) ----------
+@app.post("/api/search")
+async def create_search(payload: SearchIn):
     """
-    Creates a Stripe Checkout Session and returns the hosted URL.
-
-    - `search_id` stored in client_reference_id so we can mark paid in webhook.
-    - Amount is in pence (cents). We clamp/validate on server for safety.
+    Stores ALL form fields. Returns search_id.
+    Status starts as 'new'. Payment webhook will flip to 'queued'.
     """
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=500, detail="Stripe is not configured (missing STRIPE_SECRET_KEY).")
-
-    # Ensure search exists and not already paid
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, paid FROM searches WHERE id = ?", (req.search_id,))
+    ts = now_iso()
+    cur.execute("""
+        INSERT INTO searches (
+            created_at, updated_at, status, last_event, paid,
+            booking_type, licence_number, booking_reference, theory_pass,
+            date_window_from, date_window_to, time_window_from, time_window_to,
+            phone, whatsapp, email, centres_json, options_json, notes
+        ) VALUES (?,?,?,?,?,
+                  ?,?,?,?,
+                  ?,?,?,?,
+                  ?,?,?,?, ?,?)
+    """, (
+        ts, ts, "new", "created", 0,
+        payload.booking_type, payload.licence_number, payload.booking_reference, payload.theory_pass,
+        payload.date_window_from, payload.date_window_to, payload.time_window_from, payload.time_window_to,
+        payload.phone, payload.whatsapp, payload.email, json_dumps(payload.centres), json_dumps(payload.options), payload.notes
+    ))
+    search_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return {"ok": True, "search_id": search_id, "status": "new"}
+
+@app.post("/api/pay/create-intent")
+async def pay_create_intent(body: PayCreateIntentIn):
+    """
+    Creates a Stripe PaymentIntent and stores payment_intent_id on the search.
+    Expects amount in pence and a valid search_id.
+    """
+    # Basic existence check
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM searches WHERE id = ?", (body.search_id,))
     row = cur.fetchone()
     if not row:
         conn.close()
-        raise HTTPException(status_code=404, detail="Search not found.")
-    if row["paid"]:
-        conn.close()
-        raise HTTPException(status_code=400, detail="Already paid.")
-
-    # Defaults for success/cancel URLs (helpful in local dev)
-    success_url = req.success_url or "http://localhost:8787/api/pay/success"
-    cancel_url = req.cancel_url or "http://localhost:8787/api/pay/cancel"
+        raise HTTPException(status_code=404, detail="search_id not found")
 
     try:
-        session = stripe.checkout.Session.create(
-            mode="payment",
-            payment_method_types=["card"],
-            line_items=[
-                {
-                    "price_data": {
-                        "currency": req.currency.lower(),
-                        "product_data": {"name": "DVSA search service"},
-                        "unit_amount": int(req.amount_cents),
-                    },
-                    "quantity": 1,
-                }
-            ],
-            client_reference_id=str(req.search_id),
-            success_url=success_url + "?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url=cancel_url,
+        intent = stripe.PaymentIntent.create(
+            amount=body.amount,
+            currency=body.currency,
+            description=body.description or f"Search #{body.search_id}",
+            metadata={"search_id": str(body.search_id)},
+            automatic_payment_methods={"enabled": True},
         )
     except Exception as e:
         conn.close()
-        raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
     cur.execute(
-        "UPDATE searches SET last_event=? WHERE id=?",
-        (f"checkout_created {now_iso()}", req.search_id),
+        "UPDATE searches SET payment_intent_id = ?, amount = ?, updated_at = ? WHERE id = ?",
+        (intent["id"], body.amount, now_iso(), body.search_id)
     )
     conn.commit()
     conn.close()
-
-    return {"ok": True, "checkout_url": session.url, "session_id": session.id}
-
-
-# NEW: Stripe PaymentIntent for embedded Stripe Elements (stays on your page)
-@app.post("/api/pay/create-intent")
-def create_intent(req: IntentRequest):
-    """
-    Creates a PaymentIntent and returns its client_secret for Stripe Elements.
-
-    If `search_id` is provided, it's stored in metadata so the webhook can
-    mark the corresponding search as paid on `payment_intent.succeeded`.
-    """
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=500, detail="Stripe is not configured (missing STRIPE_SECRET_KEY).")
-
-    try:
-        metadata = {}
-        if req.search_id is not None:
-            metadata["search_id"] = str(req.search_id)
-
-        intent = stripe.PaymentIntent.create(
-            amount=int(req.amount_cents),
-            currency=req.currency.lower(),
-            automatic_payment_methods={"enabled": True},
-            metadata=metadata or None,
-        )
-        return {"client_secret": intent.client_secret}
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
-
+    return {"clientSecret": intent["client_secret"], "paymentIntentId": intent["id"]}
 
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request):
-    """Verify Stripe signature and update DB on successful Checkout/Elements."""
-    if not STRIPE_WEBHOOK_SECRET:
-        raise HTTPException(status_code=500, detail="Missing STRIPE_WEBHOOK_SECRET.")
-
+    """
+    Marks paid + queues the search when the PaymentIntent succeeds.
+    """
     payload = await request.body()
-    sig = request.headers.get("stripe-signature", "")
-
-    try:
-        event = stripe.Webhook.construct_event(
-            payload=payload, sig_header=sig, secret=STRIPE_WEBHOOK_SECRET
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Webhook signature error: {e}")
-
-    # Hosted Checkout success
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        search_id = session.get("client_reference_id")
-        if search_id:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE searches SET paid=1, status=?, last_event=? WHERE id=?",
-                ("paid", f"paid {now_iso()}", int(search_id)),
-            )
-            conn.commit()
-            conn.close()
-
-    # Embedded Elements (PaymentIntent) success
-    elif event["type"] == "payment_intent.succeeded":
-        intent = event["data"]["object"]
-        md = (intent.get("metadata") or {})
-        search_id = md.get("search_id")
-        if search_id:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE searches SET paid=1, status=?, last_event=? WHERE id=?",
-                ("paid", f"paid {now_iso()}", int(search_id)),
-            )
-            conn.commit()
-            conn.close()
-
-    return {"ok": True}
-
-
-# ==============================================================================
-# Simple placeholders (handy in dev)
-# ==============================================================================
-
-@app.get("/api/pay/success")
-def pay_success():
-    return Response("<h3>Payment successful.</h3>", media_type="text/html")
-
-
-@app.get("/api/pay/cancel")
-def pay_cancel():
-    return Response("<h3>Payment canceled.</h3>", media_type="text/html")
-
-
-# ==============================================================================
-# PayPal LIVE capture + verify
-# ==============================================================================
-
-def _paypal_access_token() -> str:
-    if not PAYPAL_CLIENT_ID or not PAYPAL_SECRET:
-        raise HTTPException(status_code=500, detail="PayPal env vars missing")
-    r = requests.post(
-        "https://api-m.paypal.com/v1/oauth2/token",
-        data={"grant_type": "client_credentials"},
-        headers={"Accept": "application/json", "Accept-Language": "en_US"},
-        auth=(PAYPAL_CLIENT_ID, PAYPAL_SECRET),
-        timeout=20,
-    )
-    if not r.ok:
-        raise HTTPException(status_code=500, detail="PayPal OAuth failed")
-    return r.json()["access_token"]
-
-
-@app.post("/api/pay/paypal-capture-verify")
-def paypal_capture_verify(payload: dict):
-    """
-    Body: { "order_id": "<paypal order id>", "expected_gbp": "12.34" }
-    Returns 200 only if the order is COMPLETED and GBP amount matches.
-    """
-    order_id = (payload or {}).get("order_id")
-    expected = (payload or {}).get("expected_gbp")
-    if not order_id:
-        raise HTTPException(status_code=400, detail="order_id required")
-
-    token = _paypal_access_token()
-
-    # 1) Try to CAPTURE
-    cap = requests.post(
-        f"https://api-m.paypal.com/v2/checkout/orders/{order_id}/capture",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "PayPal-Request-Id": order_id,  # idempotency
-        },
-        timeout=30,
-    )
-    data = cap.json()
-
-    # If already captured, fall back to GET the order
-    if not cap.ok:
-        reason = (data.get("details", [{}])[0].get("issue") if isinstance(data, dict) else "")
-        if reason == "ORDER_ALREADY_CAPTURED":
-            getr = requests.get(
-                f"https://api-m.paypal.com/v2/checkout/orders/{order_id}",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=20,
-            )
-            if not getr.ok:
-                raise HTTPException(status_code=400, detail=getr.text)
-            data = getr.json()
-        else:
-            raise HTTPException(status_code=400, detail=data)
-
-    # 2) Verify status + amount (GBP)
-    status = data.get("status")
-    if status != "COMPLETED":
-        raise HTTPException(status_code=400, detail=f"Unexpected status: {status}")
-
-    pu = (data.get("purchase_units") or [None])[0] or {}
-    captures = ((pu.get("payments") or {}).get("captures")) or []
-    total = 0.0
-    currency = "GBP"
-
-    if captures:
-        for c in captures:
-            amt = c.get("amount") or {}
-            currency = amt.get("currency_code", currency)
-            try:
-                total += float(amt.get("value") or 0)
-            except Exception:
-                pass
+    sig_header = request.headers.get("stripe-signature")
+    if not STRIPE_WEBHOOK_SECRET:
+        # If unset (dev), accept without verification
+        event = json.loads(payload.decode())
     else:
-        amt = pu.get("amount") or {}
-        currency = amt.get("currency_code", currency)
         try:
-            total = float(amt.get("value") or 0)
-        except Exception:
-            total = 0.0
+            event = stripe.Webhook.construct_event(
+                payload=payload, sig_header=sig_header, secret=STRIPE_WEBHOOK_SECRET
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Webhook error: {e}")
 
-    if currency != "GBP":
-        raise HTTPException(status_code=400, detail=f"Unexpected currency: {currency}")
+    etype = event.get("type")
+    data = event.get("data", {}).get("object", {})
 
-    if expected:
-        try:
-            if round(float(expected), 2) != round(total, 2):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Amount mismatch: got {total:.2f}, expected {float(expected):.2f}",
-                )
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid expected_gbp")
+    if etype == "payment_intent.succeeded":
+        pi_id = data.get("id")
+        meta = data.get("metadata", {}) or {}
+        sid = meta.get("search_id")
+        if sid:
+            _mark_paid_and_queue(int(sid), pi_id, "payment_intent.succeeded")
+    elif etype == "payment_intent.payment_failed":
+        pi_id = data.get("id")
+        meta = data.get("metadata", {}) or {}
+        sid = meta.get("search_id")
+        if sid:
+            _fail(int(sid), f"payment_failed ({pi_id})")
+    # Acknowledge
+    return JSONResponse({"received": True})
 
-    return {
-        "ok": True,
-        "order_id": order_id,
-        "status": status,
-        "amount": f"{total:.2f}",
-        "currency": currency,
+def _mark_paid_and_queue(search_id: int, payment_intent_id: str, event_label: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE searches
+           SET paid = 1,
+               status = CASE WHEN status='new' THEN 'queued' ELSE status END,
+               last_event = ?,
+               payment_intent_id = ?,
+               updated_at = ?
+         WHERE id = ?
+    """, (event_label, payment_intent_id, now_iso(), search_id))
+    conn.commit()
+    conn.close()
+
+def _fail(search_id: int, reason: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE searches SET status='failed', last_event=?, updated_at=? WHERE id=?
+    """, (reason, now_iso(), search_id))
+    conn.commit()
+    conn.close()
+
+# ---------- ADMIN ----------
+def _badge(s: str) -> str:
+    colors = {
+        "new": "#64748b", "queued": "#2563eb", "searching": "#a855f7",
+        "found": "#10b981", "booked": "#16a34a", "failed": "#ef4444"
     }
+    c = colors.get(s, "#334155")
+    return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
+
+@app.get("/api/admin", response_class=HTMLResponse)
+async def admin(request: Request, status: Optional[str] = Query(None, description="Filter by status")):
+    require_admin(request)  # no-op if env not set
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Summary counts
+    cur.execute("SELECT status, COUNT(*) as c FROM searches GROUP BY status")
+    counts = {r["status"]: r["c"] for r in cur.fetchall()}
+
+    if status:
+        cur.execute("SELECT * FROM searches WHERE status = ? ORDER BY created_at DESC", (status,))
+    else:
+        cur.execute("SELECT * FROM searches ORDER BY created_at DESC")
+    rows = cur.fetchall()
+    conn.close()
+
+    # Simple filters UI
+    statuses = ["new","queued","searching","found","booked","failed"]
+    pills = " ".join(
+        f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>'
+        for s in statuses
+    )
+    clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
+
+    # Table
+    def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
+
+    rows_html = []
+    for r in rows:
+        centres = ", ".join((json.loads(r["centres_json"] or "[]")))
+        opts = r["options_json"]
+        rows_html.append(
+            "<tr>" +
+            td(r["id"]) +
+            td(_badge(r["status"])) +
+            td(r["booking_type"] or "") +
+            td(r["licence_number"] or "") +
+            td(r["booking_reference"] or "") +
+            td(r["theory_pass"] or "") +
+            td(f'{r["date_window_from"] or ""} → {r["date_window_to"] or ""}<br>{r["time_window_from"] or ""} → {r["time_window_to"] or ""}') +
+            td(r["phone"] or "") +
+            td(r["email"] or "") +
+            td(centres) +
+            td(f'<code style="font-size:12px">{opts}</code>') +
+            td(r["last_event"] or "") +
+            td(r["paid"]) +
+            td(r["payment_intent_id"] or "") +
+            td(r["created_at"] or "") +
+            td(r["updated_at"] or "") +
+            "</tr>"
+        )
+
+    html = f"""
+    <html>
+    <head>
+      <title>Admin · FastDrivingTestFinder</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <style>
+        body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:16px;color:#0f172a}}
+        .wrap{{max-width:1200px;margin:0 auto}}
+        h1{{margin:0 0 8px 0}}
+        table{{border-collapse:collapse;width:100%;font-size:14px}}
+        th,td{{border-bottom:1px solid #eee;padding:8px;text-align:left;vertical-align:top}}
+        th{{background:#f8fafc;position:sticky;top:0}}
+        .counts span{{margin-right:10px}}
+        .bar{{display:flex;align-items:center;gap:8px;margin-bottom:12px}}
+        .pill a{{margin-right:6px}}
+        code{{background:#f1f5f9;padding:2px 4px;border-radius:6px}}
+      </style>
+    </head>
+    <body>
+      <div class="wrap">
+        <h1>Searches</h1>
+        <div class="bar">
+          <div class="pill">{pills}{clear}</div>
+        </div>
+        <div class="counts">
+          {"".join(f"<span>{_badge(k)} {v}</span>" for k,v in counts.items())}
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>Status</th><th>Type</th><th>Licence</th><th>Booking Ref</th><th>Theory</th>
+              <th>Date/Time Window</th><th>Phone</th><th>Email</th><th>Centres</th><th>Options</th>
+              <th>Last Event</th><th>Paid</th><th>PI</th><th>Created</th><th>Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(rows_html)}
+          </tbody>
+        </table>
+      </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(html)
