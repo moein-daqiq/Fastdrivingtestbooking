@@ -98,10 +98,6 @@
     .yesno button:hover{border-color:var(--primary)}
     .yesno button.selected{background:#2563eb;color:#fff;border-color:#2563eb}
 
-    .option.row{align-items:flex-start}
-    .option-text{line-height:1.35;margin-top:1px}
-    .yesno{margin-top:-2px}
-
     .panel .option{font-weight:normal !important}
 
     /* Test Centres */
@@ -943,7 +939,7 @@
   <!-- Stripe.js -->
   <script src="https://js.stripe.com/v3/"></script>
   <script>
-  /* Stripe Payment Element (on-page, no redirect) */
+  /* Stripe Payment Element (on-page, no redirect unless required by method) */
   (function(){
     const STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || '';
     const panel   = document.getElementById('stripePanel');
@@ -1081,8 +1077,12 @@
       }
       confBtn.disabled = true;
 
+      const returnUrl = window.location.origin + window.location.pathname;
+
       const {error, paymentIntent} = await stripe.confirmPayment({
         elements,
+        /* ADD return_url for redirect-based methods (Klarna, Revolut Pay, Amazon Pay, etc.) */
+        confirmParams: { return_url: returnUrl },
         redirect: 'if_required'
       });
 
@@ -1102,6 +1102,28 @@
 
     payBtn?.addEventListener('click', (e)=>{ e.preventDefault(); openStripePanel(); });
     confBtn?.addEventListener('click', (e)=>{ e.preventDefault(); confirmStripePayment(); });
+
+    /* Handle redirect back from Stripe (Klarna/Revolut/Amazon Pay, etc.) */
+    (function handleStripeReturn(){
+      const params = new URLSearchParams(window.location.search);
+      const clientSecret = params.get('payment_intent_client_secret');
+      if (clientSecret && STRIPE_PUBLISHABLE_KEY){
+        try{
+          stripe = stripe || Stripe(STRIPE_PUBLISHABLE_KEY);
+          stripe.retrievePaymentIntent(clientSecret).then(({paymentIntent})=>{
+            if (!paymentIntent) return;
+            if (paymentIntent.status === 'succeeded'){
+              showMsg('Payment successful.', true);
+              markPaid();
+            } else if (paymentIntent.status === 'processing'){
+              showMsg('Payment processing… please wait a moment.');
+            } else if (paymentIntent.last_payment_error){
+              showMsg(paymentIntent.last_payment_error.message || 'Payment failed.');
+            }
+          });
+        }catch(e){}
+      }
+    })();
   })();
   </script>
 
