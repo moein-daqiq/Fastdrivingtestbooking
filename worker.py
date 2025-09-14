@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 
 import httpx
+from dvsa_client import DVSAClient, CaptchaDetected  # <-- uses your dvsa_client.py
 
 # ==============================
 # Config / Environment
@@ -50,12 +51,11 @@ AUTOBOOK_MODE = os.environ.get("AUTOBOOK_MODE", "simulate")  # simulate | real
 AUTOBOOK_SIM_SUCCESS_RATE = float(os.environ.get("AUTOBOOK_SIM_SUCCESS_RATE", "0.85"))
 
 # Rate limiting / Circuit breaker
-# Allow N requests/sec per "host" bucket (conceptual; stubs keep the shape)
 DVSA_RPS = float(os.environ.get("DVSA_RPS", "4.0"))  # global per-worker cap
 CB_FAILS_THRESHOLD = int(os.environ.get("CB_FAILS_THRESHOLD", "12"))
 CB_COOLDOWN_SEC = int(os.environ.get("CB_COOLDOWN_SEC", "120"))
 
-# Priority weights (1–10 ideas baked in)
+# Priority weights
 W_DATE_URGENCY = float(os.environ.get("W_DATE_URGENCY", "5.0"))
 W_DATE_WINDOW_WIDTH = float(os.environ.get("W_DATE_WINDOW_WIDTH", "3.0"))
 W_TIME_WINDOW_WIDTH = float(os.environ.get("W_TIME_WINDOW_WIDTH", "2.0"))
@@ -120,8 +120,8 @@ def get_conn():
 def ensure_state_tables():
     """
     Extra state for the worker that doesn't require changing the main API schema.
-    - search_state: last slot signature to implement diff-based alerts (idea #5)
-    - centre_health: simple circuit breaker counters per centre (idea #7)
+    - search_state: last slot signature to implement diff-based alerts
+    - centre_health: simple circuit breaker counters per centre
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -220,13 +220,7 @@ def get_last_slot_sig(sid: int) -> Optional[str]:
 
 def claim_candidates(limit: int) -> List[sqlite3.Row]:
     """
-    Claim up to `limit` jobs, but **prioritize** using a score derived from:
-      - date urgency (earlier date_from)
-      - narrower date window
-      - narrower time window
-      - age (older 'updated_at' gets a boost)
-      - swap bonus (fast, no payment)
-    Implements idea #1, #2, #3, #4, #8, #10 indirectly.
+    Claim up to `limit` jobs, prioritized by urgency, window narrowness, age, and swap bonus.
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -240,38 +234,21 @@ def claim_candidates(limit: int) -> List[sqlite3.Row]:
     scored = []
     now = datetime.utcnow()
     for r in rows:
-        # Date urgency
         d_from = parse_date(r["date_window_from"])
         d_to   = parse_date(r["date_window_to"])
         t_from = parse_time(r["time_window_from"])
         t_to   = parse_time(r["time_window_to"])
 
-        date_urg = 0.0
-        if d_from:
-            days = (d_from - now).days
-            date_urg = 1.0 / max(1.0, days + 1)  # earlier => bigger
-
-        # Date-window narrowness
-        date_span = 0.0
-        if d_from and d_to:
-            span_days = max(0, (d_to - d_from).days + 1)
-            date_span = 1.0 / max(1.0, span_days)  # narrower => bigger
-
-        # Time-window narrowness
+        date_urg = 1.0 / max(1.0, ((d_from - now).days + 1)) if d_from else 0.0
+        date_span = 1.0 / max(1.0, (d_to - d_from).days + 1) if (d_from and d_to) else 0.0
         time_span_min = time_diff_minutes(t_from, t_to)
-        time_span = 0.0
-        if time_span_min is not None and time_span_min > 0:
-            time_span = 1.0 / max(30.0, float(time_span_min))  # narrower => bigger
-
-        # Age boost
+        time_span = 1.0 / max(30.0, float(time_span_min)) if (time_span_min and time_span_min > 0) else 0.0
         try:
             updated = datetime.fromisoformat((r["updated_at"] or "").replace("Z",""))
             age_min = max(1.0, (now - updated).total_seconds() / 60.0)
         except Exception:
             age_min = 60.0
         age_boost = math.log10(age_min + 10.0) / 2.0
-
-        # Swap bonus
         swap_bonus = 1.0 if (r["booking_type"] or "") == "swap" else 0.0
 
         score = (W_DATE_URGENCY*date_urg +
@@ -282,11 +259,9 @@ def claim_candidates(limit: int) -> List[sqlite3.Row]:
 
         scored.append((score, r))
 
-    # Highest scores first, then trim
     scored.sort(key=lambda x: x[0], reverse=True)
     chosen = [r for _, r in scored[:limit]]
 
-    # Claim chosen (flip to searching atomically)
     conn = get_conn()
     cur = conn.cursor()
     claimed: List[sqlite3.Row] = []
@@ -335,7 +310,7 @@ def wa_owner(message: str):
 # Rate Limiter & Circuit Breaker
 # ==============================
 class TokenBucket:
-    """Simple per-host token bucket for RPS limiting (idea #4)."""
+    """Simple per-host token bucket for RPS limiting."""
     def __init__(self, rate_per_sec: float, capacity: float):
         self.rate = rate_per_sec
         self.capacity = capacity
@@ -353,7 +328,7 @@ class TokenBucket:
                 return
             await asyncio.sleep(0.01)
 
-bucket_dvsa = TokenBucket(DVSA_RPS, DVSA_RPS)  # simple single-bucket
+bucket_dvsa = TokenBucket(DVSA_RPS, DVSA_RPS)
 
 def centre_fail(centre: str):
     conn = get_conn()
@@ -364,7 +339,7 @@ def centre_fail(centre: str):
     cooldown_until = None
     if fc >= CB_FAILS_THRESHOLD:
         cooldown_until = (datetime.utcnow() + timedelta(seconds=CB_COOLDOWN_SEC)).isoformat() + "Z"
-        fc = 0  # reset after applying cooldown
+        fc = 0
     if row:
         cur.execute("UPDATE centre_health SET fail_count=?, cooldown_until=? WHERE centre=?", (fc, cooldown_until, centre))
     else:
@@ -387,48 +362,63 @@ def centre_allowed(centre: str) -> bool:
         return True
 
 # ==============================
-# DVSA Stubs (replace later)
-# Lightweight parsing; raw HTTP preferred (idea #6, #8)
+# DVSA: real client integration (replaces previous stubs)
 # ==============================
-async def dvsa_check_centre(client: httpx.AsyncClient, centre: str, row) -> List[str]:
+async def dvsa_check_centre(client_unused, centre: str, row) -> List[str]:
+    """Open DVSA with Playwright and read availability for one centre."""
     if not centre_allowed(centre):
-        # Respect circuit breaker cooldown
         await asyncio.sleep(0.05)
         return []
-
-    # Rate limit + jitter (idea #4)
+    # polite rate limit + jitter
     await bucket_dvsa.acquire()
     await asyncio.sleep(random.randint(0, JITTER_MS) / 1000.0)
 
-    # ---- SIMULATED CALL ----
-    # Keep this extremely light; when replaced with real call, parse only what you need.
-    t0 = time.perf_counter()
     try:
-        await asyncio.sleep(0.2 + random.random() * 0.25)  # simulate latency
-        set_last_event(row["id"], f"checked:{centre}")
-        # pseudo-availability pattern
-        found = (hash(f"{row['id']}::{centre}") % 7 == 0)
-        slots = [f"{centre} · {datetime.utcnow().date()} 08:10"] if found else []
-        return slots
-    except Exception:
+        async with DVSAClient(headless=True) as dvsa:
+            if (row["booking_type"] or "") == "swap":
+                await dvsa.login_swap(
+                    licence_number=row["licence_number"] or "",
+                    booking_reference=row["booking_reference"] or "",
+                    email=row["email"] or None,
+                )
+            else:
+                await dvsa.login_new(
+                    licence_number=row["licence_number"] or "",
+                    theory_pass=row["theory_pass"] or None,
+                    email=row["email"] or None,
+                )
+            set_last_event(row["id"], f"checked:{centre}")
+            return await dvsa.search_centre_slots(centre)
+    except CaptchaDetected:
+        # back off gracefully
+        return []
+    except Exception as e:
+        print(f"[dvsa_check_centre] {centre}: {e}")
         centre_fail(centre)
         return []
-    finally:
-        # observability (idea #10)
-        dt = (time.perf_counter() - t0) * 1000
-        print(f"[check] centre='{centre}' dt_ms={dt:.1f}")
 
-async def dvsa_swap_to_slot(client: httpx.AsyncClient, row, slot: str) -> bool:
-    await asyncio.sleep(0.2 + random.random() * 0.2)
-    return True  # swaps are usually straightforward
+async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
+    """Attempt an automatic swap when options.auto_book=true and booking_type='swap'."""
+    try:
+        async with DVSAClient(headless=True) as dvsa:
+            await dvsa.login_swap(
+                licence_number=row["licence_number"] or "",
+                booking_reference=row["booking_reference"] or "",
+                email=row["email"] or None,
+            )
+            return await dvsa.swap_to(slot)
+    except CaptchaDetected:
+        return False
+    except Exception as e:
+        print(f"[dvsa_swap_to_slot] {e}")
+        return False
 
-async def dvsa_book_and_pay(client: httpx.AsyncClient, row, slot: str) -> bool:
-    if AUTOBOOK_MODE == "simulate":
-        await asyncio.sleep(0.3 + random.random() * 0.4)
-        return random.random() < AUTOBOOK_SIM_SUCCESS_RATE
-    else:
-        # Real autopay requires an approved DVSA integration (not Stripe).
-        raise NotImplementedError("REAL DVSA autopay requires DVSA-approved flow.")
+async def dvsa_book_and_pay(client_unused, row, slot: str) -> bool:
+    """
+    New bookings remain assisted (you pay on DVSA).
+    We do not automate DVSA payment/SCA, so always return False.
+    """
+    return False
 
 # ==============================
 # Assist window (15-min alert loop)
@@ -450,7 +440,6 @@ async def assist_window_monitor(sid: int, slot_txt: str):
             f"If you’ve paid already, ignore this."
         )
         await asyncio.sleep(ASSIST_NOTIFY_PING_SECONDS)
-    # final ping if unresolved
     status, _ = get_status_tuple(sid)
     if status not in ("booked", "failed"):
         wa_owner(f"⌛ FASTDTF: Assist window ended for search #{sid}. If not booked, the slot may be gone.")
@@ -464,8 +453,6 @@ async def process_job(client: httpx.AsyncClient, row):
     if not centres:
         centres = ["(no centre provided)"]
 
-    # Limit the search surface strictly to selected centres (idea #2)
-    # Per-job parallelism cap (idea #4)
     sem = asyncio.Semaphore(JOB_MAX_PARALLEL_CHECKS)
     found_slot: Optional[str] = None
 
@@ -480,24 +467,20 @@ async def process_job(client: httpx.AsyncClient, row):
 
     await asyncio.gather(*(asyncio.create_task(check_one(c)) for c in centres))
 
-    # No slot found this round → return to queue (idea #5 diff-based alerts handled below)
     if not found_slot:
         set_status(sid, "queued", "no_slots_this_round")
         return
 
-    # Diff-based alert: avoid spamming the same "found" repeatedly (idea #5)
     sig = f"{found_slot}"
     prev = get_last_slot_sig(sid)
     if prev == sig:
-        # We already alerted this exact slot; just re-queue (light nudge)
         set_status(sid, "queued", "slot_unchanged")
         return
     save_last_slot_sig(sid, sig)
 
-    # Found a slot — act according to options
     options = safe_json_loads(row["options_json"], {})
     if AUTOBOOK_ENABLED and options.get("auto_book", False):
-        if row["booking_type"] == "swap":
+        if (row["booking_type"] or "") == "swap":
             ok = await dvsa_swap_to_slot(client, row, found_slot)
         else:
             ok = await dvsa_book_and_pay(client, row, found_slot)
