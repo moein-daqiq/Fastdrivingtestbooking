@@ -398,7 +398,7 @@
         <!-- Stripe pay button -->
         <div class="pp-row">
           <button id="stripePayBtn" class="submit-btn enabled" style="width:100%;max-width:360px;background:#635bff">
-            Pay by Card (Stripe)
+            Payment options
           </button>
         </div>
 
@@ -843,24 +843,24 @@
       function collectPayload() {
         const centres = $$('.centre-input').map(i => i.value.trim()).filter(Boolean);
 
-        const swapSelected  = $('#btnSwap')?.classList.contains('selected');
-        const bookSelected  = $('#btnBook')?.classList.contains('selected');
-        const swapRef       = $('#swapRef')?.value.trim() || '';
-        const theoryPass    = $('#theoryPass')?.value.trim() || '';
+        const swapSelected  = document.getElementById('btnSwap')?.classList.contains('selected');
+        const bookSelected  = document.getElementById('btnBook')?.classList.contains('selected');
+        const swapRef       = document.getElementById('swapRef')?.value.trim() || '';
+        const theoryPass    = document.getElementById('theoryPass')?.value.trim() || '';
 
         const payload = {
-          email:  $('#email')?.value.trim() || null,
-          phone:  normalizePhone($('#phoneRaw')?.value),
+          email:  document.getElementById('email')?.value.trim() || null,
+          phone:  normalizePhone(document.getElementById('phoneRaw')?.value),
 
           centres: centres.join(','),
-          from_date: ymd($('#earliestDate')),
-          to_date:   ymd($('#latestDate')),
-          time_from: toHH($('#timeFrom')?.value),
-          time_to:   toHHpm($('#timeTo')?.value),
-          notice_days: parseInt($('#noticeDays')?.value || '0', 10) || 0,
+          from_date: ymd(document.getElementById('earliestDate')),
+          to_date:   ymd(document.getElementById('latestDate')),
+          time_from: toHH(document.getElementById('timeFrom')?.value),
+          time_to:   toHHpm(document.getElementById('timeTo')?.value),
+          notice_days: parseInt(document.getElementById('noticeDays')?.value || '0', 10) || 0,
 
-          surname:         $('#surname')?.value.trim() || null,
-          licence_number:  $('#drivingLicence')?.value.trim() || null,
+          surname:         document.getElementById('surname')?.value.trim() || null,
+          licence_number:  document.getElementById('drivingLicence')?.value.trim() || null,
 
           booking_reference: swapSelected ? swapRef : undefined,
           theory_pass:       bookSelected ? theoryPass : undefined,
@@ -948,6 +948,9 @@
     const confBtn = document.getElementById('stripeConfirmBtn');
 
     let stripe, elements, paymentElement, lastClientSecret = '';
+    let currentMethodType = 'card'; // default tab is card in Payment Element
+
+    const redirectMethods = new Set(['klarna','revolut_pay','amazon_pay']);
 
     function amountFromTotalLine(){
       const txt = (document.getElementById('totalLine')?.textContent || '');
@@ -1014,26 +1017,17 @@
       return sid;
     }
 
-    async function openStripePanel(){
-      panel.style.display = 'block'; // open first so errors are visible
-
-      if (!STRIPE_PUBLISHABLE_KEY){
-        showMsg('Stripe publishable key is missing on this page. Add window.STRIPE_PUBLISHABLE_KEY in <head>.');
-        return;
-      }
-      if (!requireBookingTypeOrReject()) return;
-
+    async function createIntentIfNeeded(){
       const amount = amountFromTotalLine();
       if (!amount || isNaN(+amount) || +amount <= 0){
         showMsg('Total is not valid.');
-        return;
+        return false;
       }
 
       let searchId;
       try { searchId = await ensurePreSearch(); }
-      catch (e) { console.error(e); return; }
+      catch (e) { console.error(e); return false; }
 
-      // Create a PaymentIntent (server)
       try{
         const r = await fetch(`${API_BASE}/pay/create-intent`, {
           method:'POST',
@@ -1049,11 +1043,24 @@
           throw new Error(j?.detail || j?.error || 'Failed to create payment intent');
         }
         lastClientSecret = j.client_secret;
+        return true;
       }catch(err){
         console.error(err);
         showMsg('Stripe error: ' + (err?.message || err));
+        return false;
+      }
+    }
+
+    async function openStripePanel(){
+      panel.style.display = 'block'; // open first so errors are visible
+      if (!STRIPE_PUBLISHABLE_KEY){
+        showMsg('Stripe publishable key is missing on this page. Add window.STRIPE_PUBLISHABLE_KEY in <head>.');
         return;
       }
+      if (!requireBookingTypeOrReject()) return;
+
+      const ok = await createIntentIfNeeded();
+      if (!ok) return;
 
       // Mount Payment Element
       try{
@@ -1062,6 +1069,22 @@
         if (paymentElement) paymentElement.unmount();
         paymentElement = elements.create('payment');
         paymentElement.mount('#payment-element');
+
+        // Track selected method + auto-redirect for redirect methods once complete
+        paymentElement.on('change', async (ev) => {
+          currentMethodType = (ev?.value && ev.value.type) ? ev.value.type : 'card';
+          if (redirectMethods.has(currentMethodType)) {
+            // show hint and, once details complete, trigger redirect immediately
+            showMsg('You will be redirected to complete payment…');
+            if (ev.complete) {
+              await confirmRedirectMethod();
+            }
+          } else {
+            // clear message when on card
+            showMsg('', true);
+          }
+        });
+
         showMsg('', true);
         document.getElementById('stripePanel').scrollIntoView({behavior:'smooth', block:'center'});
       }catch(err){
@@ -1070,7 +1093,25 @@
       }
     }
 
+    async function confirmRedirectMethod(){
+      // For Klarna / Revolut Pay / Amazon Pay: immediate redirect
+      const returnUrl = window.location.origin + window.location.pathname;
+      const {error} = await stripe.confirmPayment({
+        elements,
+        confirmParams: { return_url: returnUrl },
+        redirect: 'always'
+      });
+      if (error){
+        showMsg(error.message || 'Payment failed.');
+      }
+    }
+
     async function confirmStripePayment(){
+      // Only allow Pay now for CARD
+      if (redirectMethods.has(currentMethodType)) {
+        showMsg('For Klarna, Revolut Pay or Amazon Pay, select the option above and you will be redirected automatically.');
+        return;
+      }
       if (!stripe || !elements){
         showMsg('Payment form is not ready yet.');
         return;
@@ -1081,7 +1122,6 @@
 
       const {error, paymentIntent} = await stripe.confirmPayment({
         elements,
-        /* ADD return_url for redirect-based methods (Klarna, Revolut Pay, Amazon Pay, etc.) */
         confirmParams: { return_url: returnUrl },
         redirect: 'if_required'
       });
