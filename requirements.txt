@@ -7,6 +7,7 @@ python-multipart==0.0.9
 
 # HTTP client with HTTP/2 support (installs h2/hpack/hyperframe)
 httpx[http2]==0.27.2
+h2==4.1.0
 
 # Payments & messaging (left unpinned)
 stripe
