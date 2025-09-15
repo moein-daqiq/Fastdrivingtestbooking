@@ -67,6 +67,10 @@ W_TIME_WINDOW_WIDTH = float(os.environ.get("W_TIME_WINDOW_WIDTH", "2.0"))
 W_AGE_BOOST = float(os.environ.get("W_AGE_BOOST", "1.5"))
 W_SWAP_BONUS = float(os.environ.get("W_SWAP_BONUS", "0.5"))
 
+# Bot wall / quiet hours
+CAPTCHA_COOLDOWN_MIN = int(os.environ.get("CAPTCHA_COOLDOWN_MIN", "30"))  # global cool-off after bot wall
+QUIET_HOURS = os.environ.get("QUIET_HOURS", "").strip()  # e.g. "22-06,12-13" (UTC)
+
 # Lazily import Twilio if creds exist
 _twilio_client = None
 def _get_twilio():
@@ -114,6 +118,38 @@ def safe_json_loads(s: Optional[str], default):
     except Exception:
         return default
 
+# Quiet hours parsing
+def _parse_quiet_hours(spec: str) -> List[Tuple[int,int]]:
+    """Parse '22-06,12-13' into [(22,6),(12,13)]."""
+    out = []
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part or "-" not in part:
+            continue
+        a, b = part.split("-", 1)
+        try:
+            out.append((int(a), int(b)))
+        except:
+            pass
+    return out
+
+def is_quiet_now() -> bool:
+    """UTC-based quiet window check."""
+    if not QUIET_HOURS:
+        return False
+    now_h = datetime.utcnow().hour
+    for start, end in _parse_quiet_hours(QUIET_HOURS):
+        if start == end:  # whole day
+            return True
+        if start < end:
+            if start <= now_h < end:
+                return True
+        else:
+            # wraps midnight
+            if now_h >= start or now_h < end:
+                return True
+    return False
+
 # ==============================
 # DB (worker-only small state)
 # ==============================
@@ -127,7 +163,7 @@ def ensure_state_tables():
     """
     Extra state for the worker that doesn't require changing the main API schema.
     - search_state: last slot signature to implement diff-based alerts
-    - centre_health: simple circuit breaker counters per centre
+    - centre_health: simple circuit breaker counters per centre (+ special '*global*')
     """
     conn = get_conn()
     cur = conn.cursor()
@@ -192,7 +228,7 @@ async def post_event_api(client: httpx.AsyncClient, sid: int, event: str):
     except Exception as e:
         print(f"[worker:event] {sid}: {e}")
 
-_status_cache: dict[int, Tuple[str, str]] = {}
+_status_cache: dict[int, Tuple[Optional[str], Optional[str]]] = {}
 
 async def set_status_api(client: httpx.AsyncClient, job: dict, status: str, event: str):
     await _api_post(client, f"/api/worker/searches/{job['id']}/status", {"status": status, "event": event})
@@ -302,20 +338,51 @@ def centre_allowed(centre: str) -> bool:
     except Exception:
         return True
 
+# Global cooldown helpers (special centre='*global*')
+def global_cooldown(extra_min: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    until = (datetime.utcnow() + timedelta(minutes=max(1, extra_min))).isoformat() + "Z"
+    cur.execute("""
+        INSERT INTO centre_health(centre, fail_count, cooldown_until)
+        VALUES ('*global*', 0, ?)
+        ON CONFLICT(centre) DO UPDATE SET cooldown_until=excluded.cooldown_until
+    """, (until,))
+    conn.commit()
+    conn.close()
+
+def global_allowed() -> bool:
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute("SELECT cooldown_until FROM centre_health WHERE centre='*global*'")
+    row = cur.fetchone(); conn.close()
+    if not row or not row["cooldown_until"]:
+        return True
+    try:
+        return datetime.utcnow() >= datetime.fromisoformat(row["cooldown_until"].replace("Z",""))
+    except Exception:
+        return True
+
 # ==============================
 # DVSA integration
 # ==============================
-async def dvsa_check_centre(client_unused, centre: str, row) -> List[str]:
+async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -> List[str]:
     """Open DVSA with Playwright and read availability for one centre."""
+    if not global_allowed():
+        await asyncio.sleep(0.05)
+        return []
     if not centre_allowed(centre):
         await asyncio.sleep(0.05)
         return []
+
     # polite rate limit + jitter
     await bucket_dvsa.acquire()
     await asyncio.sleep(random.randint(0, JITTER_MS) / 1000.0)
 
+    # Persist session per licence if available (reduces friction)
+    session_key = (row.get("licence_number") or f"job{row['id']}").replace(" ", "")[:20]
+
     try:
-        async with DVSAClient(headless=True) as dvsa:
+        async with DVSAClient(headless=True, session_key=session_key) as dvsa:
             if (row.get("booking_type") or "") == "swap":
                 await dvsa.login_swap(
                     licence_number=row.get("licence_number") or "",
@@ -329,10 +396,16 @@ async def dvsa_check_centre(client_unused, centre: str, row) -> List[str]:
                     email=row.get("email") or None,
                 )
             # record check event back to API
-            await post_event_api(client_unused, row["id"], f"checked:{centre}")
+            await post_event_api(client_httpx, row["id"], f"checked:{centre}")
             return await dvsa.search_centre_slots(centre)
     except CaptchaDetected:
-        return []
+        # Back off hard: centre cooldown counted via fail + global cool-off, notify owner, post event
+        centre_fail(centre)
+        global_cooldown(CAPTCHA_COOLDOWN_MIN)
+        wa_owner(f"🛑 DVSA bot wall hit for search #{row['id']} at {centre}. Cooling for {CAPTCHA_COOLDOWN_MIN}m.")
+        await post_event_api(client_httpx, row["id"], f"captcha_cooldown:{centre}")
+        # Propagate so the job cycle can be stopped for this search
+        raise
     except Exception as e:
         print(f"[dvsa_check_centre] {centre}: {e}")
         centre_fail(centre)
@@ -340,8 +413,9 @@ async def dvsa_check_centre(client_unused, centre: str, row) -> List[str]:
 
 async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
     """Attempt an automatic swap when options.auto_book=true and booking_type='swap'."""
+    session_key = (row.get("licence_number") or f"job{row['id']}").replace(" ", "")[:20]
     try:
-        async with DVSAClient(headless=True) as dvsa:
+        async with DVSAClient(headless=True, session_key=session_key) as dvsa:
             await dvsa.login_swap(
                 licence_number=row.get("licence_number") or "",
                 booking_reference=row.get("booking_reference") or "",
@@ -357,7 +431,7 @@ async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
 async def dvsa_book_and_pay(client_unused, row, slot: str) -> bool:
     """
     New bookings remain assisted (you pay on DVSA).
-    We do not automate DVSA payment/SCA, so always return False.
+    We do not automate DVSA payment/SCA, so always return False (unless simulate).
     """
     if AUTOBOOK_MODE == "simulate":
         await asyncio.sleep(0.3 + random.random() * 0.4)
@@ -399,17 +473,26 @@ async def process_job(client: httpx.AsyncClient, row: dict):
 
     sem = asyncio.Semaphore(JOB_MAX_PARALLEL_CHECKS)
     found_slot: Optional[str] = None
+    captcha_hit = False
 
     async def check_one(c: str):
-        nonlocal found_slot
+        nonlocal found_slot, captcha_hit
         async with sem:
-            if found_slot is not None:
+            if found_slot is not None or captcha_hit:
                 return
-            slots = await dvsa_check_centre(client, c, row)
+            try:
+                slots = await dvsa_check_centre(client, c, row)
+            except CaptchaDetected:
+                captcha_hit = True
+                return
             if slots and found_slot is None:
                 found_slot = slots[0]
 
     await asyncio.gather(*(asyncio.create_task(check_one(c)) for c in centres))
+
+    if captcha_hit:
+        await set_status_api(client, row, "queued", "captcha_cooldown")
+        return
 
     if not found_slot:
         await set_status_api(client, row, "queued", "no_slots_this_round")
@@ -444,10 +527,19 @@ async def run():
     timeout = httpx.Timeout(REQUEST_TIMEOUT)
     headers = {"User-Agent": USER_AGENT}
 
-    async with httpx.AsyncClient(http2=True, limits=limits, timeout=timeout, headers=headers) as client:
-        print(f"[worker] up state_db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=on rps={DVSA_RPS} mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED}")
+    # HTTP/2 disabled for reliability unless you pin/install h2
+    async with httpx.AsyncClient(http2=False, limits=limits, timeout=timeout, headers=headers) as client:
+        print(f"[worker] up state_db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=off rps={DVSA_RPS} mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED}")
         while True:
             try:
+                # Respect quiet hours & global cooldown
+                if is_quiet_now():
+                    await asyncio.sleep(POLL_SEC)
+                    continue
+                if not global_allowed():
+                    await asyncio.sleep(POLL_SEC)
+                    continue
+
                 jobs = await claim_candidates_api(client, CONCURRENCY)
                 if not jobs:
                     await asyncio.sleep(POLL_SEC)
