@@ -14,7 +14,12 @@ from dvsa_client import DVSAClient, CaptchaDetected  # <-- uses your dvsa_client
 # ==============================
 # Config / Environment
 # ==============================
-DB_FILE = os.environ.get("SEARCHES_DB", "searches.db")
+# Worker keeps its own tiny state DB in /tmp (no PD needed)
+DB_FILE = os.environ.get("SEARCHES_DB", "/tmp/worker_state.db")
+
+# API bridge (claim jobs + post status/events)
+API_BASE = os.environ.get("API_BASE", "").rstrip("/")
+WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 
 # Poll + concurrency
 POLL_SEC = int(os.environ.get("WORKER_POLL_SEC", "30"))
@@ -36,7 +41,7 @@ TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
 # Twilio Sandbox sender default; replace with your approved WA sender if you have one
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
-# Your number (recipient) — default to your provided number
+# Your number (recipient)
 WHATSAPP_OWNER_TO = os.environ.get("WHATSAPP_OWNER_TO", "whatsapp:+447402597000")
 ADMIN_URL = os.environ.get("ADMIN_URL", "")
 
@@ -110,9 +115,10 @@ def safe_json_loads(s: Optional[str], default):
         return default
 
 # ==============================
-# DB
+# DB (worker-only small state)
 # ==============================
 def get_conn():
+    os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
@@ -144,61 +150,6 @@ def ensure_state_tables():
 
 ensure_state_tables()
 
-def set_last_event(sid: int, event: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE searches SET last_event=?, updated_at=? WHERE id=?",
-                (event, now_iso(), sid))
-    conn.commit()
-    conn.close()
-
-def set_status(sid: int, status: str, event: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE searches SET status=?, last_event=?, updated_at=? WHERE id=?",
-                (status, event, now_iso(), sid))
-    conn.commit()
-    cur.execute("SELECT * FROM searches WHERE id=?", (sid,))
-    row = cur.fetchone()
-    conn.close()
-
-    payload = {
-        "id": sid,
-        "status": status,
-        "last_event": event,
-        "booking_type": row["booking_type"],
-        "phone": row["phone"],
-        "email": row["email"],
-        "centres": safe_json_loads(row["centres_json"], [])
-    }
-    notify("search.status", payload)
-
-    # Notify YOU for new bookings (action needed)
-    if row["booking_type"] == "new":
-        if status == "found":
-            centres = payload["centres"]
-            slot_txt = event.replace("slot_found:", "")
-            admin_link = f"\nAdmin: {ADMIN_URL}?status=found" if ADMIN_URL else ""
-            wa_owner(
-                f"🔔 FASTDTF: Slot FOUND (new booking)\n"
-                f"Search #{sid}\n"
-                f"{slot_txt}\n"
-                f"Centres: {', '.join(centres) if centres else '-'}{admin_link}\n"
-                f"Act now: open DVSA and pay to confirm."
-            )
-        elif status == "booked":
-            wa_owner(f"✅ FASTDTF: Booking CONFIRMED for search #{sid}\n{event.replace('booked:', '')}")
-        elif status == "failed":
-            wa_owner(f"❌ FASTDTF: Booking FAILED for search #{sid}\n{event.replace('booking_failed:', '')}")
-
-def get_status_tuple(sid: int) -> Tuple[Optional[str], Optional[str]]:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT status, last_event FROM searches WHERE id=?", (sid,))
-    row = cur.fetchone()
-    conn.close()
-    return (row["status"], row["last_event"]) if row else (None, None)
-
 def save_last_slot_sig(sid: int, sig: str):
     conn = get_conn()
     cur = conn.cursor()
@@ -218,65 +169,55 @@ def get_last_slot_sig(sid: int) -> Optional[str]:
     conn.close()
     return row["last_slot_sig"] if row else None
 
-def claim_candidates(limit: int) -> List[sqlite3.Row]:
-    """
-    Claim up to `limit` jobs, prioritized by urgency, window narrowness, age, and swap bonus.
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM searches
-         WHERE paid=1 AND status IN ('queued','new')
-    """)
-    rows = cur.fetchall()
-    conn.close()
+# ==============================
+# API bridge (claim + events + status)
+# ==============================
+async def _api_post(client: httpx.AsyncClient, path: str, payload: dict):
+    if not API_BASE:
+        raise RuntimeError("API_BASE not set")
+    headers = {}
+    if WORKER_TOKEN:
+        headers["Authorization"] = f"Bearer {WORKER_TOKEN}"
+    r = await client.post(f"{API_BASE}{path}", json=payload, headers=headers)
+    r.raise_for_status()
+    return r.json()
 
-    scored = []
-    now = datetime.utcnow()
-    for r in rows:
-        d_from = parse_date(r["date_window_from"])
-        d_to   = parse_date(r["date_window_to"])
-        t_from = parse_time(r["time_window_from"])
-        t_to   = parse_time(r["time_window_to"])
+async def claim_candidates_api(client: httpx.AsyncClient, limit: int) -> List[dict]:
+    data = await _api_post(client, "/api/worker/claim", {"limit": limit})
+    return data.get("items", [])
 
-        date_urg = 1.0 / max(1.0, ((d_from - now).days + 1)) if d_from else 0.0
-        date_span = 1.0 / max(1.0, (d_to - d_from).days + 1) if (d_from and d_to) else 0.0
-        time_span_min = time_diff_minutes(t_from, t_to)
-        time_span = 1.0 / max(30.0, float(time_span_min)) if (time_span_min and time_span_min > 0) else 0.0
-        try:
-            updated = datetime.fromisoformat((r["updated_at"] or "").replace("Z",""))
-            age_min = max(1.0, (now - updated).total_seconds() / 60.0)
-        except Exception:
-            age_min = 60.0
-        age_boost = math.log10(age_min + 10.0) / 2.0
-        swap_bonus = 1.0 if (r["booking_type"] or "") == "swap" else 0.0
+async def post_event_api(client: httpx.AsyncClient, sid: int, event: str):
+    try:
+        await _api_post(client, f"/api/worker/searches/{sid}/event", {"event": event})
+    except Exception as e:
+        print(f"[worker:event] {sid}: {e}")
 
-        score = (W_DATE_URGENCY*date_urg +
-                 W_DATE_WINDOW_WIDTH*date_span +
-                 W_TIME_WINDOW_WIDTH*time_span +
-                 W_AGE_BOOST*age_boost +
-                 W_SWAP_BONUS*swap_bonus)
+_status_cache: dict[int, Tuple[str, str]] = {}
 
-        scored.append((score, r))
+async def set_status_api(client: httpx.AsyncClient, job: dict, status: str, event: str):
+    await _api_post(client, f"/api/worker/searches/{job['id']}/status", {"status": status, "event": event})
+    _status_cache[job["id"]] = (status, event)
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    chosen = [r for _, r in scored[:limit]]
+    # Owner notifications for NEW bookings
+    if (job.get("booking_type") or "") == "new":
+        centres = safe_json_loads(job.get("centres_json"), [])
+        if status == "found":
+            slot_txt = event.replace("slot_found:", "")
+            admin_link = f"\nAdmin: {ADMIN_URL}?status=found" if ADMIN_URL else ""
+            wa_owner(
+                f"🔔 FASTDTF: Slot FOUND (new booking)\n"
+                f"Search #{job['id']}\n"
+                f"{slot_txt}\n"
+                f"Centres: {', '.join(centres) if centres else '-'}{admin_link}\n"
+                f"Act now: open DVSA and pay to confirm."
+            )
+        elif status == "booked":
+            wa_owner(f"✅ FASTDTF: Booking CONFIRMED for search #{job['id']}\n{event.replace('booked:', '')}")
+        elif status == "failed":
+            wa_owner(f"❌ FASTDTF: Booking FAILED for search #{job['id']}\n{event.replace('booking_failed:', '')}")
 
-    conn = get_conn()
-    cur = conn.cursor()
-    claimed: List[sqlite3.Row] = []
-    for r in chosen:
-        cur.execute("""
-            UPDATE searches
-               SET status='searching', last_event='worker_claimed', updated_at=?
-             WHERE id=? AND status IN ('queued','new') AND paid=1
-        """, (now_iso(), r["id"]))
-        if cur.rowcount:
-            cur.execute("SELECT * FROM searches WHERE id=?", (r["id"],))
-            claimed.append(cur.fetchone())
-    conn.commit()
-    conn.close()
-    return claimed
+def get_status_tuple_from_cache(sid: int) -> Tuple[Optional[str], Optional[str]]:
+    return _status_cache.get(sid, (None, None))
 
 # ==============================
 # Notifications
@@ -362,7 +303,7 @@ def centre_allowed(centre: str) -> bool:
         return True
 
 # ==============================
-# DVSA: real client integration (replaces previous stubs)
+# DVSA integration
 # ==============================
 async def dvsa_check_centre(client_unused, centre: str, row) -> List[str]:
     """Open DVSA with Playwright and read availability for one centre."""
@@ -375,22 +316,22 @@ async def dvsa_check_centre(client_unused, centre: str, row) -> List[str]:
 
     try:
         async with DVSAClient(headless=True) as dvsa:
-            if (row["booking_type"] or "") == "swap":
+            if (row.get("booking_type") or "") == "swap":
                 await dvsa.login_swap(
-                    licence_number=row["licence_number"] or "",
-                    booking_reference=row["booking_reference"] or "",
-                    email=row["email"] or None,
+                    licence_number=row.get("licence_number") or "",
+                    booking_reference=row.get("booking_reference") or "",
+                    email=row.get("email") or None,
                 )
             else:
                 await dvsa.login_new(
-                    licence_number=row["licence_number"] or "",
-                    theory_pass=row["theory_pass"] or None,
-                    email=row["email"] or None,
+                    licence_number=row.get("licence_number") or "",
+                    theory_pass=row.get("theory_pass") or None,
+                    email=row.get("email") or None,
                 )
-            set_last_event(row["id"], f"checked:{centre}")
+            # record check event back to API
+            await post_event_api(client_unused, row["id"], f"checked:{centre}")
             return await dvsa.search_centre_slots(centre)
     except CaptchaDetected:
-        # back off gracefully
         return []
     except Exception as e:
         print(f"[dvsa_check_centre] {centre}: {e}")
@@ -402,9 +343,9 @@ async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
     try:
         async with DVSAClient(headless=True) as dvsa:
             await dvsa.login_swap(
-                licence_number=row["licence_number"] or "",
-                booking_reference=row["booking_reference"] or "",
-                email=row["email"] or None,
+                licence_number=row.get("licence_number") or "",
+                booking_reference=row.get("booking_reference") or "",
+                email=row.get("email") or None,
             )
             return await dvsa.swap_to(slot)
     except CaptchaDetected:
@@ -418,6 +359,9 @@ async def dvsa_book_and_pay(client_unused, row, slot: str) -> bool:
     New bookings remain assisted (you pay on DVSA).
     We do not automate DVSA payment/SCA, so always return False.
     """
+    if AUTOBOOK_MODE == "simulate":
+        await asyncio.sleep(0.3 + random.random() * 0.4)
+        return random.random() < AUTOBOOK_SIM_SUCCESS_RATE
     return False
 
 # ==============================
@@ -428,7 +372,7 @@ async def assist_window_monitor(sid: int, slot_txt: str):
         return
     end_at = datetime.utcnow() + timedelta(minutes=ASSIST_NOTIFY_WINDOW_MIN)
     while datetime.utcnow() < end_at:
-        status, _ = get_status_tuple(sid)
+        status, _ = get_status_tuple_from_cache(sid)
         if status in ("booked", "failed"):
             return
         mins_left = int((end_at - datetime.utcnow()).total_seconds() // 60)
@@ -440,16 +384,16 @@ async def assist_window_monitor(sid: int, slot_txt: str):
             f"If you’ve paid already, ignore this."
         )
         await asyncio.sleep(ASSIST_NOTIFY_PING_SECONDS)
-    status, _ = get_status_tuple(sid)
+    status, _ = get_status_tuple_from_cache(sid)
     if status not in ("booked", "failed"):
         wa_owner(f"⌛ FASTDTF: Assist window ended for search #{sid}. If not booked, the slot may be gone.")
 
 # ==============================
 # Core Job Processing
 # ==============================
-async def process_job(client: httpx.AsyncClient, row):
+async def process_job(client: httpx.AsyncClient, row: dict):
     sid = row["id"]
-    centres: List[str] = safe_json_loads(row["centres_json"], [])
+    centres: List[str] = safe_json_loads(row.get("centres_json"), [])
     if not centres:
         centres = ["(no centre provided)"]
 
@@ -468,28 +412,28 @@ async def process_job(client: httpx.AsyncClient, row):
     await asyncio.gather(*(asyncio.create_task(check_one(c)) for c in centres))
 
     if not found_slot:
-        set_status(sid, "queued", "no_slots_this_round")
+        await set_status_api(client, row, "queued", "no_slots_this_round")
         return
 
     sig = f"{found_slot}"
     prev = get_last_slot_sig(sid)
     if prev == sig:
-        set_status(sid, "queued", "slot_unchanged")
+        await set_status_api(client, row, "queued", "slot_unchanged")
         return
     save_last_slot_sig(sid, sig)
 
-    options = safe_json_loads(row["options_json"], {})
+    options = safe_json_loads(row.get("options_json"), {})
     if AUTOBOOK_ENABLED and options.get("auto_book", False):
-        if (row["booking_type"] or "") == "swap":
+        if (row.get("booking_type") or "") == "swap":
             ok = await dvsa_swap_to_slot(client, row, found_slot)
         else:
             ok = await dvsa_book_and_pay(client, row, found_slot)
         if ok:
-            set_status(sid, "booked", f"booked:{found_slot}")
+            await set_status_api(client, row, "booked", f"booked:{found_slot}")
         else:
-            set_status(sid, "failed", f"booking_failed:{found_slot}")
+            await set_status_api(client, row, "failed", f"booking_failed:{found_slot}")
     else:
-        set_status(sid, "found", f"slot_found:{found_slot}")
+        await set_status_api(client, row, "found", f"slot_found:{found_slot}")
         asyncio.create_task(assist_window_monitor(sid, found_slot))
 
 # ==============================
@@ -501,13 +445,16 @@ async def run():
     headers = {"User-Agent": USER_AGENT}
 
     async with httpx.AsyncClient(http2=True, limits=limits, timeout=timeout, headers=headers) as client:
-        print(f"[worker] up db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=on rps={DVSA_RPS} mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED}")
+        print(f"[worker] up state_db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=on rps={DVSA_RPS} mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED}")
         while True:
             try:
-                jobs = claim_candidates(CONCURRENCY)
+                jobs = await claim_candidates_api(client, CONCURRENCY)
                 if not jobs:
                     await asyncio.sleep(POLL_SEC)
                     continue
+                # seed cache for assist window
+                for j in jobs:
+                    _status_cache[j["id"]] = (j.get("status") or "searching", j.get("last_event") or "")
                 await asyncio.gather(*(process_job(client, j) for j in jobs))
             except Exception as e:
                 print(f"[worker] error: {e}")
