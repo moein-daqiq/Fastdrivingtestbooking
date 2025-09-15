@@ -7,7 +7,7 @@ import stripe
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Literal
 
-from fastapi import FastAPI, Request, HTTPException, Depends, Query
+from fastapi import FastAPI, Request, HTTPException, Depends, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -18,6 +18,8 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 DB_FILE = os.environ.get("SEARCHES_DB", "searches.db")
 ADMIN_USER = os.environ.get("ADMIN_BASIC_AUTH_USER")
 ADMIN_PASS = os.environ.get("ADMIN_BASIC_AUTH_PASS")
+# Worker API auth token (set this in both API & Worker services)
+WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -36,6 +38,8 @@ app.add_middleware(
 
 # ---------- DB ----------
 def get_conn():
+    # Ensure parent directory exists (helps when DB_FILE is under /data or similar)
+    os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
@@ -134,6 +138,17 @@ class PayCreateIntentIn(BaseModel):
     # Optionally allow a description
     description: Optional[str] = None
 
+# Worker API models
+class WorkerClaimRequest(BaseModel):
+    limit: int = 8
+
+class WorkerEvent(BaseModel):
+    event: str
+
+class WorkerStatus(BaseModel):
+    status: str
+    event: str
+
 # ---------- HELPERS ----------
 def now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -158,6 +173,20 @@ def require_admin(request: Request):
     user, _, pwd = decoded.partition(":")
     if user != ADMIN_USER or pwd != ADMIN_PASS:
         raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate":"Basic"})
+
+def _verify_worker(authorization: str | None = Header(default=None)):
+    """
+    Simple Bearer token check for worker endpoints.
+    If WORKER_TOKEN is unset, allow (useful for local dev).
+    """
+    if not WORKER_TOKEN:
+        return True
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    token = authorization.split(" ", 1)[1]
+    if token != WORKER_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    return True
 
 # ---------- ROUTES (paths unchanged) ----------
 @app.post("/api/search")
@@ -392,3 +421,56 @@ async def admin(request: Request, status: Optional[str] = Query(None, descriptio
     </html>
     """
     return HTMLResponse(html)
+
+# ---------- WORKER ENDPOINTS (new) ----------
+@app.post("/api/worker/claim")
+def worker_claim(body: WorkerClaimRequest, _: bool = Depends(_verify_worker)):
+    """
+    Atomically claim up to `limit` jobs: paid & in ('queued','new').
+    Returns the full rows the worker needs.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM searches
+         WHERE paid=1 AND status IN ('queued','new')
+         ORDER BY updated_at ASC
+         LIMIT ?
+    """, (body.limit,))
+    rows = cur.fetchall()
+
+    claimed = []
+    for r in rows:
+        cur.execute("""
+            UPDATE searches
+               SET status='searching', last_event='worker_claimed', updated_at=?
+             WHERE id=? AND paid=1 AND status IN ('queued','new')
+        """, (now_iso(), r["id"]))
+        if cur.rowcount:
+            cur.execute("SELECT * FROM searches WHERE id=?", (r["id"],))
+            claimed.append(cur.fetchone())
+    conn.commit()
+    conn.close()
+
+    items = [dict(row) for row in claimed]
+    return {"items": items}
+
+@app.post("/api/worker/searches/{sid}/event")
+def worker_event(sid: int, body: WorkerEvent, _: bool = Depends(_verify_worker)):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE searches SET last_event=?, updated_at=? WHERE id=?",
+                (body.event, now_iso(), sid))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+@app.post("/api/worker/searches/{sid}/status")
+def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE searches SET status=?, last_event=?, updated_at=? WHERE id=?",
+                (b.status, b.event, now_iso(), sid))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
