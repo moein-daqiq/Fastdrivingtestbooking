@@ -3,7 +3,7 @@ uvicorn[standard]==0.30.6
 pydantic==2.9.2
 email-validator==2.2.0
 python-multipart==0.0.9
-httpx==0.27.2
+httpx[http2]==0.27.2
 stripe            # keep unpinned or pin to a known-good version
 twilio            # keep unpinned or pin (e.g., >=9,<10)
 playwright==1.47.0
