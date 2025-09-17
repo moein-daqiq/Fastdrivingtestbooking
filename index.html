@@ -567,7 +567,7 @@
   </script>
 
 <script>
-  /* Centres: base list + your extra list, split & dedupe, then populate datalist */
+  /* Centres: build list, collapse "London X" -> "X", split & de-dupe, then populate datalist */
   (function(){
     const BASE_CENTRES = [
       "Aberdeen","Armagh","Ashford","Barking (Tanner Street)","Barnet","Basingstoke","Belfast","Birmingham",
@@ -596,8 +596,8 @@
       "Exeter","Farnborough","Featherstone","Folkestone","Forfar","Fort William","Fraserburgh","Gairloch","Galashiels","Gateshead",
       "Gillingham","Girvan","Glasgow Anniesland","Glasgow Baillieston","Glasgow Bishopbriggs","Glasgow Shieldhall","Gloucester",
       "Golspie","Gosforth","Grangemouth","Grantham Somerby","Greenock","Grimsby","Guildford","Haddington","Halifax","Hamilton",
-      "Hartlepool","Hastings Ore","Hawick Burnfoot","Heckmondwike","Hemel Hempstead","Hereford","Herne Bay","Hexham",
-      "Heysham","High Wycombe","Hinckley","Huddersfield","Hull","Huntly","Inverness","Inverurie","Ipswich","Irvine","Islay Island",
+      "Hartlepool","Hastings Ore","Hawick Burnfoot","Heckmondwike","Hemel Hempstead","Hereford","Herne Bay","Hexham","Heysham",
+      "High Wycombe","Hinckley","Huddersfield","Hull","Huntly","Inverness","Inverurie","Ipswich","Irvine","Islay Island",
       "Isle of Arran Brodick","Isle of Mull","Isle of Skye Broadford","Isle of Skye Portree","Isle of Wight Newport","Kelso",
       "Kendal","Kettering","Kings Lynn","Kingussie","Kirkcaldy","Knaresborough","Kyle of Lochalsh","Lairg","Lampeter","Lanark",
       "Lancing / Worthing","Launceston","Lee on the Solent","Leeds Harehills","Leeds Horsforth","Leicester Cannock St",
@@ -621,7 +621,7 @@
       "Stoke on Trent Cobridge","Stornoway","Stranraer","Sunderland","Swansea","Swindon","Taunton","Telford","Thurso",
       "Tilbury","Trowbridge","Tunbridge Wells","Upton","Wakefield","Wallasey","Warrington","Warwick","Watford","Wednesbury",
       "Wellingborough","Westbury","Weston Super Mare","Whitby","Whitchurch","Wick","Widnes","Winchester","Wolverhampton",
-      "Worcester","Workington","Worksop","Worthing / Lancing","Wrexham","Yeovil","York","Borehamwood"
+      "Worcester","Workington","Worksop","Worthing / Lancing","Wrexham","Yeovil","York"
     ];
 
     const IGNORE = new Set([
@@ -629,38 +629,47 @@
       "mobile app","app","tomtom go","tomtom app"
     ]);
 
-    const seen = new Set();
-    function add(cleanName, arr){
-      const name = cleanName.replace(/\s+/g,' ').trim();
-      if (!name) return;
-      const key = name.toLowerCase();
-      if (IGNORE.has(key)) return;
-      if (!seen.has(key)) { arr.push(name); seen.add(key); }
+    function stripParens(s){ return s.replace(/\((?:.|\n)*?\)/g, '').trim(); }
+    function stripLondonPrefix(s){
+      return s.replace(/^london\s+/i,'').trim();
     }
     function expandSlash(name){
       if (!name) return [];
       return name.split(/\s*\/\s*/).map(s=>s.trim()).filter(Boolean);
     }
 
-    const merged = [];
-    BASE_CENTRES.forEach(n => add(n, merged));
-    EXTRA_RAW.forEach(n => {
-      const base = n.replace(/\((?:.|\n)*?\)/g, '').trim();
-      expandSlash(base).forEach(part => add(part, merged));
-    });
+    const map = new Map(); // key -> canonical name
+    function addName(raw){
+      if (!raw) return;
+      const noParens = stripParens(raw);
+      const parts = expandSlash(noParens);
+      (parts.length?parts:[noParens]).forEach(p=>{
+        let canon = p.replace(/\s+/g,' ').trim();
+        if (!canon) return;
+        // collapse "London X" -> "X" for duplicates (e.g., London Pinner/Hendon)
+        const collapsed = stripLondonPrefix(canon);
+        const key = collapsed.toLowerCase();
+        if (IGNORE.has(key)) return;
+        if (!map.has(key)) map.set(key, collapsed);
+      });
+    }
 
+    BASE_CENTRES.forEach(addName);
+    EXTRA_RAW.forEach(addName);
+
+    // tiny typo fixes
     const fixes = {
       "aberystwyh": "Aberystwyth",
       "derby alverston": "Derby Alvaston",
       "sheffield hansworth": "Sheffield Handsworth",
       "cardiff lianishen": "Cardiff Llanishen"
     };
-    for (let i=0;i<merged.length;i++){
-      const k = merged[i].toLowerCase();
-      if (fixes[k]) merged[i] = fixes[k];
+    for (const [k,v] of Array.from(map.entries())){
+      const fk = fixes[k];
+      if (fk){ map.set(fk.toLowerCase(), fk); map.delete(k); }
     }
 
-    merged.sort((a,b)=>a.localeCompare(b));
+    const merged = Array.from(map.values()).sort((a,b)=>a.localeCompare(b));
 
     const dl = document.getElementById('testCentresList');
     if (dl) {
@@ -674,8 +683,7 @@
       dl.appendChild(frag);
     }
 
-    /* expose for mobile typeahead */
-    window.__centres = merged.slice();
+    window.__centres = merged.slice(); // expose for mobile typeahead
   })();
 </script>
 
@@ -685,22 +693,21 @@
       const ua = navigator.userAgent || '';
       const isIOS = /iPad|iPhone|iPod/.test(ua);
       const isAndroid = /Android/.test(ua);
-      const useCustom = isIOS || isAndroid; // target mobile, where <datalist> is flaky
+      const useCustom = isIOS || isAndroid;
 
       if (!useCustom) return;
 
       const CENTRES = Array.isArray(window.__centres) ? window.__centres : [];
 
-      function buildList(wrapper, input, list){
+      function buildList(input, list){
         const q = (input.value || '').toLowerCase().trim();
         const matches = q ? CENTRES.filter(c => c.toLowerCase().includes(q)).slice(0, 12) : [];
         list.innerHTML = '';
         if (!matches.length){ list.hidden = true; return; }
-        matches.forEach((m, i) => {
+        matches.forEach((m) => {
           const div = document.createElement('div');
           div.className = 'ta-item';
           div.setAttribute('role','option');
-          div.setAttribute('id', input.id ? input.id+'__opt'+i : ('opt_'+Math.random().toString(36).slice(2)));
           div.textContent = m;
           div.addEventListener('mousedown', (e)=>e.preventDefault());
           div.addEventListener('click', ()=>{
@@ -720,8 +727,8 @@
         if (!list) return;
 
         el.setAttribute('autocomplete','off');
-        el.addEventListener('input', ()=>buildList(wrap, el, list));
-        el.addEventListener('focus', ()=>buildList(wrap, el, list));
+        el.addEventListener('input', ()=>buildList(el, list));
+        el.addEventListener('focus', ()=>buildList(el, list));
         el.addEventListener('blur', ()=>setTimeout(()=>{ list.hidden = true; }, 120));
       }
 
@@ -811,14 +818,19 @@
     const totalLine  = document.getElementById('totalLine');
 
     const BUSY = new Set([
-      'barking','chertsey','chertsey (london)','chertsey london','chingford','farnborough','goodmayes','greenford',
+      'barking','chertsey','chingford','farnborough','goodmayes','greenford',
       'high wycombe','hornchurch','hounslow','leighton buzzard','letchworth','luton','morden',
       'oxford','pinner','reading','slough','southall','tolworth','uxbridge','wanstead',
-      'west didsbury','west didsbury (manchester)'
+      'west didsbury'
     ]);
 
     function normalizeCentreName(v){
-      return (v||'').toLowerCase().replace(/\s*\([^)]*\)/g,'').replace(/\s+/g,' ').trim();
+      return (v||'')
+        .toLowerCase()
+        .replace(/\s*\([^)]*\)/g,'')  // remove parentheticals
+        .replace(/^london\s+/,'')     // strip leading "london "
+        .replace(/\s+/g,' ')
+        .trim();
     }
 
     function money(n){ return `£${n.toFixed(2)}`; }
@@ -1106,14 +1118,77 @@
           }
           toast(id ? `Search created: ${id}` : 'Search created', true);
           console.log('Gateway response:', j);
+
+          /* NEW: hard reset the form after a successful submit */
+          resetAll();
+
         } catch (err) {
           console.error(err);
           toast(`API error: ${err.message || err}`, false);
-        } finally {
-          /* Intentionally NOT re-enabling submit here.
-             It will be enabled only after successful Stripe payment (markPaid()). */
         }
       }
+
+      /* NEW: Full UI reset to placeholders (runs after successful submit) */
+      function resetAll(){
+        // clear text/number/date inputs
+        document.querySelectorAll('input').forEach(inp=>{
+          if (inp.type === 'number'){
+            if (inp.id === 'timeFrom') inp.value = 7;
+            else if (inp.id === 'timeTo') inp.value = 7;
+            else if (inp.id === 'noticeDays') inp.value = 0;
+            else inp.value = '';
+          } else if (inp.type === 'date'){
+            inp.value = '';
+          } else {
+            inp.value = '';
+          }
+          inp.classList.remove('error');
+          inp.removeAttribute('aria-invalid');
+        });
+
+        // reset specific placeholders
+        const phone = document.getElementById('phoneRaw');
+        if (phone) phone.value = '+44';
+
+        // unselect yes/no choices
+        document.querySelectorAll('.yesno button.selected').forEach(b=>{
+          b.classList.remove('selected'); b.setAttribute('aria-pressed','false');
+        });
+
+        // reset totals, payment, submit
+        const totalLine = document.getElementById('totalLine');
+        if (totalLine) totalLine.textContent = 'Total: £0.00';
+        const pill = document.getElementById('payStatus');
+        if (pill){ pill.textContent='Payment: Not Paid'; pill.classList.remove('paid'); }
+        const submitBtn = document.getElementById('submitBtn');
+        if (submitBtn){ submitBtn.disabled = true; submitBtn.classList.remove('enabled'); }
+
+        // clear search id and hide stop button
+        localStorage.removeItem('dvsa_last_search_id');
+        const stopBtn = document.getElementById('stopSearchBtn'); if (stopBtn) stopBtn.remove();
+
+        // unselect booking toggles
+        ['btnBook','btnSwap'].forEach(id=>{
+          const el=document.getElementById(id);
+          if(el){ el.classList.remove('selected'); el.setAttribute('aria-pressed','false'); }
+        });
+
+        // clear multi-date pickers text
+        ['unavailInput','instrInput'].forEach(id=>{
+          const el = document.getElementById(id);
+          if (el) el.value = '';
+        });
+
+        // collapse/hide stripe panel and unmount element if present
+        const panel = document.getElementById('stripePanel');
+        if (panel) panel.style.display = 'none';
+        if (window.__stripeUnmount) { try{ window.__stripeUnmount(); }catch(_){} }
+
+        window.scrollTo({top:0,behavior:'smooth'});
+      }
+
+      // expose reset for debugging if needed
+      window.resetAll = resetAll;
 
       window.ensurePreSearch = ensurePreSearch; /* expose for Stripe block */
 
@@ -1205,7 +1280,8 @@
             search_id: Number(searchId),
             amount: Math.round(pounds * 100),
             currency: 'gbp',
-            description: `Search #${searchId}`
+            description: `Search #${searchId}`,
+            metadata: { search_id: String(searchId) } // <-- include metadata.search_id
           })
         });
         const j = await r.json();
@@ -1238,6 +1314,9 @@
         if (paymentElement) paymentElement.unmount();
         paymentElement = elements.create('payment');
         paymentElement.mount('#payment-element');
+
+        // allow unmount by resetAll()
+        window.__stripeUnmount = () => { try{ paymentElement.unmount(); }catch(_){} };
 
         paymentElement.on('change', async (ev) => {
           currentMethodType = (ev?.value && ev.value.type) ? ev.value.type : 'card';
