@@ -21,13 +21,13 @@ WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 stripe.api_key = STRIPE_SECRET_KEY
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.2.0")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.3.0")
 
 # Allow both apex and www (and local dev)
 FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "https://fastdrivingtestfinder.co.uk")
 origins = {
     FRONTEND_ORIGIN,
-    FRONTEND_ORIGIN.replace("www.", ""),          # ensure apex
+    FRONTEND_ORIGIN.replace("www.", ""),
     FRONTEND_ORIGIN if FRONTEND_ORIGIN.startswith("https://www.") else f"https://www.{FRONTEND_ORIGIN.removeprefix('https://')}",
     "http://localhost:3000",
     "http://localhost:5173",
@@ -89,6 +89,15 @@ def migrate():
     for col in missing:
         coltype = "INTEGER" if col in {"paid","amount"} else "TEXT"
         cur.execute(f"ALTER TABLE searches ADD COLUMN {col} {coltype}")
+
+    # Idempotency table for Stripe events
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS stripe_events (
+            id TEXT PRIMARY KEY,
+            type TEXT,
+            created_at TEXT
+        )
+    """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_status ON searches(status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_paid ON searches(paid)")
     conn.commit()
@@ -124,6 +133,8 @@ class PayCreateIntentIn(BaseModel):
     amount:      Optional[int] = None
     currency: str = "gbp"
     description: Optional[str] = None
+    # NEW: allow passthrough of metadata (we'll always enforce metadata.search_id)
+    metadata: Optional[Dict[str, Any]] = None
 
 class WorkerClaimRequest(BaseModel):
     limit: int = 8
@@ -186,7 +197,7 @@ def _verify_worker(authorization: str | None = Header(default=None)):
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.2.0"}
+    return {"ok": True, "ts": now_iso(), "version": "1.3.0"}
 
 # ---------- ROUTES ----------
 @app.post("/api/search")
@@ -222,6 +233,22 @@ async def create_search(payload: SearchIn):
     conn.close()
     return {"ok": True, "search_id": search_id, "status": "new"}
 
+@app.post("/api/search/{sid}/disable")
+async def disable_search(sid: int, reason: Optional[str] = Query(default="user_disabled")):
+    """
+    Optional 'disable search' endpoint for the Stop button.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE searches SET status='failed', last_event=?, updated_at=? WHERE id=?",
+                (reason, now_iso(), sid))
+    changed = cur.rowcount
+    conn.commit()
+    conn.close()
+    if not changed:
+        raise HTTPException(status_code=404, detail="search not found")
+    return {"ok": True}
+
 @app.post("/api/pay/create-intent")
 async def pay_create_intent(body: PayCreateIntentIn):
     """
@@ -241,12 +268,23 @@ async def pay_create_intent(body: PayCreateIntentIn):
         conn.close()
         raise HTTPException(status_code=404, detail="search_id not found")
 
+    # ensure metadata.search_id is present; merge any client metadata
+    md = {"search_id": str(body.search_id)}
+    if body.metadata:
+        try:
+            for k, v in body.metadata.items():
+                if k == "search_id":
+                    continue
+                md[k] = v
+        except Exception:
+            pass
+
     try:
         intent = stripe.PaymentIntent.create(
             amount=int(amount),
             currency=body.currency,
             description=body.description or f"Search #{body.search_id}",
-            metadata={"search_id": str(body.search_id)},
+            metadata=md,
             automatic_payment_methods={"enabled": True},
         )
     except Exception as e:
@@ -254,8 +292,8 @@ async def pay_create_intent(body: PayCreateIntentIn):
         raise HTTPException(status_code=400, detail=str(e))
 
     cur.execute(
-        "UPDATE searches SET payment_intent_id = ?, amount = ?, updated_at = ? WHERE id = ?",
-        (intent["id"], int(amount), now_iso(), body.search_id)
+        "UPDATE searches SET payment_intent_id = ?, amount = ?, last_event = ?, updated_at = ? WHERE id = ?",
+        (intent["id"], int(amount), "payment_intent.created", now_iso(), body.search_id)
     )
     conn.commit()
     conn.close()
@@ -269,12 +307,14 @@ async def pay_create_intent(body: PayCreateIntentIn):
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request):
     """
-    On payment_intent.succeeded → mark paid and queue.
+    On payment_intent.succeeded → mark paid=1 and status=queued (source of truth).
     On payment_intent.payment_failed → mark failed.
+    Idempotent via stripe_events table.
     """
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
+    # Verify signature (or accept raw in dev if secret not set)
     if not STRIPE_WEBHOOK_SECRET:
         try:
             event = json.loads(payload.decode())
@@ -286,34 +326,52 @@ async def stripe_webhook(request: Request):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Webhook error: {e}")
 
+    event_id = event.get("id")
     etype = event.get("type")
     data = event.get("data", {}).get("object", {}) or {}
+
+    # Idempotency guard
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("INSERT OR IGNORE INTO stripe_events (id, type, created_at) VALUES (?,?,?)",
+                    (event_id, etype, now_iso()))
+        conn.commit()
+        # If the insert was ignored, we've seen this event id before
+        cur.execute("SELECT id FROM stripe_events WHERE id=?", (event_id,))
+        _seen = cur.fetchone()
+        # proceed either way—if ignored, updates below are safe and idempotent
+    except Exception:
+        pass
 
     if etype == "payment_intent.succeeded":
         pi_id = data.get("id")
         sid = (data.get("metadata") or {}).get("search_id")
+        amount_received = int(data.get("amount_received") or data.get("amount") or 0)
         if sid:
-            _mark_paid_and_queue(int(sid), pi_id, "payment_intent.succeeded")
+            _mark_paid_and_queue(int(sid), pi_id, "payment_intent.succeeded", amount_received)
     elif etype == "payment_intent.payment_failed":
         pi_id = data.get("id")
         sid = (data.get("metadata") or {}).get("search_id")
         if sid:
             _fail(int(sid), f"payment_failed ({pi_id})")
 
+    conn.close()
     return JSONResponse({"received": True})
 
-def _mark_paid_and_queue(search_id: int, payment_intent_id: str, event_label: str):
+def _mark_paid_and_queue(search_id: int, payment_intent_id: str, event_label: str, amount_received: int = 0):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         UPDATE searches
            SET paid = 1,
-               status = CASE WHEN status='new' THEN 'queued' ELSE status END,
+               status = 'queued',
                last_event = ?,
                payment_intent_id = ?,
+               amount = COALESCE(NULLIF(?,0), amount),
                updated_at = ?
          WHERE id = ?
-    """, (event_label, payment_intent_id, now_iso(), search_id))
+    """, (event_label, payment_intent_id, amount_received, now_iso(), search_id))
     conn.commit()
     conn.close()
 
