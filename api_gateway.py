@@ -1,13 +1,11 @@
 import os
 import json
-import hmac
-import hashlib
 import sqlite3
-import stripe
 from datetime import datetime
-from typing import List, Optional, Dict, Any, Literal
+from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import FastAPI, Request, HTTPException, Depends, Query, Header
+import stripe
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -18,19 +16,25 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 DB_FILE = os.environ.get("SEARCHES_DB", "searches.db")
 ADMIN_USER = os.environ.get("ADMIN_BASIC_AUTH_USER")
 ADMIN_PASS = os.environ.get("ADMIN_BASIC_AUTH_PASS")
-# Worker API auth token (set this in both API & Worker services)
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 
 stripe.api_key = STRIPE_SECRET_KEY
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.1.0")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.2.0")
 
-# CORS (adjust if needed)
-FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "https://www.fastdrivingtestfinder.co.uk")
+# Allow both apex and www (and local dev)
+FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "https://fastdrivingtestfinder.co.uk")
+origins = {
+    FRONTEND_ORIGIN,
+    FRONTEND_ORIGIN.replace("www.", ""),          # ensure apex
+    FRONTEND_ORIGIN if FRONTEND_ORIGIN.startswith("https://www.") else f"https://www.{FRONTEND_ORIGIN.removeprefix('https://')}",
+    "http://localhost:3000",
+    "http://localhost:5173",
+}
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN, "http://localhost:3000", "http://localhost:5173"],
+    allow_origins=list(origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,17 +42,12 @@ app.add_middleware(
 
 # ---------- DB ----------
 def get_conn():
-    # Ensure parent directory exists (helps when DB_FILE is under /data or similar)
     os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 def migrate():
-    """
-    Lightweight, idempotent SQLite migration.
-    Creates table if missing; adds new columns if they don't exist.
-    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -56,36 +55,27 @@ def migrate():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT,
             updated_at TEXT,
-            status TEXT DEFAULT 'new',               -- new → queued → searching → found/booked/failed
+            status TEXT DEFAULT 'new',
             last_event TEXT,
             paid INTEGER DEFAULT 0,
-
-            -- Stripe linkage
             payment_intent_id TEXT,
-            amount INTEGER,                          -- in minor units (pence)
-
-            -- Core fields from your form
-            booking_type TEXT,                       -- 'new' | 'swap'
+            amount INTEGER,
+            booking_type TEXT,
             licence_number TEXT,
             booking_reference TEXT,
             theory_pass TEXT,
-
             date_window_from TEXT,
             date_window_to TEXT,
             time_window_from TEXT,
             time_window_to TEXT,
-
             phone TEXT,
             whatsapp TEXT,
             email TEXT,
-
-            centres_json TEXT,                       -- JSON array of strings
-            options_json TEXT,                       -- JSON object of toggles
+            centres_json TEXT,
+            options_json TEXT,
             notes TEXT
         )
     """)
-
-    # Ensure columns exist (safe to run repeatedly)
     expected_cols = {
         "created_at","updated_at","status","last_event","paid",
         "payment_intent_id","amount",
@@ -97,13 +87,8 @@ def migrate():
     have = {row["name"] for row in cur.fetchall()}
     missing = expected_cols - have
     for col in missing:
-        # Minimal types; SQLite is dynamic
-        coltype = "TEXT"
-        if col in {"paid","amount"}:
-            coltype = "INTEGER"
+        coltype = "INTEGER" if col in {"paid","amount"} else "TEXT"
         cur.execute(f"ALTER TABLE searches ADD COLUMN {col} {coltype}")
-
-    # Simple status index helps the worker
     cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_status ON searches(status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_paid ON searches(paid)")
     conn.commit()
@@ -115,8 +100,8 @@ migrate()
 class SearchIn(BaseModel):
     booking_type: Literal["new", "swap"] = "new"
     licence_number: Optional[str] = None
-    booking_reference: Optional[str] = None  # for swap flows
-    theory_pass: Optional[str] = None        # for new flows (optional per your spec)
+    booking_reference: Optional[str] = None
+    theory_pass: Optional[str] = None
 
     date_window_from: Optional[str] = Field(None, description="YYYY-MM-DD")
     date_window_to: Optional[str]   = Field(None, description="YYYY-MM-DD")
@@ -127,18 +112,19 @@ class SearchIn(BaseModel):
     whatsapp: Optional[str] = None
     email: Optional[str] = None
 
-    centres: List[str] = []
+    # Accept either list[str] or CSV string (compat for pre-search)
+    centres: Any = Field(default_factory=list)
     options: Dict[str, Any] = Field(default_factory=dict)
     notes: Optional[str] = None
 
 class PayCreateIntentIn(BaseModel):
     search_id: int
-    amount: int  # pence
+    # Accept either "amount_cents" (new FE) or "amount" (pence, old FE)
+    amount_cents: Optional[int] = None
+    amount:      Optional[int] = None
     currency: str = "gbp"
-    # Optionally allow a description
     description: Optional[str] = None
 
-# Worker API models
 class WorkerClaimRequest(BaseModel):
     limit: int = 8
 
@@ -159,26 +145,35 @@ def json_dumps(v) -> str:
     except Exception:
         return "null"
 
+def _parse_centres(value: Any) -> List[str]:
+    """
+    Accept list[str] or CSV string; return list[str].
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    if isinstance(value, str):
+        return [s.strip() for s in value.split(",") if s.strip()]
+    # fallback
+    return []
+
 def require_admin(request: Request):
     if not ADMIN_USER or not ADMIN_PASS:
-        return  # no auth set
+        return
     auth = request.headers.get("authorization") or ""
     if not auth.lower().startswith("basic "):
-        raise HTTPException(status_code=401, detail="Auth required", headers={"WWW-Authenticate":"Basic"})
+        raise HTTPException(status_code=401, detail="Auth required", headers={"WWW-Authenticate": "Basic"})
     import base64
     try:
-        decoded = base64.b64decode(auth.split(" ",1)[1]).decode("utf-8")
+        decoded = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
     except Exception:
-        raise HTTPException(status_code=401, detail="Bad auth", headers={"WWW-Authenticate":"Basic"})
+        raise HTTPException(status_code=401, detail="Bad auth", headers={"WWW-Authenticate": "Basic"})
     user, _, pwd = decoded.partition(":")
     if user != ADMIN_USER or pwd != ADMIN_PASS:
-        raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate":"Basic"})
+        raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Basic"})
 
 def _verify_worker(authorization: str | None = Header(default=None)):
-    """
-    Simple Bearer token check for worker endpoints.
-    If WORKER_TOKEN is unset, allow (useful for local dev).
-    """
     if not WORKER_TOKEN:
         return True
     if not authorization or not authorization.startswith("Bearer "):
@@ -188,13 +183,20 @@ def _verify_worker(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=403, detail="Invalid token")
     return True
 
-# ---------- ROUTES (paths unchanged) ----------
+# ---------- HEALTH ----------
+@app.get("/api/health")
+def health():
+    return {"ok": True, "ts": now_iso(), "version": "1.2.0"}
+
+# ---------- ROUTES ----------
 @app.post("/api/search")
 async def create_search(payload: SearchIn):
     """
-    Stores ALL form fields. Returns search_id.
-    Status starts as 'new'. Payment webhook will flip to 'queued'.
+    Store all form fields. Also works for minimal "pre-search" calls that send
+    just surname/email/centres (centres can be CSV string).
     """
+    centres_list = _parse_centres(payload.centres)
+
     conn = get_conn()
     cur = conn.cursor()
     ts = now_iso()
@@ -212,7 +214,8 @@ async def create_search(payload: SearchIn):
         ts, ts, "new", "created", 0,
         payload.booking_type, payload.licence_number, payload.booking_reference, payload.theory_pass,
         payload.date_window_from, payload.date_window_to, payload.time_window_from, payload.time_window_to,
-        payload.phone, payload.whatsapp, payload.email, json_dumps(payload.centres), json_dumps(payload.options), payload.notes
+        payload.phone, payload.whatsapp, payload.email,
+        json_dumps(centres_list), json_dumps(payload.options), payload.notes
     ))
     search_id = cur.lastrowid
     conn.commit()
@@ -222,10 +225,14 @@ async def create_search(payload: SearchIn):
 @app.post("/api/pay/create-intent")
 async def pay_create_intent(body: PayCreateIntentIn):
     """
-    Creates a Stripe PaymentIntent and stores payment_intent_id on the search.
-    Expects amount in pence and a valid search_id.
+    Create a PaymentIntent and store its id on the search.
+    Accepts either amount_cents or amount (pence).
+    Returns both client_secret and clientSecret for FE compatibility.
     """
-    # Basic existence check
+    amount = body.amount_cents if body.amount_cents is not None else body.amount
+    if amount is None or amount <= 0:
+        raise HTTPException(status_code=400, detail="amount_cents (or amount) must be > 0")
+
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT id FROM searches WHERE id = ?", (body.search_id,))
@@ -236,7 +243,7 @@ async def pay_create_intent(body: PayCreateIntentIn):
 
     try:
         intent = stripe.PaymentIntent.create(
-            amount=body.amount,
+            amount=int(amount),
             currency=body.currency,
             description=body.description or f"Search #{body.search_id}",
             metadata={"search_id": str(body.search_id)},
@@ -248,46 +255,51 @@ async def pay_create_intent(body: PayCreateIntentIn):
 
     cur.execute(
         "UPDATE searches SET payment_intent_id = ?, amount = ?, updated_at = ? WHERE id = ?",
-        (intent["id"], body.amount, now_iso(), body.search_id)
+        (intent["id"], int(amount), now_iso(), body.search_id)
     )
     conn.commit()
     conn.close()
-    return {"clientSecret": intent["client_secret"], "paymentIntentId": intent["id"]}
+    # Return both key names to match any FE version
+    return {
+        "client_secret": intent["client_secret"],
+        "clientSecret": intent["client_secret"],
+        "paymentIntentId": intent["id"]
+    }
 
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request):
     """
-    Marks paid + queues the search when the PaymentIntent succeeds.
+    On payment_intent.succeeded → mark paid and queue.
+    On payment_intent.payment_failed → mark failed.
     """
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
+
     if not STRIPE_WEBHOOK_SECRET:
-        # If unset (dev), accept without verification
-        event = json.loads(payload.decode())
+        try:
+            event = json.loads(payload.decode())
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid payload")
     else:
         try:
-            event = stripe.Webhook.construct_event(
-                payload=payload, sig_header=sig_header, secret=STRIPE_WEBHOOK_SECRET
-            )
+            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Webhook error: {e}")
 
     etype = event.get("type")
-    data = event.get("data", {}).get("object", {})
+    data = event.get("data", {}).get("object", {}) or {}
 
     if etype == "payment_intent.succeeded":
         pi_id = data.get("id")
-        meta = data.get("metadata", {}) or {}
-        sid = meta.get("search_id")
+        sid = (data.get("metadata") or {}).get("search_id")
         if sid:
             _mark_paid_and_queue(int(sid), pi_id, "payment_intent.succeeded")
     elif etype == "payment_intent.payment_failed":
         pi_id = data.get("id")
-        meta = data.get("metadata", {}) or {}
-        sid = meta.get("search_id")
+        sid = (data.get("metadata") or {}).get("search_id")
         if sid:
             _fail(int(sid), f"payment_failed ({pi_id})")
-    # Acknowledge
+
     return JSONResponse({"received": True})
 
 def _mark_paid_and_queue(search_id: int, payment_intent_id: str, event_label: str):
@@ -308,9 +320,8 @@ def _mark_paid_and_queue(search_id: int, payment_intent_id: str, event_label: st
 def _fail(search_id: int, reason: str):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        UPDATE searches SET status='failed', last_event=?, updated_at=? WHERE id=?
-    """, (reason, now_iso(), search_id))
+    cur.execute("UPDATE searches SET status='failed', last_event=?, updated_at=? WHERE id=?",
+                (reason, now_iso(), search_id))
     conn.commit()
     conn.close()
 
@@ -324,38 +335,31 @@ def _badge(s: str) -> str:
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
 
 @app.get("/api/admin", response_class=HTMLResponse)
-async def admin(request: Request, status: Optional[str] = Query(None, description="Filter by status")):
-    require_admin(request)  # no-op if env not set
+async def admin(request: Request, status: Optional[str] = Query(None)):
+    require_admin(request)
 
     conn = get_conn()
     cur = conn.cursor()
-
-    # Summary counts
     cur.execute("SELECT status, COUNT(*) as c FROM searches GROUP BY status")
     counts = {r["status"]: r["c"] for r in cur.fetchall()}
 
     if status:
-        cur.execute("SELECT * FROM searches WHERE status = ? ORDER BY created_at DESC", (status,))
+        cur.execute("SELECT * FROM searches WHERE status=? ORDER BY created_at DESC", (status,))
     else:
         cur.execute("SELECT * FROM searches ORDER BY created_at DESC")
     rows = cur.fetchall()
     conn.close()
 
-    # Simple filters UI
-    statuses = ["new","queued","searching","found","booked","failed"]
-    pills = " ".join(
-        f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>'
-        for s in statuses
-    )
-    clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
-
-    # Table
     def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
+
+    statuses = ["new","queued","searching","found","booked","failed"]
+    pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
+    clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
 
     rows_html = []
     for r in rows:
         centres = ", ".join((json.loads(r["centres_json"] or "[]")))
-        opts = r["options_json"]
+        opts = r["options_json"] or ""
         rows_html.append(
             "<tr>" +
             td(r["id"]) +
@@ -422,13 +426,9 @@ async def admin(request: Request, status: Optional[str] = Query(None, descriptio
     """
     return HTMLResponse(html)
 
-# ---------- WORKER ENDPOINTS (new) ----------
+# ---------- WORKER ENDPOINTS ----------
 @app.post("/api/worker/claim")
 def worker_claim(body: WorkerClaimRequest, _: bool = Depends(_verify_worker)):
-    """
-    Atomically claim up to `limit` jobs: paid & in ('queued','new').
-    Returns the full rows the worker needs.
-    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
