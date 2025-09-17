@@ -115,6 +115,16 @@
       cursor:text;
     }
 
+    /* MOBILE TYPEAHEAD (for iOS/Android) */
+    .ta-wrap{position:relative}
+    .ta-list{
+      position:absolute; left:0; right:0; top:100%; margin-top:4px;
+      max-height:240px; overflow:auto; background:#fff; border:1px solid var(--line);
+      border-radius:6px; box-shadow:0 8px 20px rgba(15,23,42,.12); z-index:50;
+    }
+    .ta-item{padding:8px 10px; cursor:pointer}
+    .ta-item:hover,.ta-item[aria-selected="true"]{background:#eef2ff}
+
     /* ===== Date & Time Window ===== */
     .dt-heading{margin:0 0 8px 0;font-weight:bold}
     .dt-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
@@ -238,29 +248,35 @@
       </p>
 
       <div class="centres-grid">
-        <div class="centre-field">
+        <div class="centre-field ta-wrap">
           <label class="req">Test Centre 1:</label>
           <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+          <div class="ta-list" hidden></div>
         </div>
-        <div class="centre-field">
+        <div class="centre-field ta-wrap">
           <label>Test Centre 2:</label>
           <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+          <div class="ta-list" hidden></div>
         </div>
-        <div class="centre-field">
+        <div class="centre-field ta-wrap">
           <label>Test Centre 3:</label>
           <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+          <div class="ta-list" hidden></div>
         </div>
-        <div class="centre-field">
+        <div class="centre-field ta-wrap">
           <label>Test Centre 4:</label>
           <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+          <div class="ta-list" hidden></div>
         </div>
-        <div class="centre-field">
+        <div class="centre-field ta-wrap">
           <label>Test Centre 5:</label>
           <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+          <div class="ta-list" hidden></div>
         </div>
-        <div class="centre-field">
+        <div class="centre-field ta-wrap">
           <label>Test Centre 6:</label>
           <input type="text" class="lock-full centre-input" placeholder="Choose your centre" list="testCentresList" autocomplete="off" spellcheck="false"/>
+          <div class="ta-list" hidden></div>
         </div>
       </div>
 
@@ -446,7 +462,7 @@
       function markValidity(input, isValid, message){
         const label = findLabelFor(input);
         const hasVal = (input.value || '').trim() !== '';
-        input.classList.toggle('error', !isValid && hasVal); /* <-- fixed comma bug */
+        input.classList.toggle('error', !isValid && hasVal);
         input.setAttribute('aria-invalid', (!isValid && hasVal) ? 'true' : 'false');
         if(label){
           if(!isValid && hasVal){
@@ -553,7 +569,6 @@
 <script>
   /* Centres: base list + your extra list, split & dedupe, then populate datalist */
   (function(){
-    // --- existing built-in list (kept short here; add/keep your previous base if you want) ---
     const BASE_CENTRES = [
       "Aberdeen","Armagh","Ashford","Barking (Tanner Street)","Barnet","Basingstoke","Belfast","Birmingham",
       "Bournemouth","Bradford","Brighton","Bristol","Cambridge","Canterbury","Cardiff","Chertsey","Chingford",
@@ -564,7 +579,6 @@
       "West Didsbury (Manchester)"
     ];
 
-    // --- your list (as sent) ---
     const EXTRA_RAW = [
       "Aberdeen Cove","Aberdeen North","Aberfeldy","Abergavenny","Aberystwyh","Airdrie","Alness","Alnwick","Arbroath",
       "Ashfield","Ashford Kent","Ashford Middlesex","Atherton Manchester","Aylesbury","Ayr","Bala","Ballachulish","Ballater",
@@ -582,8 +596,8 @@
       "Exeter","Farnborough","Featherstone","Folkestone","Forfar","Fort William","Fraserburgh","Gairloch","Galashiels","Gateshead",
       "Gillingham","Girvan","Glasgow Anniesland","Glasgow Baillieston","Glasgow Bishopbriggs","Glasgow Shieldhall","Gloucester",
       "Golspie","Gosforth","Grangemouth","Grantham Somerby","Greenock","Grimsby","Guildford","Haddington","Halifax","Hamilton",
-      "Hartlepool","Hastings Ore","Hawick Burnfoot","Heckmondwike","Hemel Hempstead","Hereford","Herne Bay","Hexham","Heysham",
-      "High Wycombe","Hinckley","Huddersfield","Hull","Huntly","Inverness","Inverurie","Ipswich","Irvine","Islay Island",
+      "Hartlepool","Hastings Ore","Hawick Burnfoot","Heckmondwike","Hemel Hempstead","Hereford","Herne Bay","Hexham",
+      "Heysham","High Wycombe","Hinckley","Huddersfield","Hull","Huntly","Inverness","Inverurie","Ipswich","Irvine","Islay Island",
       "Isle of Arran Brodick","Isle of Mull","Isle of Skye Broadford","Isle of Skye Portree","Isle of Wight Newport","Kelso",
       "Kendal","Kettering","Kings Lynn","Kingussie","Kirkcaldy","Knaresborough","Kyle of Lochalsh","Lairg","Lampeter","Lanark",
       "Lancing / Worthing","Launceston","Lee on the Solent","Leeds Harehills","Leeds Horsforth","Leicester Cannock St",
@@ -607,16 +621,14 @@
       "Stoke on Trent Cobridge","Stornoway","Stranraer","Sunderland","Swansea","Swindon","Taunton","Telford","Thurso",
       "Tilbury","Trowbridge","Tunbridge Wells","Upton","Wakefield","Wallasey","Warrington","Warwick","Watford","Wednesbury",
       "Wellingborough","Westbury","Weston Super Mare","Whitby","Whitchurch","Wick","Widnes","Winchester","Wolverhampton",
-      "Worcester","Workington","Worksop","Worthing / Lancing","Wrexham","Yeovil","York"
+      "Worcester","Workington","Worksop","Worthing / Lancing","Wrexham","Yeovil","York","Borehamwood"
     ];
 
-    // tokens to ignore entirely
     const IGNORE = new Set([
       "spare","discover more","driving test routes","vehicle electronics","best smartphone",
       "mobile app","app","tomtom go","tomtom app"
     ]);
 
-    // helper to add name if not duplicate/ignored
     const seen = new Set();
     function add(cleanName, arr){
       const name = cleanName.replace(/\s+/g,' ').trim();
@@ -625,23 +637,18 @@
       if (IGNORE.has(key)) return;
       if (!seen.has(key)) { arr.push(name); seen.add(key); }
     }
-
-    // expand entries that have slashes into separate centres (e.g., "Bournemouth/Poole")
     function expandSlash(name){
       if (!name) return [];
       return name.split(/\s*\/\s*/).map(s=>s.trim()).filter(Boolean);
     }
 
-    // merge, clean & dedupe
     const merged = [];
     BASE_CENTRES.forEach(n => add(n, merged));
     EXTRA_RAW.forEach(n => {
-      // ignore obvious “See …” parentheticals as-is, but still include the base name
       const base = n.replace(/\((?:.|\n)*?\)/g, '').trim();
       expandSlash(base).forEach(part => add(part, merged));
     });
 
-    // optional tiny normalisations for very common typos (safe)
     const fixes = {
       "aberystwyh": "Aberystwyth",
       "derby alverston": "Derby Alvaston",
@@ -653,10 +660,8 @@
       if (fixes[k]) merged[i] = fixes[k];
     }
 
-    // final sort A→Z
     merged.sort((a,b)=>a.localeCompare(b));
 
-    // populate datalist
     const dl = document.getElementById('testCentresList');
     if (dl) {
       dl.innerHTML = '';
@@ -668,8 +673,61 @@
       });
       dl.appendChild(frag);
     }
+
+    /* expose for mobile typeahead */
+    window.__centres = merged.slice();
   })();
 </script>
+
+  <!-- MOBILE TYPEAHEAD for centre inputs (keeps datalist for desktop) -->
+  <script>
+    (function(){
+      const ua = navigator.userAgent || '';
+      const isIOS = /iPad|iPhone|iPod/.test(ua);
+      const isAndroid = /Android/.test(ua);
+      const useCustom = isIOS || isAndroid; // target mobile, where <datalist> is flaky
+
+      if (!useCustom) return;
+
+      const CENTRES = Array.isArray(window.__centres) ? window.__centres : [];
+
+      function buildList(wrapper, input, list){
+        const q = (input.value || '').toLowerCase().trim();
+        const matches = q ? CENTRES.filter(c => c.toLowerCase().includes(q)).slice(0, 12) : [];
+        list.innerHTML = '';
+        if (!matches.length){ list.hidden = true; return; }
+        matches.forEach((m, i) => {
+          const div = document.createElement('div');
+          div.className = 'ta-item';
+          div.setAttribute('role','option');
+          div.setAttribute('id', input.id ? input.id+'__opt'+i : ('opt_'+Math.random().toString(36).slice(2)));
+          div.textContent = m;
+          div.addEventListener('mousedown', (e)=>e.preventDefault());
+          div.addEventListener('click', ()=>{
+            input.value = m;
+            list.hidden = true;
+            input.dispatchEvent(new Event('change'));
+          });
+          list.appendChild(div);
+        });
+        list.hidden = false;
+      }
+
+      function attach(el){
+        const wrap = el.closest('.ta-wrap');
+        if (!wrap) return;
+        const list = wrap.querySelector('.ta-list');
+        if (!list) return;
+
+        el.setAttribute('autocomplete','off');
+        el.addEventListener('input', ()=>buildList(wrap, el, list));
+        el.addEventListener('focus', ()=>buildList(wrap, el, list));
+        el.addEventListener('blur', ()=>setTimeout(()=>{ list.hidden = true; }, 120));
+      }
+
+      document.querySelectorAll('.centre-input').forEach(attach);
+    })();
+  </script>
 
   <script>
   /* Multi-date pickers */
@@ -1057,6 +1115,8 @@
         }
       }
 
+      window.ensurePreSearch = ensurePreSearch; /* expose for Stripe block */
+
       window.addEventListener('DOMContentLoaded', async () => {
         await healthCheck();
         if (currentSearchId()) ensureStopButton();
@@ -1122,15 +1182,7 @@
     }
 
     async function ensurePreSearch(){
-      // reuse the same helper in global scope
-      return await window.ensurePreSearch?.() || (await (async()=>{
-        // fallback: minimal inline to be safe
-        const surname = (document.getElementById('surname')?.value||'').trim();
-        const email   = (document.getElementById('email')?.value||'').trim();
-        const centres = Array.from(document.querySelectorAll('.centre-input')).map(i=>i.value.trim()).filter(Boolean);
-        const r = await fetch(`${API_BASE}/search`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({surname,email,centres})});
-        const j = await r.json(); return j?.id || j?.search_id;
-      })());
+      return await window.ensurePreSearch?.();
     }
 
     async function createIntentIfNeeded(){
@@ -1151,7 +1203,7 @@
           headers:{ 'Content-Type':'application/json' },
           body: JSON.stringify({
             search_id: Number(searchId),
-            amount: Math.round(pounds * 100),  // pence
+            amount: Math.round(pounds * 100),
             currency: 'gbp',
             description: `Search #${searchId}`
           })
@@ -1160,7 +1212,7 @@
         if(!r.ok || !j?.clientSecret){
           throw new Error(j?.detail || j?.error || 'Failed to create payment intent');
         }
-        lastClientSecret = j.clientSecret;  // fixed key
+        lastClientSecret = j.clientSecret;
         return true;
       }catch(err){
         console.error(err);
