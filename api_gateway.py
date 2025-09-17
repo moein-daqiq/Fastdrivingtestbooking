@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Literal, Optional
 import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 # ---------- ENV ----------
@@ -19,23 +19,16 @@ ADMIN_PASS = os.environ.get("ADMIN_BASIC_AUTH_PASS")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 
 stripe.api_key = STRIPE_SECRET_KEY
+stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.3.0")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.3.1")
 
-# Allow both apex and www (and local dev)
-FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "https://fastdrivingtestfinder.co.uk")
-origins = {
-    FRONTEND_ORIGIN,
-    FRONTEND_ORIGIN.replace("www.", ""),
-    FRONTEND_ORIGIN if FRONTEND_ORIGIN.startswith("https://www.") else f"https://www.{FRONTEND_ORIGIN.removeprefix('https://')}",
-    "http://localhost:3000",
-    "http://localhost:5173",
-}
+# CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(origins),
-    allow_credentials=True,
+    allow_origin_regex=r"^https://([a-z0-9-]+\.)?fastdrivingtestfinder\.co\.uk$",
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -121,20 +114,17 @@ class SearchIn(BaseModel):
     whatsapp: Optional[str] = None
     email: Optional[str] = None
 
-    # Accept either list[str] or CSV string (compat for pre-search)
-    centres: Any = Field(default_factory=list)
+    centres: Any = Field(default_factory=list)   # list[str] or CSV
     options: Dict[str, Any] = Field(default_factory=dict)
     notes: Optional[str] = None
 
 class PayCreateIntentIn(BaseModel):
     search_id: int
-    # Accept either "amount_cents" (new FE) or "amount" (pence, old FE)
-    amount_cents: Optional[int] = None
-    amount:      Optional[int] = None
+    amount_cents: Optional[int] = None  # preferred
+    amount:      Optional[int] = None   # legacy
     currency: str = "gbp"
     description: Optional[str] = None
-    # NEW: allow passthrough of metadata (we'll always enforce metadata.search_id)
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None   # passthrough (we enforce search_id)
 
 class WorkerClaimRequest(BaseModel):
     limit: int = 8
@@ -157,16 +147,12 @@ def json_dumps(v) -> str:
         return "null"
 
 def _parse_centres(value: Any) -> List[str]:
-    """
-    Accept list[str] or CSV string; return list[str].
-    """
     if value is None:
         return []
     if isinstance(value, list):
         return [str(x).strip() for x in value if str(x).strip()]
     if isinstance(value, str):
         return [s.strip() for s in value.split(",") if s.strip()]
-    # fallback
     return []
 
 def require_admin(request: Request):
@@ -197,15 +183,11 @@ def _verify_worker(authorization: str | None = Header(default=None)):
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.3.0"}
+    return {"ok": True, "ts": now_iso(), "version": "1.3.1"}
 
 # ---------- ROUTES ----------
 @app.post("/api/search")
 async def create_search(payload: SearchIn):
-    """
-    Store all form fields. Also works for minimal "pre-search" calls that send
-    just surname/email/centres (centres can be CSV string).
-    """
     centres_list = _parse_centres(payload.centres)
 
     conn = get_conn()
@@ -233,29 +215,13 @@ async def create_search(payload: SearchIn):
     conn.close()
     return {"ok": True, "search_id": search_id, "status": "new"}
 
-@app.post("/api/search/{sid}/disable")
-async def disable_search(sid: int, reason: Optional[str] = Query(default="user_disabled")):
-    """
-    Optional 'disable search' endpoint for the Stop button.
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE searches SET status='failed', last_event=?, updated_at=? WHERE id=?",
-                (reason, now_iso(), sid))
-    changed = cur.rowcount
-    conn.commit()
-    conn.close()
-    if not changed:
-        raise HTTPException(status_code=404, detail="search not found")
-    return {"ok": True}
+# Explicit OPTIONS route (some proxies require it even with CORSMiddleware)
+@app.options("/api/pay/create-intent")
+async def options_pay_create_intent():
+    return Response(status_code=204)
 
 @app.post("/api/pay/create-intent")
 async def pay_create_intent(body: PayCreateIntentIn):
-    """
-    Create a PaymentIntent and store its id on the search.
-    Accepts either amount_cents or amount (pence).
-    Returns both client_secret and clientSecret for FE compatibility.
-    """
     amount = body.amount_cents if body.amount_cents is not None else body.amount
     if amount is None or amount <= 0:
         raise HTTPException(status_code=400, detail="amount_cents (or amount) must be > 0")
@@ -268,14 +234,12 @@ async def pay_create_intent(body: PayCreateIntentIn):
         conn.close()
         raise HTTPException(status_code=404, detail="search_id not found")
 
-    # ensure metadata.search_id is present; merge any client metadata
     md = {"search_id": str(body.search_id)}
     if body.metadata:
         try:
             for k, v in body.metadata.items():
-                if k == "search_id":
-                    continue
-                md[k] = v
+                if k != "search_id":
+                    md[k] = v
         except Exception:
             pass
 
@@ -297,7 +261,6 @@ async def pay_create_intent(body: PayCreateIntentIn):
     )
     conn.commit()
     conn.close()
-    # Return both key names to match any FE version
     return {
         "client_secret": intent["client_secret"],
         "clientSecret": intent["client_secret"],
@@ -306,15 +269,9 @@ async def pay_create_intent(body: PayCreateIntentIn):
 
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request):
-    """
-    On payment_intent.succeeded → mark paid=1 and status=queued (source of truth).
-    On payment_intent.payment_failed → mark failed.
-    Idempotent via stripe_events table.
-    """
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
-    # Verify signature (or accept raw in dev if secret not set)
     if not STRIPE_WEBHOOK_SECRET:
         try:
             event = json.loads(payload.decode())
@@ -330,17 +287,12 @@ async def stripe_webhook(request: Request):
     etype = event.get("type")
     data = event.get("data", {}).get("object", {}) or {}
 
-    # Idempotency guard
     conn = get_conn()
     cur = conn.cursor()
     try:
         cur.execute("INSERT OR IGNORE INTO stripe_events (id, type, created_at) VALUES (?,?,?)",
                     (event_id, etype, now_iso()))
         conn.commit()
-        # If the insert was ignored, we've seen this event id before
-        cur.execute("SELECT id FROM stripe_events WHERE id=?", (event_id,))
-        _seen = cur.fetchone()
-        # proceed either way—if ignored, updates below are safe and idempotent
     except Exception:
         pass
 
@@ -385,17 +337,13 @@ def _fail(search_id: int, reason: str):
 
 # ---------- ADMIN ----------
 def _badge(s: str) -> str:
-    colors = {
-        "new": "#64748b", "queued": "#2563eb", "searching": "#a855f7",
-        "found": "#10b981", "booked": "#16a34a", "failed": "#ef4444"
-    }
+    colors = {"new":"#64748b","queued":"#2563eb","searching":"#a855f7","found":"#10b981","booked":"#16a34a","failed":"#ef4444"}
     c = colors.get(s, "#334155")
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
 
 @app.get("/api/admin", response_class=HTMLResponse)
 async def admin(request: Request, status: Optional[str] = Query(None)):
     require_admin(request)
-
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT status, COUNT(*) as c FROM searches GROUP BY status")
@@ -411,7 +359,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
     def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
 
     statuses = ["new","queued","searching","found","booked","failed"]
-    pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
+    pills = " ".join(f'<a href=\"?status={s}\" style='text-decoration:none'>{_badge(s)}</a>' for s in statuses)
     clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
 
     rows_html = []
