@@ -5,6 +5,7 @@ import time
 import random
 import sqlite3
 import asyncio
+import subprocess
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 
@@ -36,12 +37,10 @@ USER_AGENT = os.environ.get("WORKER_USER_AGENT", "FastDTF/1.0 (+https://fastdriv
 # Notifications (generic webhook optional)
 NOTIFY_WEBHOOK_URL = os.environ.get("NOTIFY_WEBHOOK_URL", "")
 
-# WhatsApp (Twilio) — TO you; FROM must be your Twilio sender (sandbox or approved)
+# WhatsApp (Twilio)
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
-# Twilio Sandbox sender default; replace with your approved WA sender if you have one
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
-# Your number (recipient)
 WHATSAPP_OWNER_TO = os.environ.get("WHATSAPP_OWNER_TO", "whatsapp:+447402597000")
 ADMIN_URL = os.environ.get("ADMIN_URL", "")
 
@@ -60,7 +59,7 @@ DVSA_RPS = float(os.environ.get("DVSA_RPS", "4.0"))  # global per-worker cap
 CB_FAILS_THRESHOLD = int(os.environ.get("CB_FAILS_THRESHOLD", "12"))
 CB_COOLDOWN_SEC = int(os.environ.get("CB_COOLDOWN_SEC", "120"))
 
-# Priority weights
+# Priority weights (kept for future scoring)
 W_DATE_URGENCY = float(os.environ.get("W_DATE_URGENCY", "5.0"))
 W_DATE_WINDOW_WIDTH = float(os.environ.get("W_DATE_WINDOW_WIDTH", "3.0"))
 W_TIME_WINDOW_WIDTH = float(os.environ.get("W_TIME_WINDOW_WIDTH", "2.0"))
@@ -70,6 +69,10 @@ W_SWAP_BONUS = float(os.environ.get("W_SWAP_BONUS", "0.5"))
 # Bot wall / quiet hours
 CAPTCHA_COOLDOWN_MIN = int(os.environ.get("CAPTCHA_COOLDOWN_MIN", "30"))  # global cool-off after bot wall
 QUIET_HOURS = os.environ.get("QUIET_HOURS", "").strip()  # e.g. "22-06,12-13" (UTC)
+
+# Playwright launch safety (some DVSA pages need these on container hosts)
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/ms-playwright")
+os.environ.setdefault("FASTDTF_LAUNCH_ARGS", "--no-sandbox --disable-dev-shm-usage")
 
 # Lazily import Twilio if creds exist
 _twilio_client = None
@@ -83,6 +86,29 @@ def _get_twilio():
             print(f"[whatsapp] Twilio init failed: {e}")
             _twilio_client = False
     return _twilio_client
+
+# ==============================
+# One-time self-heal for Playwright
+# ==============================
+def ensure_browser():
+    """
+    Make sure Chromium is available even when Render cache was wiped.
+    """
+    try:
+        # Cheap existence check: ask Playwright for installed browsers (will be noisy if missing)
+        subprocess.run(
+            ["python", "-m", "playwright", "install", "chromium"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        print("[worker] playwright chromium ready")
+    except Exception as e:
+        # Non-fatal; DVSAClient may still install on demand
+        print(f"[worker] playwright install warning: {e}")
+
+ensure_browser()
 
 # ==============================
 # Utils
@@ -150,6 +176,27 @@ def is_quiet_now() -> bool:
                 return True
     return False
 
+def normalize_centres(centres: List[str]) -> List[str]:
+    """
+    De-duplicate and strip prefixes like 'London Pinner' -> 'Pinner'.
+    Keeps order of first appearance.
+    """
+    seen = set()
+    cleaned = []
+    for c in centres:
+        c0 = (c or "").strip()
+        if not c0:
+            continue
+        # drop 'London ' or other city prefix if it duplicates the trailing word
+        parts = c0.split()
+        if len(parts) >= 2 and parts[0].lower() in {"london", "city", "borough"}:
+            c0 = " ".join(parts[1:])
+        # final simple uniq
+        if c0 not in seen:
+            seen.add(c0)
+            cleaned.append(c0)
+    return cleaned
+
 # ==============================
 # DB (worker-only small state)
 # ==============================
@@ -214,9 +261,16 @@ async def _api_post(client: httpx.AsyncClient, path: str, payload: dict):
     headers = {}
     if WORKER_TOKEN:
         headers["Authorization"] = f"Bearer {WORKER_TOKEN}"
-    r = await client.post(f"{API_BASE}{path}", json=payload, headers=headers)
-    r.raise_for_status()
-    return r.json()
+    # small retry on transient errors
+    for attempt in range(3):
+        try:
+            r = await client.post(f"{API_BASE}{path}", json=payload, headers=headers)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            if attempt == 2:
+                raise
+            await asyncio.sleep(0.3 * (attempt + 1))
 
 async def claim_candidates_api(client: httpx.AsyncClient, limit: int) -> List[dict]:
     data = await _api_post(client, "/api/worker/claim", {"limit": limit})
@@ -320,7 +374,7 @@ def centre_fail(centre: str):
     if row:
         cur.execute("UPDATE centre_health SET fail_count=?, cooldown_until=? WHERE centre=?", (fc, cooldown_until, centre))
     else:
-        cur.execute("INSERT INTO centre_health(centre, fail_count, cooldown_until) VALUES (?,?,?)", (centre, fc, cooldown_until))
+        cur.execute("INSERT INTO centre_health(centre, fail_count, cooldown_until) VALUES (?,?,?)", (fc, cooldown_until, centre))
     conn.commit()
     conn.close()
 
@@ -382,6 +436,7 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
     session_key = (row.get("licence_number") or f"job{row['id']}").replace(" ", "")[:20]
 
     try:
+        # DVSAClient should pick up --no-sandbox/--disable-dev-shm-usage via env if it launches Chromium internally
         async with DVSAClient(headless=True, session_key=session_key) as dvsa:
             if (row.get("booking_type") or "") == "swap":
                 await dvsa.login_swap(
@@ -468,6 +523,7 @@ async def assist_window_monitor(sid: int, slot_txt: str):
 async def process_job(client: httpx.AsyncClient, row: dict):
     sid = row["id"]
     centres: List[str] = safe_json_loads(row.get("centres_json"), [])
+    centres = normalize_centres(centres)
     if not centres:
         centres = ["(no centre provided)"]
 
