@@ -359,7 +359,12 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
     def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
 
     statuses = ["new","queued","searching","found","booked","failed"]
-    pills = " ".join(f'<a href=\"?status={s}\" style='text-decoration:none'>{_badge(s)}</a>' for s in statuses)
+    # BAD (has mixed quotes → SyntaxError)
+# pills = " ".join(f'<a href=\"?status={s}\" style='text-decoration:none'>{_badge(s)}</a>' for s in statuses)
+
+# GOOD
+pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
+
     clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
 
     rows_html = []
@@ -480,3 +485,4 @@ def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
     conn.commit()
     conn.close()
     return {"ok": True}
+
