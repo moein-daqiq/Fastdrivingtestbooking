@@ -341,6 +341,33 @@ def _badge(s: str) -> str:
     c = colors.get(s, "#334155")
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
 
+def _derive_flags(row: sqlite3.Row):
+    """
+    Derive:
+      - reached: True if we've interacted with a centre or found/booked/failed a slot
+      - last_centre: centre-like token parsed from event payload if present
+      - captcha: True if last_event indicates a captcha cooldown
+    """
+    ev = (row["last_event"] or "").strip()
+    reached = False
+    last_centre = ""
+    captcha = False
+
+    if ev.startswith(("checked:", "slot_found:", "booked:", "booking_failed:", "captcha_cooldown:")):
+        try:
+            payload = ev.split(":", 1)[1]
+            last_centre = (payload.split("·", 1)[0] or "").strip()
+        except Exception:
+            last_centre = ""
+
+    if ev.startswith(("checked:", "slot_found:", "booked:", "booking_failed:")):
+        reached = True
+
+    if ev.startswith("captcha_cooldown:"):
+        captcha = True
+
+    return reached, last_centre, captcha
+
 @app.get("/api/admin", response_class=HTMLResponse)
 async def admin(request: Request, status: Optional[str] = Query(None)):
     require_admin(request)
@@ -359,11 +386,8 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
     def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
 
     statuses = ["new","queued","searching","found","booked","failed"]
-    # BAD (has mixed quotes → SyntaxError)
-# pills = " ".join(f'<a href=\"?status={s}\" style='text-decoration:none'>{_badge(s)}</a>' for s in statuses)
-
-# GOOD
-pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
+    # GOOD
+    pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
 
     clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
 
@@ -371,6 +395,11 @@ pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)
     for r in rows:
         centres = ", ".join((json.loads(r["centres_json"] or "[]")))
         opts = r["options_json"] or ""
+
+        reached, last_centre, captcha = _derive_flags(r)
+        reached_html = "✅" if reached else "—"
+        captcha_html = "🚧" if captcha else "—"
+
         rows_html.append(
             "<tr>" +
             td(r["id"]) +
@@ -387,6 +416,12 @@ pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)
             td(r["last_event"] or "") +
             td(r["paid"]) +
             td(r["payment_intent_id"] or "") +
+
+            # NEW derived columns
+            td(reached_html) +
+            td(last_centre or "—") +
+            td(captcha_html) +
+
             td(r["created_at"] or "") +
             td(r["updated_at"] or "") +
             "</tr>"
@@ -424,7 +459,9 @@ pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)
             <tr>
               <th>ID</th><th>Status</th><th>Type</th><th>Licence</th><th>Booking Ref</th><th>Theory</th>
               <th>Date/Time Window</th><th>Phone</th><th>Email</th><th>Centres</th><th>Options</th>
-              <th>Last Event</th><th>Paid</th><th>PI</th><th>Created</th><th>Updated</th>
+              <th>Last Event</th><th>Paid</th><th>PI</th>
+              <th>Reached?</th><th>Last centre</th><th>Captcha?</th>
+              <th>Created</th><th>Updated</th>
             </tr>
           </thead>
           <tbody>
@@ -485,4 +522,3 @@ def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
     conn.commit()
     conn.close()
     return {"ok": True}
-
