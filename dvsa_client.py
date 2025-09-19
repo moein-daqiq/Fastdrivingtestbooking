@@ -24,7 +24,6 @@ from playwright.async_api import (
     TimeoutError as PWTimeout,
 )
 
-
 # ---------------- Exceptions ----------------
 class DVSAError(Exception):
     pass
@@ -35,8 +34,9 @@ class CaptchaDetected(DVSAError):
 
 
 # ---------------- Config (override via env if needed) ----------------
-URL_CHANGE_TEST = os.environ.get("DVSA_URL_CHANGE", "https://www.gov.uk/change-driving-test")
-URL_BOOK_TEST   = os.environ.get("DVSA_URL_BOOK",   "https://www.gov.uk/book-driving-test")
+# Use DVSA application/manage entry points directly (skip the GOV.UK explainer).
+URL_CHANGE_TEST = os.environ.get("DVSA_URL_CHANGE", "https://driverpracticaltest.dvsa.gov.uk/manage")
+URL_BOOK_TEST   = os.environ.get("DVSA_URL_BOOK",   "https://driverpracticaltest.dvsa.gov.uk/application")
 
 HEADLESS = os.environ.get("DVSA_HEADLESS", "true").lower() == "true"
 NAV_TIMEOUT_MS = int(os.environ.get("DVSA_NAV_TIMEOUT_MS", "25000"))
@@ -53,17 +53,20 @@ SEL = {
     # GOV.UK landing “Start now”
     "start_now": "a.govuk-button, a.button--start, a[href*='start']",
 
+    # NEW booking – category page (pick Car)
+    "car_button": "button:has-text('Car'), a:has-text('Car (manual'), .app-button:has-text('Car'), [role='button']:has-text('Car')",
+
     # Existing booking (swap) login
     "swap_licence":  "input[name='driving-licence-number'], input[name*='licence'], input[id*='licence'], input[name='driverLicenceNumber']",
     "swap_ref":      "input[name='booking-reference'], input[name*='reference'], input[id*='reference'], input[name='bookingReference']",
     "swap_email":    "input[name='email'], input[id*='email'], input[name='candidateEmail']",
-    "swap_continue": "button[type='submit'], button.govuk-button",
+    "swap_continue": "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
 
-    # New booking login
+    # New booking login (licence details page)
     "new_licence":   "input[name='driving-licence-number'], input[name*='licence'], input[id*='licence'], input[name='driverLicenceNumber']",
     "new_theory":    "input[name='theory-pass-number'], input[name*='candidate'], input[id*='theory'], input[name='theoryPassNumber']",
     "new_email":     "input[name='email'], input[id*='email'], input[name='candidateEmail']",
-    "new_continue":  "button[type='submit'], button.govuk-button",
+    "new_continue":  "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
 
     # Centre search & availability
     "centre_search_box":  "input[name*='test-centre'], input[id*='test-centre'], input[name*='centre'], input[name='testCentreSearch']",
@@ -72,7 +75,7 @@ SEL = {
     "centre_times":       "[data-test='available-times'] li, ul.available-times li, .times li, .available-times li",
 
     # Confirm
-    "confirm_button": "button[type='submit'], button.govuk-button",
+    "confirm_button": "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
 
     # Errors
     "error_summary": ".govuk-error-summary, [role='alert']",
@@ -167,7 +170,7 @@ class DVSAClient:
 
     async def _captcha_guard(self):
         html = (await self.page.content()).lower()
-        if any(k in html for k in ["recaptcha", "hcaptcha", "unusual traffic", "not a robot", "captcha"]):
+        if any(k in html for k in ["recaptcha", "hcaptcha", "unusual traffic", "not a robot", "captcha", "additional security check is required"]):
             # Optional: screenshot for debugging
             try:
                 ts = str(int(asyncio.get_event_loop().time()))
@@ -183,12 +186,59 @@ class DVSAClient:
             msg = (await err.text_content() or "").strip()
             raise DVSAError(f"DVSA error: {msg}")
 
+    async def _maybe_click_start_now(self):
+        # If we land on the GOV.UK explainer, click Start now.
+        try:
+            start = await self.page.query_selector(_sel("start_now"))
+            if start:
+                await start.click()
+        except Exception:
+            pass
+
+    async def _select_car_category_if_present(self):
+        # On /application the first page is the category picker (Car, Motorcycles, ...).
+        # If it's there, click Car. If not, we are already on licence details.
+        try:
+            btn = await self.page.query_selector(_sel("car_button"))
+            if btn:
+                await btn.click()
+                await self._captcha_guard()
+        except PWTimeout:
+            pass
+        except Exception:
+            # Non-fatal: if the page is already the licence details, proceed.
+            pass
+
+    async def _answer_no_no_if_present(self):
+        """
+        On the licence details page, DVSA asks:
+          - Have you been ordered by a court to take an extended test?
+          - Do you have any special requirements?
+        We answer No/No when those controls exist.
+        """
+        try:
+            # Use accessible labels where possible (Playwright will find the matching radio).
+            no_radios = self.page.get_by_label("No", exact=True)
+            # Click first two "No" radios if present.
+            await no_radios.nth(0).check()
+            await asyncio.sleep(0.05)
+            await no_radios.nth(1).check()
+        except Exception:
+            # Fall back: click any radios with value/no.
+            try:
+                radios = await self.page.query_selector_all("input[type='radio'][value='no'], input[type='radio'][aria-label='No']")
+                for r in radios[:2]:
+                    try:
+                        await r.check()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
     # ------------- Public API used by worker -------------
     async def login_swap(self, licence_number: str, booking_reference: str, email: Optional[str] = None):
         await self._goto(URL_CHANGE_TEST)
-        start = await self.page.query_selector(_sel("start_now"))
-        if start:
-            await start.click()
+        await self._maybe_click_start_now()
 
         await self._fill(_sel("swap_licence"), licence_number)
         await self._fill(_sel("swap_ref"), booking_reference)
@@ -199,15 +249,26 @@ class DVSAClient:
 
     async def login_new(self, licence_number: str, theory_pass: Optional[str] = None, email: Optional[str] = None):
         await self._goto(URL_BOOK_TEST)
-        start = await self.page.query_selector(_sel("start_now"))
-        if start:
-            await start.click()
+        await self._maybe_click_start_now()
 
+        # If the category picker is visible, choose Car.
+        await self._select_car_category_if_present()
+
+        # Now licence details page: fill licence, optional theory/email, answer No/No, continue.
         await self._fill(_sel("new_licence"), licence_number)
         if theory_pass:
-            await self._fill(_sel("new_theory"), theory_pass)
+            try:
+                await self._fill(_sel("new_theory"), theory_pass)
+            except Exception:
+                # not always present / required
+                pass
         if email:
-            await self._fill(_sel("new_email"), email)
+            try:
+                await self._fill(_sel("new_email"), email)
+            except Exception:
+                pass
+
+        await self._answer_no_no_if_present()
         await self._click(_sel("new_continue"))
         await self._expect_ok()
 
