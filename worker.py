@@ -204,6 +204,13 @@ def get_conn():
     os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # ---- WAL + durability & lock mitigation ----
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")  # 5s
+    except Exception:
+        pass
     return conn
 
 def ensure_state_tables():
@@ -364,17 +371,26 @@ bucket_dvsa = TokenBucket(DVSA_RPS, DVSA_RPS)
 def centre_fail(centre: str):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT fail_count, cooldown_until FROM centre_health WHERE centre=?", (centre,))
-    row = cur.fetchone()
-    fc = (row["fail_count"] if row else 0) + 1
-    cooldown_until = None
-    if fc >= CB_FAILS_THRESHOLD:
-        cooldown_until = (datetime.utcnow() + timedelta(seconds=CB_COOLDOWN_SEC)).isoformat() + "Z"
-        fc = 0
-    if row:
-        cur.execute("UPDATE centre_health SET fail_count=?, cooldown_until=? WHERE centre=?", (fc, cooldown_until, centre))
-    else:
-        cur.execute("INSERT INTO centre_health(centre, fail_count, cooldown_until) VALUES (?,?,?)", (fc, cooldown_until, centre))
+    # compute potential cooldown timestamp once; SQL CASE will choose whether to apply it
+    new_until = (datetime.utcnow() + timedelta(seconds=CB_COOLDOWN_SEC)).isoformat() + "Z"
+    cur.execute(
+        """
+        INSERT INTO centre_health(centre, fail_count, cooldown_until)
+        VALUES (?, 1, NULL)
+        ON CONFLICT(centre) DO UPDATE SET
+          fail_count = CASE
+              WHEN COALESCE(centre_health.fail_count,0) + 1 >= ?
+                  THEN 0
+              ELSE centre_health.fail_count + 1
+          END,
+          cooldown_until = CASE
+              WHEN COALESCE(centre_health.fail_count,0) + 1 >= ?
+                  THEN ?
+              ELSE centre_health.cooldown_until
+          END
+        """,
+        (centre, CB_FAILS_THRESHOLD, CB_FAILS_THRESHOLD, new_until),
+    )
     conn.commit()
     conn.close()
 
