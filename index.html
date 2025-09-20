@@ -11,142 +11,66 @@
   <meta property="og:title" content="Driving Test Cancellation Finder — FastDrivingTestFinder">
   <meta property="og:description" content="Find earlier DVSA dates and cancellations. Instant alerts across UK centres.">
 
-  <!-- Single source of truth for API URL — do not redefine elsewhere -->
+  <!-- Single source of truth for API URL -->
   <script>var API_BASE = "https://api.fastdrivingtestfinder.co.uk/api";</script>
-  <!-- Stripe publishable key (required for on-page element) -->
+  <!-- Stripe publishable key -->
   <script>window.STRIPE_PUBLISHABLE_KEY = "pk_live_51S4HI5KDKDIajo9AAvqU8YiqHVgZQhQne3pJzejDKrL0s1OCWnOsRk7gcJWdHPl4k5yPIGoGiQ2QFRPzHPm884fO00YoZJ0mDn";</script>
 
-  <!-- Clear any previously autosaved draft so fields show placeholders, not old data -->
+  <!-- Clear autosaved draft -->
   <script>(function(){try{localStorage.removeItem('dvsa_form_autosave_v1');}catch(e){}})();</script>
 
   <style>
-    :root{
-      --line:#e5e7eb; --ink:#0f172a; --muted:#475569;
-      --primary:#2563eb; --primary-dark:#1e40af;
-      --danger:#dc2626;
-      --tint-blue: rgba(37,99,235,.044);
-      --tint-amber: rgba(245,158,11,.055);
-      --tint-slate: rgba(15,23,42,.033);
-    }
-
-    body{ margin:0;font-family:"Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif;
-      background:#f7fafc;color:var(--ink);line-height:1.45; }
-    .wrap{max-width:760px;margin:10px auto;background:#fff;border:1px solid var(--line);
-      box-shadow:0 2px 16px rgba(15,23,42,.06)}
-
+    :root{--line:#e5e7eb;--ink:#0f172a;--muted:#475569;--primary:#2563eb;--primary-dark:#1e40af;--danger:#dc2626;--tint-blue:rgba(37,99,235,.044);--tint-amber:rgba(245,158,11,.055);--tint-slate:rgba(15,23,42,.033)}
+    body{margin:0;font-family:"Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif;background:#f7fafc;color:var(--ink);line-height:1.45}
+    .wrap{max-width:760px;margin:10px auto;background:#fff;border:1px solid var(--line);box-shadow:0 2px 16px rgba(15,23,42,.06)}
     .strip{padding:10px 12px;text-align:center;color:#fff;font-weight:700}
     .strip.title{background:linear-gradient(180deg,#60a5fa 0%, #3b82f6 100%)}
     .strip.subtitle{background:#34d399}
     .strip.important{background:#fbbf24;color:#111827}
     .strip + section{margin-top:14px}
-
-    section.panel, section.blue-panel, section.yellow-panel{
-      border:1px solid var(--line);border-radius:10px;
-      box-shadow:0 2px 10px rgba(15,23,42,.04);
-      padding:16px 18px;margin:16px;background-clip:padding-box;
-    }
-    .panel{background:var(--tint-slate)}
-    .blue-panel{background:var(--tint-blue)}
-    .yellow-panel{background:var(--tint-amber)}
-
+    section.panel,section.blue-panel,section.yellow-panel{border:1px solid var(--line);border-radius:10px;box-shadow:0 2px 10px rgba(15,23,42,.04);padding:16px 18px;margin:16px;background-clip:padding-box}
+    .panel{background:var(--tint-slate)}.blue-panel{background:var(--tint-blue)}.yellow-panel{background:var(--tint-amber)}
     .row{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-top:10px}
     label{font-size:14px;font-weight:bold;color:var(--ink)}
     .note-line{display:flex;justify-content:space-between;width:100%;font-size:12px;color:var(--muted);margin-top:2px}
-
-    /* Required */
-    label.req::after{content:" *";color:var(--danger);font-weight:bold;}
-    .req-title::after{content:" *";color:var(--danger);font-weight:bold;margin-left:4px;}
-
-    /* ===== Test Booking Type ===== */
+    label.req::after{content:" *";color:var(--danger);font-weight:bold}.req-title::after{content:" *";color:var(--danger);font-weight:bold;margin-left:4px}
     #test-booking-type .heading{display:grid;grid-template-columns:1fr;text-align:center}
     #test-booking-type .heading .helper{color:var(--muted);font-size:15.5px;font-weight:400;margin-top:6px}
-    #test-booking-type .row{
-      display:grid;grid-template-columns:1fr 1fr;column-gap:16px;row-gap:10px;align-items:start;
-    }
-    #test-booking-type .row .btn, #test-booking-type .row input{width:100%;height:34px;box-sizing:border-box}
-    #btnBook{grid-column:1;grid-row:1} #theoryPass{grid-column:1;grid-row:2}
-    #btnSwap{grid-column:2;grid-row:1} #swapRef{grid-column:2;grid-row:2}
+    #test-booking-type .row{display:grid;grid-template-columns:1fr 1fr;column-gap:16px;row-gap:10px;align-items:start}
+    #test-booking-type .row .btn,#test-booking-type .row input{width:100%;height:34px;box-sizing:border-box}
+    #btnBook{grid-column:1;grid-row:1}#theoryPass{grid-column:1;grid-row:2}
+    #btnSwap{grid-column:2;grid-row:1}#swapRef{grid-column:2;grid-row:2}
     #test-booking-type .note-line{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-
-    /* Unified inputs */
-    input, select{
-      box-sizing:border-box;height:34px;padding:6px 8px;border:1px solid var(--line);
-      border-radius:4px;background:#fff;color:var(--ink);
-      font:14px/22px "Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif;
-      transition:border-color .15s, box-shadow .15s;
-    }
-    input:focus, select:focus{outline:none;border-color:var(--primary);
-      box-shadow:0 0 0 2px rgba(37,99,235,.15)}
-
+    input,select{box-sizing:border-box;height:34px;padding:6px 8px;border:1px solid var(--line);border-radius:4px;background:#fff;color:var(--ink);font:14px/22px "Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif;transition:border-color .15s,box-shadow .15s}
+    input:focus,select:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 2px rgba(37,99,235,.15)}
     .error{border-color:var(--danger)!important;box-shadow:0 0 0 2px rgba(220,38,38,.15)!important}
     [aria-invalid="true"]{border-color:var(--danger)!important}
     label.show-error{color:#991b1b}
     label.show-error::after{content:attr(data-error) " ";display:block;font-weight:normal;color:#dc2626;font-size:12px;margin-top:4px;line-height:1.2;white-space:normal;max-width:32ch}
-
-    /* Phone */
-    .phone-mask{position:relative;flex:1 1 260px;min-width:260px}
-    .phone-mask input{width:100%}
-    .phone-mask .mask-text{display:none}
-
-    .btn{background:#93c5fd;border:1px solid #bfdbfe;color:#0b1a33;font-weight:700;
-      padding:6px 12px;border-radius:4px;cursor:pointer;height:34px}
-    .btn:hover{background:#60a5fa;color:#fff}
-    .btn.selected{background:var(--primary-dark);color:#fff;border-color:var(--primary-dark)}
-
-    .yesno button{height:32px;background:#fff;color:#1e3a8a;border:1px solid var(--line);
-      padding:4px 12px;border-radius:4px;font-weight:600;cursor:pointer}
-    .yesno button:hover{border-color:var(--primary)}
-    .yesno button.selected{background:#2563eb;color:#fff;border-color:#2563eb}
-
-    .panel .option{font-weight:normal !important}
-
-    /* Test Centres */
+    .phone-mask{position:relative;flex:1 1 260px;min-width:260px}.phone-mask input{width:100%}.phone-mask .mask-text{display:none}
+    .btn{background:#93c5fd;border:1px solid #bfdbfe;color:#0b1a33;font-weight:700;padding:6px 12px;border-radius:4px;cursor:pointer;height:34px}
+    .btn:hover{background:#60a5fa;color:#fff}.btn.selected{background:var(--primary-dark);color:#fff;border-color:var(--primary-dark)}
+    .yesno button{height:32px;background:#fff;color:#1e3a8a;border:1px solid var(--line);padding:4px 12px;border-radius:4px;font-weight:600;cursor:pointer}
+    .yesno button:hover{border-color:var(--primary)}.yesno button.selected{background:#2563eb;color:#fff;border-color:#2563eb}
+    .panel .option{font-weight:normal!important}
     .centres-intro{color:#475569;line-height:1.45;margin:0 0 10px 0}
     .centres-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
     .centre-field{display:flex;flex-direction:column;gap:6px}
-    .centre-field input{width:100%}
     .lock-full{width:100%!important;max-width:100%!important}
-
-    .centre-input{
-      background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"><path fill="%2399a3b3" d="M7 10l5 5 5-5z"/></svg>');
-      background-repeat:no-repeat;
-      background-position:right 10px center;
-      padding-right:28px;
-      cursor:text;
-    }
-
-    /* MOBILE TYPEAHEAD (for iOS/Android) */
+    .centre-input{background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"><path fill="%2399a3b3" d="M7 10l5 5 5-5z"/></svg>');background-repeat:no-repeat;background-position:right 10px center;padding-right:28px;cursor:text}
     .ta-wrap{position:relative}
-    .ta-list{
-      position:absolute; left:0; right:0; top:100%; margin-top:4px;
-      max-height:240px; overflow:auto; background:#fff; border:1px solid var(--line);
-      border-radius:6px; box-shadow:0 8px 20px rgba(15,23,42,.12); z-index:50;
-    }
-    .ta-item{padding:8px 10px; cursor:pointer}
-    .ta-item:hover,.ta-item[aria-selected="true"]{background:#eef2ff}
-
-    /* ===== Date & Time Window ===== */
+    .ta-list{position:absolute;left:0;right:0;top:100%;margin-top:4px;max-height:240px;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:6px;box-shadow:0 8px 20px rgba(15,23,42,.12);z-index:50}
+    .ta-item{padding:8px 10px;cursor:pointer}.ta-item:hover,.ta-item[aria-selected="true"]{background:#eef2ff}
     .dt-heading{margin:0 0 8px 0;font-weight:bold}
     .dt-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
     .field-col{display:flex;flex-direction:column;gap:6px}
-    .field-col input{width:100%}
-    .inline{display:flex;flex-direction:column;gap:8px;width:100%}
-
     .time-inline{display:flex;align-items:center;gap:10px;flex-wrap:nowrap}
-    .time-input{width:12ch;max-width:100%}
-    .time-inline > span{display:inline-flex;align-items:center;height:34px;line-height:34px}
-
-    .days-inline{display:flex;align-items:center;gap:8px}
-    .days-inline > span{display:inline-flex;align-items:center;height:34px;line-height:34px}
-
-    /* Payment */
+    .time-input{width:12ch;max-width:100%}.time-inline>span{display:inline-flex;align-items:center;height:34px;line-height:34px}
+    .days-inline{display:flex;align-items:center;gap:8px}.days-inline>span{display:inline-flex;align-items:center;height:34px;line-height:34px}
     .subtotal{font-weight:bold;margin-top:10px;font-size:16px;text-align:right;color:var(--primary-dark)}
     .payment-box input,.payment-box select{margin-bottom:10px}
-    .paypal{margin-top:12px;display:flex;align-items:center;gap:12px;justify-content:space-between;
-      border-top:1px dashed var(--line);padding-top:10px}
+    .paypal{margin-top:12px;display:flex;align-items:center;gap:12px;justify-content:space-between;border-top:1px dashed var(--line);padding-top:10px}
     .card-logos img{height:18px;max-width:56px}
-    .paypal a#paypalBtn{background:#0070ba;padding:8px 14px;border-radius:4px;color:#fff;font-weight:bold;text-decoration:none}
-
     .indicator{margin-top:12px;text-align:center;font-weight:bold;display:none}
     .indicator.success{color:#16a34a}.indicator.fail{color:#dc2626}
     .submit-row{display:flex;align-items:center;gap:12px;margin:16px 0}
@@ -154,25 +78,16 @@
     .status-pill.paid{background:#ecfdf5;color:#16a34a}
     .submit-btn{flex:1;background:#2563eb;color:#fff;padding:10px;border:none;font-size:15px;border-radius:4px;cursor:pointer;opacity:.6}
     .submit-btn.enabled{opacity:1}
-
-    .pp-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px}
-    .pp-col{flex:1;min-width:220px}
-
-    #stripePanel{
-      display:none;margin-top:12px;padding:12px;border:1px dashed var(--line);
-      border-radius:10px;background:#fff;
-    }
-
-    /* ======== Mobile fixes ======== */
-    @media (max-width: 560px){
+    #stripePanel{display:none;margin-top:12px;padding:12px;border:1px dashed var(--line);border-radius:10px;background:#fff}
+    @media (max-width:560px){
       .wrap{max-width:100%;margin:0;background:#fff;border:none;box-shadow:none}
-      section.panel, section.blue-panel, section.yellow-panel{margin:8px;border-radius:8px;padding:14px}
+      section.panel,section.blue-panel,section.yellow-panel{margin:8px;border-radius:8px;padding:14px}
       #test-booking-type .row{grid-template-columns:1fr}
       #test-booking-type .note-line{grid-template-columns:1fr}
       .centres-grid{grid-template-columns:1fr}
       .dt-grid{grid-template-columns:1fr}
       .time-inline{flex-wrap:wrap}
-      #applicant-details .fields{grid-template-columns:1fr !important}
+      #applicant-details .fields{grid-template-columns:1fr!important}
     }
   </style>
 </head>
@@ -182,7 +97,7 @@
     <div class="strip subtitle">Money-Back Guarantee</div>
     <div class="strip important">❗ Important: Please read everything carefully and provide complete and accurate information.</div>
 
-    <!-- ===================== Test Booking Type ===================== -->
+    <!-- ===== Test Booking Type ===== -->
     <section id="test-booking-type" class="panel">
       <div class="heading">
         <label class="small">Test Booking Type:</label>
@@ -203,7 +118,7 @@
       </div>
     </section>
 
-    <!-- ===================== Applicant Details ===================== -->
+    <!-- ===== Applicant Details ===== -->
     <section id="applicant-details" class="panel">
       <div class="row heading"><label class="small">Applicant Details:</label></div>
 
@@ -239,7 +154,7 @@
       </div>
     </section>
 
-    <!-- ===================== Test Centres ===================== -->
+    <!-- ===== Test Centres ===== -->
     <section class="blue-panel">
       <div class="row heading"><label class="small">Test Centres:</label></div>
       <p class="centres-intro">
@@ -289,12 +204,11 @@
       </p>
     </section>
 
-    <!-- ===================== Date and Time Window ===================== -->
+    <!-- ===== Date & Time Window ===== -->
     <section class="yellow-panel">
       <div class="row heading"><label class="small dt-heading">Date and Time Window:</label></div>
 
       <div class="dt-grid">
-        <!-- Row 1 -->
         <div class="field-col">
           <label for="earliestDate">Earliest Date:</label>
           <input id="earliestDate" class="lock-full" type="date" placeholder="dd/mm/yyyy"/>
@@ -304,7 +218,6 @@
           <input id="latestDate" class="lock-full" type="date" placeholder="dd/mm/yyyy"/>
         </div>
 
-        <!-- Row 2 -->
         <div class="field-col">
           <label for="unavailInput">My Unavailable Dates:</label>
           <div class="multi-date" id="unavail">
@@ -320,7 +233,6 @@
           </div>
         </div>
 
-        <!-- Row 3 -->
         <div class="field-col">
           <label>Available Time Window:</label>
           <div class="time-inline">
@@ -340,54 +252,51 @@
       </div>
     </section>
 
-    <!-- ===================== Confirmation and Agreements ===================== -->
+    <!-- ===== Confirmation & Agreements ===== -->
     <section class="panel">
       <div class="section">
-        <div class="section-title req-title" style="font-weight:bold; margin-bottom:8px;">Confirmation and Agreement</div>
-        <label class="option" style="display:flex; align-items:flex-start; gap:8px; margin-bottom:10px;">
+        <div class="section-title req-title" style="font-weight:bold;margin-bottom:8px;">Confirmation and Agreement</div>
+        <label class="option" style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;">
           <input type="checkbox" name="agreement1"/>
           I confirm I have read the pricing, refund policy, and terms of service, and that the information I have provided is correct.
         </label>
       </div>
 
       <div class="section">
-        <div class="section-title req-title" style="font-weight:bold; margin-bottom:8px;">Consent and Data Usage Agreement</div>
-        <label class="option" style="display:flex; align-items:flex-start; gap:8px; margin-bottom:10px;">
+        <div class="section-title req-title" style="font-weight:bold;margin-bottom:8px;">Consent and Data Usage Agreement</div>
+        <label class="option" style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;">
           <input type="checkbox" name="agreement2"/>
           I consent to my data being stored temporarily until my test is booked. I can withdraw at any time by sending an email.
         </label>
       </div>
 
       <div class="section">
-        <div class="section-title req-title" style="font-weight:bold; margin-bottom:8px;">Test Booking and Test Centre</div>
-        <label class="option" style="display:flex; align-items:flex-start; gap:8px; margin-bottom:10px;">
+        <div class="section-title req-title" style="font-weight:bold;margin-bottom:8px;">Test Booking and Test Centre</div>
+        <label class="option" style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;">
           <input type="checkbox" name="agreement3"/>
           If we cannot find a test within your date range, you authorise us to continue searching for up to 30 additional calendar days. If we still cannot find one, you will receive a full refund.
         </label>
-        <label class="option" style="display:flex; align-items:flex-start; gap:8px; margin-bottom:10px;">
+        <label class="option" style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;">
           <input type="checkbox" name="agreement4"/>
           If you later ask to change your test centre, this will be treated as a new search and additional fees will apply. Only choose centres you can attend.
         </label>
       </div>
     </section>
 
-    <!-- ===================== Payment (Stripe on-page) ===================== -->
+    <!-- ===== Payment (Stripe) ===== -->
     <section class="panel">
       <div class="section">
-        <p><b>Payment:</b><br>
-        Please read the information below and answer each “Yes/No” question accurately so the correct amount is calculated.</p>
+        <p><b>Payment:</b><br>Please read the information below and answer each “Yes/No” question accurately so the correct amount is calculated.</p>
 
         <div class="option row">
-          <div class="option-text" style="flex:1">1. High-priority searching? +£30<br>
-          <small>We will run a separate high-priority search and book the first suitable DVSA slot for you. Otherwise, your request stays in the standard queue.</small></div>
+          <div class="option-text" style="flex:1">1. High-priority searching? +£30<br><small>We will run a separate high-priority search and book the first suitable DVSA slot for you. Otherwise, your request stays in the standard queue.</small></div>
           <div class="yesno" role="group" aria-label="Yes or No">
             <button type="button" data-price="30">Yes</button><button type="button" data-price="0">No</button>
           </div>
         </div>
 
         <div class="option row">
-          <div class="option-text" style="flex:1">2. Include weekend test slots? +£30<br>
-          <small>If a weekend test cannot be found, the £30 is not refundable.</small></div>
+          <div class="option-text" style="flex:1">2. Include weekend test slots? +£30<br><small>If a weekend test cannot be found, the £30 is not refundable.</small></div>
           <div class="yesno" role="group" aria-label="Yes or No">
             <button type="button" data-price="30">Yes</button><button type="button" data-price="0">No</button>
           </div>
@@ -402,18 +311,14 @@
 
         <!-- Stripe pay button -->
         <div class="pp-row">
-          <button id="stripePayBtn" class="submit-btn enabled" style="width:100%;max-width:360px;background:#635bff">
-            Payment options
-          </button>
+          <button id="stripePayBtn" class="submit-btn enabled" style="width:100%;max-width:360px;background:#635bff">Payment options</button>
         </div>
 
-        <!-- Stripe on-page panel (hidden until clicked) -->
+        <!-- Stripe Payment Element -->
         <div id="stripePanel">
           <div id="stripeMsg" class="indicator" style="display:none"></div>
           <div id="payment-element" style="margin-top:8px"></div>
-          <button id="stripeConfirmBtn" class="submit-btn enabled" style="margin-top:12px;width:100%;max-width:360px">
-            Pay now
-          </button>
+          <button id="stripeConfirmBtn" class="submit-btn enabled" style="margin-top:12px;width:100%;max-width:360px">Pay now</button>
         </div>
 
         <div class="small note" style="margin-top:6px">Submit will be enabled after the payment.</div>
@@ -428,9 +333,10 @@
     </section>
   </div>
 
-  <!-- ===================== Scripts ===================== -->
+  <!-- ===== Scripts ===== -->
+
+  <!-- Booking type + simple input guards -->
   <script>
-    /* Booking Type + constraints (+recalc for £150/£70) */
     (function(){
       const btnBook=document.getElementById('btnBook');
       const btnSwap=document.getElementById('btnSwap');
@@ -440,763 +346,281 @@
       function select(btn){
         [btnBook, btnSwap].forEach(b => { b && b.classList.remove('selected'); b && b.setAttribute('aria-pressed','false'); });
         btn.classList.add('selected'); btn.setAttribute('aria-pressed','true');
-
         if(btn===btnSwap){ swapRef && swapRef.setAttribute('required','required'); }
         else{ swapRef && swapRef.removeAttribute('required'); }
-
         if (window._recalcTotal) window._recalcTotal();
       }
-      if(btnBook) btnBook.addEventListener('click', () => select(btnBook));
-      if(btnSwap) btnSwap.addEventListener('click', () => select(btnSwap));
+      btnBook?.addEventListener('click', () => select(btnBook));
+      btnSwap?.addEventListener('click', () => select(btnSwap));
 
-      if(theoryPass) theoryPass.addEventListener('input', () => {
-        theoryPass.value = theoryPass.value.replace(/[^a-z0-9]/gi, '').slice(0, 16);
+      theoryPass?.addEventListener('input', () => { theoryPass.value = theoryPass.value.replace(/[^a-z0-9]/gi,'').slice(0,16); });
+      swapRef?.addEventListener('input', () => {
+        swapRef.value = swapRef.value.replace(/\D/g,'').slice(0,8);
       });
-      if(swapRef) swapRef.addEventListener('input', () => {
-        swapRef.value = swapRef.value.replace(/\D/g, '').slice(0, 8);
-        if(btnSwap && btnSwap.classList.contains('selected')){
-          markValidity(swapRef, swapRef.value.length===8, 'Enter the 8-digit DVSA booking reference.');
-        }
-      });
-
-      function markValidity(input, isValid, message){
-        const label = findLabelFor(input);
-        const hasVal = (input.value || '').trim() !== '';
-        input.classList.toggle('error', !isValid && hasVal);
-        input.setAttribute('aria-invalid', (!isValid && hasVal) ? 'true' : 'false');
-        if(label){
-          if(!isValid && hasVal){
-            label.classList.add('show-error');
-            label.setAttribute('data-error', message);
-          }else{
-            label.classList.remove('show-error');
-            label.removeAttribute('data-error');
-          }
-        }
-      }
-      function findLabelFor(input){
-        let prev = input.previousElementSibling;
-        if(prev && prev.tagName === 'LABEL') return prev;
-        let node=input;
-        while(node && node.previousElementSibling){
-          node=node.previousElementSibling;
-          if(node.tagName==='LABEL') return node;
-        }
-        return null;
-      }
     })();
   </script>
 
+  <!-- Applicant field validation (shortened) -->
   <script>
-    /* Applicant details validation + phone + postcode */
     (function(){
       const dl=document.getElementById('drivingLicence');
-      if(dl) dl.addEventListener('input', () => {
-        dl.value = dl.value.replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, 16);
-        markValidity(dl, dl.value.length === 16, 'Enter the first 16 characters only.');
-      });
-
       const email=document.getElementById('email');
+      const pc=document.getElementById('postcode');
       const emailRe=/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
-      if(email) email.addEventListener('input', ()=>{
-        const ok = email.value.trim()==='' ? true : emailRe.test(email.value.trim());
-        markValidity(email, ok, 'Enter a valid email address.');
+      function mark(i,ok){ i?.classList.toggle('error',!ok); i?.setAttribute('aria-invalid', ok?'false':'true'); }
+      dl?.addEventListener('input',()=>{ dl.value=dl.value.replace(/[^a-z0-9]/gi,'').toUpperCase().slice(0,16); mark(dl,dl.value.length===16); });
+      email?.addEventListener('input',()=>{ const v=email.value.trim(); mark(email, !v || emailRe.test(v)); });
+      pc?.addEventListener('input',()=>{
+        let v=pc.value.toUpperCase().replace(/[^A-Z0-9]/g,''); if(v.length>3) v=v.slice(0,v.length-3)+' '+v.slice(v.length-3); pc.value=v;
+        mark(pc, !v || /[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}/.test(v));
       });
 
-      const pc=document.getElementById('postcode');
-      const ukPost=/^([Gg][Ii][Rr] 0[Aa]{2})|((([A-Za-z][0-9]{1,2})|(([A-Za-z][A-Ha-hJ-Yj-y][0-9]{1,2})|(([A-Za-z][0-9][A-Za-z])|([A-Za-z][A-Ha-hJ-Yj-y][0-9]?[A-Za-z]?))))\s?[0-9][A-Za-z]{2})$/;
-      if(pc){
-        pc.addEventListener('keydown', (e)=>{
-          const allowedNav = ['Backspace','Delete','ArrowLeft','ArrowRight','Tab','Home','End'];
-          if (allowedNav.includes(e.key)) return;
-          if (/^[a-z0-9 ]$/i.test(e.key)) return;
-          e.preventDefault();
-        });
-        pc.addEventListener('input', ()=>{
-          let v = pc.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
-          if (v.length > 3) v = v.slice(0, v.length - 3) + ' ' + v.slice(v.length - 3);
-          pc.value = v;
-          const ok = pc.value.trim()==='' ? true : ukPost.test(pc.value);
-          markValidity(pc, ok, 'Enter a valid UK postcode (e.g., SW1A 1AA).');
-        });
+      const phone=document.getElementById('phoneRaw');
+      function normalize(){
+        let d=(phone.value||'').replace(/\D/g,''); if(d.startsWith('44')) d=d.slice(2); if(d.startsWith('0')) d=d.slice(1); d=d.slice(0,10);
+        phone.value = d ? ('+44 '+d) : '+44';
       }
-
-      function markValidity(input, isValid, message){
-        const label = findLabelFor(input);
-        const hasVal = (input.value || '').trim() !== '';
-        input.classList.toggle('error,', !isValid && hasVal);
-        input.setAttribute('aria-invalid', (!isValid && hasVal) ? 'true' : 'false');
-        if(label){
-          if(!isValid && hasVal){
-            label.classList.add('show-error');
-            label.setAttribute('data-error', message);
-          }else{
-            label.classList.remove('show-error');
-            label.removeAttribute('data-error');
-          }
-        }
-      }
-      function findLabelFor(input){
-        let prev = input.previousElementSibling;
-        if(prev && prev.tagName === 'LABEL') return prev;
-        let node=input;
-        while(node && node.previousElementSibling){
-          node=node.previousElementSibling;
-          if(node.tagName==='LABEL') return node;
-        }
-        return null;
-      }
-
-      /* WhatsApp phone: +44 + 10 digits (shows exactly +44 when empty) */
-      const phoneInput=document.getElementById('phoneRaw');
-      if(phoneInput){
-        function normalize(){
-          let digits = phoneInput.value.replace(/\D/g,'');
-          if(digits.startsWith('44')) digits = digits.slice(2);
-          if(digits.startsWith('0')) digits = digits.slice(1);
-          digits = digits.slice(0,10);
-          phoneInput.value = digits.length ? ('+44 ' + digits) : '+44';
-          const ok = digits.length === 10;
-          markValidity(phoneInput, ok || phoneInput.value.trim()==='+44', 'Enter a 10-digit UK mobile after +44.');
-        }
-        phoneInput.addEventListener('input', normalize);
-        phoneInput.addEventListener('blur', normalize);
-        if(!phoneInput.value) phoneInput.value = '+44';
-      }
+      phone?.addEventListener('input',normalize);
+      phone?.addEventListener('blur',normalize);
+      if (phone && !phone.value) phone.value='+44';
     })();
   </script>
 
-<script>
-  /* Centres: full list + normalisation + datalist build */
-  (function(){
-    const BASE_CENTRES = [
-      "Aberdeen","Armagh","Ashford","Barking (Tanner Street)","Barnet","Basingstoke","Belfast","Birmingham",
-      "Bournemouth","Bradford","Brighton","Bristol","Cambridge","Canterbury","Cardiff","Chertsey","Chingford",
-      "Coventry","Croydon","Derby","Doncaster","Edinburgh","Exeter","Farnborough","Glasgow","Goodmayes",
-      "Greenford","Guildford","Hendon","Hounslow","Ipswich","Leeds","Leicester","Liverpool","Luton","Manchester",
-      "Milton Keynes","Morden","Newcastle upon Tyne","Norwich","Nottingham","Oxford","Pinner","Portsmouth",
-      "Reading","Slough","Southampton","Tolworth","Uxbridge","Watford","Wimbledon","Wolverhampton","York",
-      "West Didsbury (Manchester)"
-    ];
-
-    /* Restored/expanded centres — includes Elgin, Borehamwood and many more */
-    const ALL_CENTRES = [
-      "Aberaeron","Aberdare","Aberfeldy","Aberfoyle","Abergavenny","Abergele","Abergwyngregyn","Aberystwyth",
-      "Abingdon","Airdrie","Aldershot","Alness","Alnwick","Ammanford","Andover","Antrim","Arbroath","Armagh",
-      "Ashfield","Ashford (Kent)","Atherton","Aylesbury","Ayr","Banbury","Bangor","Barnet","Barnsley","Barrow",
-      "Basildon","Basingstoke","Bath","Battersea","Bedford","Belfast","Bellshill","Belvedere","Beverley",
-      "Bexhill","Birmingham (Garretts Green)","Birmingham (Kings Heath)","Bishopbriggs","Blackburn","Blackpool",
-      "Blandford Forum","Bletchley","Bognor Regis","Bolton (Moses Gate)","Borehamwood","Boston","Bournemouth",
-      "Bournville","Bracknell","Bradford (Heaton)","Bradford (Thornbury)","Braehead","Brecon","Brentwood",
-      "Bridgend","Bridgwater","Bridlington","Bridlington (Crab Lane)","Brierley Hill","Brighton","Bristol (Avonmouth)",
-      "Bristol (Brislington)","Bristol (Southmead)","Bromsgrove","Brooklands (Weybridge)","Buckingham","Burton on Trent",
-      "Bury (Manchester)","Caernarfon","Caerphilly","Cambridge (Brookmount Court)","Cannock","Canterbury",
-      "Cardiff (Llanishen)","Cardigan","Carlisle","Carmarthen","Castleford","Chadderton","Chapel-en-le-Frith",
-      "Chelmsford","Cheltenham","Chertsey","Chester","Chesterfield","Chichester","Chingford","Chippenham","Chorley",
-      "Clacton-on-Sea","Clydebank","Colchester","Coleraine","Consett","Cookstown","Corby","Coventry","Cowdenbeath",
-      "Crewe","Crawley","Cromer","Croydon","Cumbernauld","Darlington","Darwen","Dartford","Derby","Derby (Alvaston)",
-      "Dewsbury","Didcot","Doncaster","Dorchester","Droitwich","Dudley","Dumfries","Dundee","Dunfermline",
-      "Dunoon","Durham","East Kilbride","Eastbourne","Edinburgh (Currie)","Edinburgh (Musselburgh)","Elgin",
-      "Ellesmere Port","Eltham (London)","Enfield","Enniskillen","Erith (London)","Exeter","Falkirk","Falmouth",
-      "Fareham","Farnborough","Farnham","Faversham","Folkestone","Forfar","Forest Hills (London)","Fort William",
-      "Fraserburgh","Galashiels","Gateshead","Gillingham","Glasgow (Anniesland)","Glasgow (Baillieston)",
-      "Glasgow (Shieldhall)","Glenrothes","Gloucester","Goole","Goodmayes","Grantham","Gravesend","Great Yarmouth",
-      "Greenford","Grimsby","Guildford","Hamiliton","Harlow","Harlesden (London)","Harrogate","Hartlepool",
-      "Hastings","Hatfield","Havant","Hayes (London)","Heckmondwike","Hemel Hempstead","Hendon","Hereford",
-      "Herne Bay","High Wycombe","Hinckley","Hither Green (London)","Holloway (London)","Hornchurch","Horwich",
-      "Horsforth (Leeds)","Horsham","Houghton-le-Spring","Hove","Huddersfield","Hull","Huntingdon","Huyton",
-      "Hyde","Ilford","Inveraray","Inverness","Ipswich","Isleworth (London)","Isle of Skye (Portree)","Isle of Wight",
-      "Keighley","Kelso","Kendal","Kettering","Kidderminster","Kidlington (Oxford)","Kingston (Tolworth)","Kings Lynn",
-      "Kirkcaldy","Kirkintilloch","Knaresborough","Lancing","Launceston","Leamington Spa","Leeds","Leeds (Harehills)",
-      "Leicester (Cannock Street)","Leicester (Wigston)","Leighton Buzzard","Lerwick (Shetland)","Letchworth",
-      "Lincoln","Livingston","Llandrindod Wells","Llanelli","Llantrisant","Loanhead","Lochgilphead","London City",
-      "Longbenton","Loughborough","Lowestoft","Ludlow","Lurgan","Luton","Macclesfield","Maesteg","Maidstone",
-      "Maldon","Malton","Malvern","Manchester (West Didsbury)","Manchester (Cheetham Hill)","Mansfield","Margate",
-      "Market Harborough","Melton Mowbray","Merthyr Tydfil","Middlesbrough","Mill Hill","Milton Keynes","Montrose",
-      "Morley (Leeds)","Morden","Motherwell","Neath","Nelson","Newbury","Newcastle upon Tyne (Elswick)",
-      "Newcastle-under-Lyme","Newport (Gwent)","Newport (IOW)","Newport Pagnell","Newtown","Newton Abbot",
-      "Northallerton","Northampton","Northwich","Norwich","Nottingham (Beeston)","Nottingham (Chilwell)",
-      "Nuneaton","Oban","Oldham","Orkney (Kirkwall)","Oxford","Paisley","Penzance","Perth","Peterborough",
-      "Peterhead","Pinner","Plymouth","Poole","Port Glasgow","Portadown","Portsmouth","Preston","Pwllheli",
-      "Reading","Redditch","Redhill (London)","Rhyl","Rochdale","Rotherham","Rugby","Ruislip","Salisbury",
-      "Scarborough","Scunthorpe","Sevenoaks","Sheffield (Handsworth)","Sheffield (Middlewood Road)","Shrewsbury",
-      "Skegness","Skipton","Slough","South Shields","Southall","Southampton (Forest Hills)","Southampton (Maybush)",
-      "Southend-on-Sea","Southport","Southwark (London)","Spalding","Speke (Liverpool)","St Albans","St Helens",
-      "Stirling","Stevenage","Stoke-on-Trent (Cobridge)","Stockport (Bredbury)","Stockton-on-Tees","Stornoway",
-      "Stranraer","Sunderland","Sutton Coldfield","Swansea","Swindon","Taunton","Tavistock","Telford","Thurso",
-      "Tilbury","Tonbridge","Torquay","Tottenham (London)","Truro","Tunbridge Wells","Uxbridge","Wakefield",
-      "Walton","Warrington","Warwick","Watford","Wellingborough","Welling (London)","Wembley","West Bromwich",
-      "West Didsbury (Manchester)","Weston-super-Mare","Wetherby","Wick","Widnes","Wigan","Wimbledon","Winchester",
-      "Wisbech","Woking","Wolverhampton","Worcester","Workington","Worksop","Worthing","Wrexham","Yeading (London)",
-      "Yeovil","York","Borehamwood (London)","Borehamwood","Barnet (London)","Elgin (Moray)","Borehamwood (Manor Way)"
-    ];
-
-    const IGNORE = new Set([
-      "spare","discover more","driving test routes","vehicle electronics","best smartphone",
-      "mobile app","app","tomtom go","tomtom app"
-    ]);
-
-    function stripParens(s){ return s.replace(/\((?:.|\n)*?\)/g, '').trim(); }
-    function stripLondonPrefix(s){ return s.replace(/^london\s+/i,'').trim(); }
-    function expandSlash(name){
-      if (!name) return [];
-      return name.split(/\s*\/\s*/).map(s=>s.trim()).filter(Boolean);
-    }
-
-    const map = new Map(); // key -> canonical name
-    function addName(raw){
-      if (!raw) return;
-      const noParens = stripParens(raw);
-      const parts = expandSlash(noParens);
-      (parts.length?parts:[noParens]).forEach(p=>{
-        let canon = p.replace(/\s+/g,' ').trim();
-        if (!canon) return;
-        const collapsed = stripLondonPrefix(canon);
-        const key = collapsed.toLowerCase();
-        if (IGNORE.has(key)) return;
-        if (!map.has(key)) map.set(key, collapsed);
-      });
-    }
-
-    BASE_CENTRES.forEach(addName);
-    ALL_CENTRES.forEach(addName);
-
-    /* a few common typos -> fixes */
-    const fixes = {
-      "aberystwyh": "Aberystwyth",
-      "derby alverston": "Derby Alvaston",
-      "sheffield hansworth": "Sheffield Handsworth",
-      "cardiff lianishen": "Cardiff Llanishen"
-    };
-    for (const [k] of Array.from(map.entries())){
-      const fk = fixes[k];
-      if (fk){ map.set(fk.toLowerCase(), fk); map.delete(k); }
-    }
-
-    const merged = Array.from(map.values()).sort((a,b)=>a.localeCompare(b));
-
-    const dl = document.getElementById('testCentresList');
-    if (dl) {
-      dl.innerHTML = '';
-      const frag = document.createDocumentFragment();
-      merged.forEach(c => {
-        const opt = document.createElement('option');
-        opt.value = c;
-        frag.appendChild(opt);
-      });
-      dl.appendChild(frag);
-    }
-
-    window.__centres = merged.slice(); // expose for mobile typeahead
-  })();
-</script>
-
-  <!-- MOBILE TYPEAHEAD for centre inputs (keeps datalist for desktop) -->
+  <!-- CENTRES: **ONE LIST ONLY** (includes Elgin, Borehamwood, etc.) -->
   <script>
     (function(){
-      const ua = navigator.userAgent || '';
-      const isIOS = /iPad|iPhone|iPod/.test(ua);
-      const isAndroid = /Android/.test(ua);
-      const useCustom = isIOS || isAndroid;
+      const ALL_CENTRES = [
+        "Aberdeen","Aberdeen North","Aberystwyth","Abergavenny","Arbroath","Armagh","Ashford",
+        "Barking (Tanner Street)","Barnet","Barnsley","Barrow","Basingstoke","Bath","Bedford","Belfast",
+        "Birmingham (Garrets Green)","Birmingham (Kings Heath)","Blackburn","Blackpool","Bolton","Borehamwood",
+        "Bournemouth","Bradford","Brentwood","Brighton","Bristol (Avonmouth)","Bristol (Kingswood)","Bromley","Bury",
+        "Cambridge (Cowley)","Canterbury","Cardiff (Coryton)","Cardiff (Llanishen)","Carlisle","Chelmsford","Chertsey","Chingford",
+        "Colchester","Coventry","Crawley","Crewe","Croydon","Darlington","Derby Alvaston","Doncaster",
+        "Dudley","Dunfermline","Durham","Eastbourne","Edinburgh (Currie)","Elgin","Enfield",
+        "Exeter","Farnborough","Glasgow (Anniesland)","Glasgow (Baillieston)","Gillingham","Goodmayes","Gosforth",
+        "Grantham","Greenford","Guildford","Hastings","Hazel Grove","Hendon","High Wycombe","Hornchurch","Hounslow","Huddersfield","Hull",
+        "Inverness","Ipswich","Isleworth","Kettering","Leamington Spa","Leeds (Horsforth)","Leeds (Harehills)","Leicester (Cannock Street)","Leicester (Wigston)",
+        "Leighton Buzzard","Letchworth","Lincoln","Liverpool (Norris Green)","London City","Loughborough","Lowestoft",
+        "Luton","Maidstone","Manchester (Cheetham Hill)","Manchester (West Didsbury)","Mitcham","Milton Keynes","Morden",
+        "Newcastle upon Tyne (Elswick)","Newcastle (Gosforth)","Newport","Northampton","Norwich","Nottingham (Beeston)","Nottingham (Chilwell)",
+        "Nuneaton","Oldham","Orpington","Oxford (Cowley)","Paisley","Peterborough","Pinner","Plymouth","Poole","Portsmouth",
+        "Reading","Redhill (Lovewell)","Rochdale","Romford","Rotherham","Sale","Sevenoaks","Sheffield (Handsworth)","Sheffield (Middlewood Road)","Slough",
+        "Southall","Southampton (Forest Hills)","Southampton (Maybush)","St Albans","Stevenage","Stirling","Stockport","Stoke-on-Trent","Sunderland",
+        "Swansea","Swindon","Taunton","Tolworth","Tottenham","Uxbridge","Wakefield","Wallasey","Walsall","Warrington","Watford","Wellingborough",
+        "Weston-super-Mare","Wick","Wigan","Wimbledon","Wolverhampton","Worcester","Worthing","York"
+      ];
 
-      if (!useCustom) return;
+      const IGNORE = new Set([
+        "spare","discover more","driving test routes","vehicle electronics","best smartphone",
+        "mobile app","app","tomtom go","tomtom app"
+      ]);
 
-      const CENTRES = Array.isArray(window.__centres) ? window.__centres : [];
+      function stripParens(s){ return s.replace(/\((?:.|\n)*?\)/g,'').trim(); }
+      function stripLondonPrefix(s){ return s.replace(/^london\s+/i,'').trim(); }
+      function expandSlash(name){ return name.split(/\s*\/\s*/).map(s=>s.trim()).filter(Boolean); }
 
-      function buildList(input, list){
-        const q = (input.value || '').toLowerCase().trim();
-        const matches = q ? CENTRES.filter(c => c.toLowerCase().includes(q)).slice(0, 12) : [];
-        list.innerHTML = '';
-        if (!matches.length){ list.hidden = true; return; }
-        matches.forEach((m) => {
-          const div = document.createElement('div');
-          div.className = 'ta-item';
-          div.setAttribute('role','option');
-          div.textContent = m;
-          div.addEventListener('mousedown', (e)=>e.preventDefault());
-          div.addEventListener('click', ()=>{
-            input.value = m;
-            list.hidden = true;
-            input.dispatchEvent(new Event('change'));
-          });
-          list.appendChild(div);
+      const map = new Map();
+      function addName(raw){
+        if (!raw) return;
+        const noParens = stripParens(raw);
+        const parts = expandSlash(noParens);
+        (parts.length?parts:[noParens]).forEach(p=>{
+          const collapsed = stripLondonPrefix(p.replace(/\s+/g,' ').trim());
+          const key = collapsed.toLowerCase();
+          if (collapsed && !IGNORE.has(key) && !map.has(key)) map.set(key, collapsed);
         });
-        list.hidden = false;
       }
 
+      ALL_CENTRES.forEach(addName);
+
+      const merged = Array.from(map.values()).sort((a,b)=>a.localeCompare(b));
+      const dl = document.getElementById('testCentresList');
+      if (dl) dl.innerHTML = merged.map(c=>`<option value="${c}"></option>`).join('');
+      window.__centres = merged.slice();
+    })();
+  </script>
+
+  <!-- Mobile typeahead for centres -->
+  <script>
+    (function(){
+      const ua=navigator.userAgent||''; const isIOS=/iPad|iPhone|iPod/.test(ua); const isAndroid=/Android/.test(ua);
+      if (!(isIOS||isAndroid)) return;
+      const CENTRES = Array.isArray(window.__centres)?window.__centres:[];
+      function buildList(input,list){
+        const q=(input.value||'').toLowerCase().trim();
+        const matches=q?CENTRES.filter(c=>c.toLowerCase().includes(q)).slice(0,12):[];
+        list.innerHTML=''; if(!matches.length){list.hidden=true;return;}
+        matches.forEach(m=>{const d=document.createElement('div');d.className='ta-item';d.textContent=m;d.onmousedown=e=>e.preventDefault();d.onclick=()=>{input.value=m;list.hidden=true;input.dispatchEvent(new Event('change'));};list.appendChild(d);});
+        list.hidden=false;
+      }
       function attach(el){
-        const wrap = el.closest('.ta-wrap');
-        if (!wrap) return;
-        const list = wrap.querySelector('.ta-list');
-        if (!list) return;
-
+        const wrap=el.closest('.ta-wrap'); if(!wrap) return;
+        const list=wrap.querySelector('.ta-list'); if(!list) return;
         el.setAttribute('autocomplete','off');
-        el.addEventListener('input', ()=>buildList(el, list));
-        el.addEventListener('focus', ()=>buildList(el, list));
-        el.addEventListener('blur', ()=>setTimeout(()=>{ list.hidden = true; }, 120));
+        el.addEventListener('input',()=>buildList(el,list));
+        el.addEventListener('focus',()=>buildList(el,list));
+        el.addEventListener('blur',()=>setTimeout(()=>{list.hidden=true;},120));
       }
-
       document.querySelectorAll('.centre-input').forEach(attach);
     })();
   </script>
 
+  <!-- Multi-date pickers (unchanged condensed) -->
   <script>
-  /* Multi-date pickers */
-  (function(){
-    const pad=n=>String(n).padStart(2,'0');
-    const fmt=d=>`${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()}`;
-    const iso=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${d.getDate()}`;
-    const fromYMD=s=>{const [y,m,dd]=s.split('-').map(Number);return new Date(y,m-1,dd)};
-
-    function makeMultiDatePicker(wrapperId,inputId,dropdownId){
-      const wrapper=document.getElementById(wrapperId);
-      const input=document.getElementById(inputId);
-      const dropdown=document.getElementById(dropdownId);
-      if(!wrapper||!input||!dropdown)return;
-
-      let view=new Date();view.setDate(1);
-      const selected=new Set();
-
-      dropdown.addEventListener('mousedown',e=>e.stopPropagation());
-
-      function updateInput(){
-        const sorted=Array.from(selected).sort();
-        input.value=sorted.map(s=>fmt(fromYMD(s))).join(', ');
-      }
-
-      function render(){
-        dropdown.innerHTML='';dropdown.style.display='block';
-        const header=document.createElement('div');header.style.display='flex';header.style.justifyContent='space-between';header.style.alignItems='center';header.style.marginBottom='6px';
-        const title=document.createElement('div');title.textContent=view.toLocaleString(undefined,{month:'long',year:'numeric'});
-        const nav=document.createElement('div');
-        const prev=document.createElement('button');prev.textContent='‹';
-        const next=document.createElement('button');next.textContent='›';
-        [prev,next].forEach(b=>{b.style.border='1px solid #ddd';b.style.background='#fafafa';b.style.borderRadius='4px';b.style.padding='4px 6px';b.style.cursor='pointer';b.addEventListener('mousedown',e=>e.stopPropagation())});
-        prev.onclick=()=>{view.setMonth(view.getMonth()-1);render()};
-        next.onclick=()=>{view.setMonth(view.getMonth()+1);render()};
-        nav.append(prev,next);header.append(title,nav);dropdown.append(header);
-
-        const dow=document.createElement('div');dow.style.display='grid';dow.style.gridTemplateColumns='repeat(7,1fr)';dow.style.gap='4px';
-        ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].forEach(n=>{const c=document.createElement('div');c.textContent=n;c.style.textAlign='center';c.style.padding='6px 0';c.style.fontWeight='bold';c.style.background='#f7f7f7';c.style.borderRadius='4px';dow.append(c)});
-        dropdown.append(dow);
-
-        const grid=document.createElement('div');grid.style.display='grid';grid.style.gridTemplateColumns='repeat(7,1fr)';grid.style.gap='4px';
-        const first=new Date(view.getFullYear(),view.getMonth(),1);
-        let startIndex=first.getDay();if(startIndex===0)startIndex=7;
-        for(let i=1;i<startIndex;i++){const b=document.createElement('div');b.style.color='#bbb';b.style.background='#fafafa';b.style.border='1px solid #eee';b.style.borderRadius='4px';grid.append(b)}
-        const daysInMonth=new Date(view.getFullYear(),view.getMonth()+1,0).getDate();
-        for(let d=1;d<=daysInMonth;d++){
-          const cell=document.createElement('div');cell.textContent=d;
-          cell.style.textAlign='center';cell.style.padding='6px 0';cell.style.borderRadius='4px';cell.style.border='1px solid #eee';cell.style.background='#fff';cell.style.cursor='pointer';
-          const dateObj=new Date(view.getFullYear(),view.getMonth(),d);const key=iso(dateObj);
-          if(selected.has(key)){cell.style.background='#1a73e8';cell.style.color='#fff';cell.style.borderColor='#1a73e8';cell.style.fontWeight='bold'}
-          cell.addEventListener('mousedown',e=>e.stopPropagation());
-          cell.onclick=()=>{if(selected.has(key))selected.delete(key);else selected.add(key);updateInput();render()};
-          grid.append(cell)
+    (function(){
+      const pad=n=>String(n).padStart(2,'0');
+      const fmt=d=>`${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()}`;
+      const iso=d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${d.getDate()}`;
+      const fromYMD=s=>{const [y,m,dd]=s.split('-').map(Number);return new Date(y,m-1,dd)};
+      function makeMultiDatePicker(wrapperId,inputId,dropdownId){
+        const wrapper=document.getElementById(wrapperId), input=document.getElementById(inputId), dropdown=document.getElementById(dropdownId);
+        if(!wrapper||!input||!dropdown)return;
+        let view=new Date();view.setDate(1);const selected=new Set();
+        dropdown.addEventListener('mousedown',e=>e.stopPropagation());
+        function updateInput(){ const sorted=Array.from(selected).sort(); input.value=sorted.map(s=>fmt(fromYMD(s))).join(', ');}
+        function render(){
+          dropdown.innerHTML=''; dropdown.style.display='block';
+          const header=document.createElement('div'); header.style.display='flex'; header.style.justifyContent='space-between'; header.style.alignItems='center'; header.style.marginBottom='6px';
+          const title=document.createElement('div'); title.textContent=view.toLocaleString(undefined,{month:'long',year:'numeric'});
+          const nav=document.createElement('div'); const prev=document.createElement('button'); prev.textContent='‹'; const next=document.createElement('button'); next.textContent='›';
+          [prev,next].forEach(b=>{b.style.border='1px solid #ddd';b.style.background='#fafafa';b.style.borderRadius='4px';b.style.padding='4px 6px';b.style.cursor='pointer';b.onmousedown=e=>e.stopPropagation()});
+          prev.onclick=()=>{view.setMonth(view.getMonth()-1);render()}; next.onclick=()=>{view.setMonth(view.getMonth()+1);render()};
+          nav.append(prev,next); header.append(title,nav); dropdown.append(header);
+          const dow=document.createElement('div'); dow.style.display='grid'; dow.style.gridTemplateColumns='repeat(7,1fr)'; dow.style.gap='4px';
+          ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].forEach(n=>{const c=document.createElement('div');c.textContent=n;c.style.textAlign='center';c.style.padding='6px 0';c.style.fontWeight='bold';c.style.background='#f7f7f7';c.style.borderRadius='4px';dow.append(c)}); dropdown.append(dow);
+          const grid=document.createElement('div'); grid.style.display='grid'; grid.style.gridTemplateColumns='repeat(7,1fr)'; grid.style.gap='4px';
+          const first=new Date(view.getFullYear(),view.getMonth(),1); let startIndex=first.getDay(); if(startIndex===0)startIndex=7;
+          for(let i=1;i<startIndex;i++){const b=document.createElement('div'); b.style.color='#bbb'; b.style.background='#fafafa'; b.style.border='1px solid #eee'; b.style.borderRadius='4px'; grid.append(b)}
+          const daysInMonth=new Date(view.getFullYear(),view.getMonth()+1,0).getDate();
+          for(let d=1;d<=daysInMonth;d++){ const cell=document.createElement('div'); cell.textContent=d; cell.style.textAlign='center'; cell.style.padding='6px 0'; cell.style.borderRadius='4px'; cell.style.border='1px solid #eee'; cell.style.background='#fff'; cell.style.cursor='pointer';
+            const dateObj=new Date(view.getFullYear(),view.getMonth(),d); const key=iso(dateObj);
+            if(selected.has(key)){cell.style.background='#1a73e8';cell.style.color='#fff';cell.style.borderColor='#1a73e8';cell.style.fontWeight='bold'}
+            cell.onmousedown=e=>e.stopPropagation(); cell.onclick=()=>{if(selected.has(key))selected.delete(key);else selected.add(key);updateInput();render()};
+            grid.append(cell) }
+          dropdown.append(grid);
+          const footer=document.createElement('div'); footer.style.display='flex'; footer.style.gap='8px'; footer.style.marginTop='8px';
+          const clearBtn=document.createElement('button'); clearBtn.textContent='Clear'; const closeBtn=document.createElement('button'); closeBtn.textContent='Close';
+          [clearBtn,closeBtn].forEach(b=>{b.style.flex='1';b.style.padding='6px';b.style.border='1px solid #ddd';b.style.borderRadius='4px';b.style.cursor='pointer';b.onmousedown=e=>e.stopPropagation()});
+          clearBtn.onclick=()=>{selected.clear();updateInput();render()}; closeBtn.onclick=()=>{dropdown.style.display='none'}; footer.append(clearBtn,closeBtn); dropdown.append(footer)
         }
-        dropdown.append(grid);
-
-        const footer=document.createElement('div');footer.style.display='flex';footer.style.gap='8px';footer.style.marginTop='8px';
-        const clearBtn=document.createElement('button');clearBtn.textContent='Clear';
-        const closeBtn=document.createElement('button');closeBtn.textContent='Close';
-        [clearBtn,closeBtn].forEach(b=>{b.style.flex='1';b.style.padding='6px';b.style.border='1px solid #ddd';b.style.borderRadius='4px';b.style.cursor='pointer';b.addEventListener('mousedown',e=>e.stopPropagation())});
-        clearBtn.onclick=()=>{selected.clear();updateInput();render()};
-        closeBtn.onclick=()=>{dropdown.style.display='none'};
-        footer.append(clearBtn,closeBtn);dropdown.append(footer)
+        input.addEventListener('click',e=>{e.stopPropagation();dropdown.style.display=dropdown.style.display==='block'?'none':'block';if(dropdown.style.display==='block')render()});
+        document.addEventListener('mousedown',e=>{if(!wrapper.contains(e.target))dropdown.style.display='none'})
       }
-
-      input.addEventListener('click',e=>{e.stopPropagation();dropdown.style.display=dropdown.style.display==='block'?'none':'block';if(dropdown.style.display==='block')render()});
-      document.addEventListener('mousedown',e=>{if(!wrapper.contains(e.target))dropdown.style.display='none'})
-    }
-
-    makeMultiDatePicker('unavail','unavailInput','unavailCal');
-    makeMultiDatePicker('instr','instrInput','instrCal');
-  })();
+      makeMultiDatePicker('unavail','unavailInput','unavailCal');
+      makeMultiDatePicker('instr','instrInput','instrCal');
+    })();
   </script>
 
+  <!-- Payment: totals + promo + busy-centre surcharge -->
   <script>
-  /* Payment: totals + promo + custom fees (book/swap + busy centres) */
-  (function(){
-    const groups     = document.querySelectorAll('.yesno');
-    const promoInput = document.getElementById('promoCode');
-    const totalLine  = document.getElementById('totalLine');
-
-    const BUSY = new Set([
-      'barking','chertsey','chingford','farnborough','goodmayes','greenford',
-      'high wycombe','hornchurch','hounslow','leighton buzzard','letchworth','luton','morden',
-      'oxford','pinner','reading','slough','southall','tolworth','uxbridge','wanstead',
-      'west didsbury'
-    ]);
-
-    function normalizeCentreName(v){
-      return (v||'')
-        .toLowerCase()
-        .replace(/\s*\([^)]*\)/g,'')
-        .replace(/^london\s+/,'')
-        .replace(/\s+/g,' ')
-        .trim();
-    }
-
-    function money(n){ return `£${n.toFixed(2)}`; }
-
-    function baseSumFromYesNo(){
-      let sum = 0;
-      document.querySelectorAll('.yesno button.selected').forEach(b=>{
-        const price = Number(b.dataset.price||0);
-        if (!isNaN(price)) sum += price;
-      });
-      return sum;
-    }
-
-    function bookingSwapFee(){
-      const book = document.getElementById('btnBook')?.classList.contains('selected');
-      const swap = document.getElementById('btnSwap')?.classList.contains('selected');
-      if (book) return 150;
-      if (swap) return 70;
-      return 0;
-    }
-
-    function busyCentresSurcharge(){
-      let count = 0;
-      document.querySelectorAll('.centre-input').forEach(inp=>{
-        const v = normalizeCentreName(inp.value);
-        if (v && BUSY.has(v)) count += 1;
-      });
-      return count * 30;
-    }
-
-    function promoDiscount(sum){
-      if (!promoInput) return 0;
-      const code = (promoInput.value||'').trim().toUpperCase();
-      if (!code) return 0;
-      if (code === 'SAVE10') return Math.min(10, sum);
-      if (code === 'SAVE20') return Math.min(20, sum);
-      if (code === 'OFF10')  return +(sum*0.10).toFixed(2);
-      return 0;
-    }
-
-    function recalc(){
-      const yesno = baseSumFromYesNo();
-      const bookSwap = bookingSwapFee();
-      const busy = busyCentresSurcharge();
-      const gross = yesno + bookSwap + busy;
-      const disc = promoDiscount(gross);
-      let total = Math.max(0, gross - disc);
-
-      const isBook = document.getElementById('btnBook')?.classList.contains('selected');
-      const isSwap = document.getElementById('btnSwap')?.classList.contains('selected');
-      if (isBook) total = Math.max(150, total);
-      if (isSwap) total = Math.max(70, total);
-
-      if (totalLine) totalLine.textContent = `Total: ${money(total)}`;
-    }
-
-    window._recalcTotal = recalc;
-
-    groups.forEach(g=>{
-      g.addEventListener('click', e=>{
-        const btn = e.target.closest('button'); if (!btn) return;
-        g.querySelectorAll('button').forEach(b=>{
-          b.classList.remove('selected'); b.setAttribute('aria-pressed','false');
-        });
-        btn.classList.add('selected'); btn.setAttribute('aria-pressed','true');
-        recalc();
-      });
-    });
-
-    if (promoInput){
-      promoInput.addEventListener('input',  recalc);
-      promoInput.addEventListener('change', recalc);
-    }
-
-    recalc();
-  })();
+    (function(){
+      const groups=document.querySelectorAll('.yesno'); const promoInput=document.getElementById('promoCode'); const totalLine=document.getElementById('totalLine');
+      const BUSY=new Set(['barking','chertsey','chingford','farnborough','goodmayes','greenford','high wycombe','hornchurch','hounslow','leighton buzzard','letchworth','luton','morden','oxford','pinner','reading','slough','southall','tolworth','uxbridge','wanstead','west didsbury']);
+      const money=n=>`£${n.toFixed(2)}`;
+      function normalizeCentreName(v){return (v||'').toLowerCase().replace(/\s*\([^)]*\)/g,'').replace(/^london\s+/,'').replace(/\s+/g,' ').trim();}
+      function baseSum(){let s=0;document.querySelectorAll('.yesno button.selected').forEach(b=>{const p=Number(b.dataset.price||0);if(!isNaN(p))s+=p});return s;}
+      function bookingFee(){const book=document.getElementById('btnBook')?.classList.contains('selected');const swap=document.getElementById('btnSwap')?.classList.contains('selected');return book?150:(swap?70:0);}
+      function busyFee(){let c=0;document.querySelectorAll('.centre-input').forEach(i=>{const v=normalizeCentreName(i.value);if(v&&BUSY.has(v))c++});return c*30;}
+      function promo(sum){const code=(promoInput?.value||'').trim().toUpperCase();if(!code)return 0;if(code==='SAVE10')return Math.min(10,sum);if(code==='SAVE20')return Math.min(20,sum);if(code==='OFF10')return +(sum*0.10).toFixed(2);return 0;}
+      function recalc(){const gross=baseSum()+bookingFee()+busyFee();const disc=promo(gross);let total=Math.max(0,gross-disc);const isBook=document.getElementById('btnBook')?.classList.contains('selected');const isSwap=document.getElementById('btnSwap')?.classList.contains('selected');if(isBook) total=Math.max(150,total);if(isSwap) total=Math.max(70,total); totalLine.textContent=`Total: ${money(total)}`;}
+      window._recalcTotal=recalc;
+      groups.forEach(g=>{g.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;g.querySelectorAll('button').forEach(x=>{x.classList.remove('selected');x.setAttribute('aria-pressed','false')});b.classList.add('selected');b.setAttribute('aria-pressed','true');recalc();});});
+      promoInput?.addEventListener('input',recalc); promoInput?.addEventListener('change',recalc); recalc();
+    })();
   </script>
 
+  <!-- Page helper + pre-search + submit -->
   <script>
     (() => {
-      const API_TOKEN = 'YOUR_REAL_API_TOKEN';
+      const $  = s=>document.querySelector(s);
+      const pad=n=>String(n).padStart(2,'0');
+      const toHH=n=>`${pad((+n||0)===12?0:(+n||0))}:00`;
+      const toHHpm=n=>`${pad((+n||0)===12?12:(+n||0)+12)}:00`;
+      const ymd = el => { const v=(el&&el.value?el.value.trim():''); if(/^\d{4}-\d{2}-\d{2}$/.test(v))return v; const m=v.match(/^(\d{2})\/(\d{2})\/(\d{4})$/); return m?`${m[3]}-${m[2]}-${m[1]}`:''; };
+      const normalizePhone=v=>{let d=(v||'').replace(/\D/g,''); if(d.startsWith('44'))d=d.slice(2); if(d.startsWith('0'))d=d.slice(1); d=d.slice(0,10); return d?('0'+d):'';};
+      function centresArray(){ return Array.from(document.querySelectorAll('.centre-input')).map(i=>(i?.value||'').trim()).filter(Boolean); }
 
-      const $  = (sel) => document.querySelector(sel);
-      const $$ = (sel) => Array.from(document.querySelectorAll(sel));
-
-      const pad = (n) => String(n).padStart(2,'0');
-      const toHH    = (n) => `${pad((+n||0) === 12 ? 0 : (+n||0))}:00`;
-      const toHHpm  = (n) => `${pad((+n||0) === 12 ? 12 : (+n||0)+12)}:00`;
-
-      const ymd = (el) => {
-        const v = (el && el.value ? el.value.trim() : '');
-        if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
-        const m = v.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-        return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
-      };
-
-      const normalizePhone = (v) => {
-        let d = (v||'').replace(/\D/g,'');
-        if (d.startsWith('44')) d = d.slice(2);
-        if (d.startsWith('0'))  d = d.slice(1);
-        d = d.slice(0,10);
-        return d ? ('0' + d) : '';
-      };
-
-      const toast = (msg, ok=true) => {
-        let t = document.getElementById('apiToast');
-        if (!t) {
-          t = document.createElement('div');
-          t.id = 'apiToast';
-          t.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.15);transition:opacity .3s';
-          document.body.appendChild(t);
-        }
-        t.style.background = ok ? '#ecfdf5' : '#fef2f2';
-        t.style.color      = ok ? '#065f46' : '#991b1b';
-        t.textContent = msg;
-        t.style.opacity = '1';
-        setTimeout(()=>{ t.style.opacity='0' }, 3500);
-      };
-
-      async function healthCheck() {
-        try {
-          const r = await fetch(`${API_BASE}/health`);
-          const j = await r.json();
-          if (j && j.ok) {
-            const sub = document.querySelector('.strip.subtitle');
-            if (sub && !document.getElementById('apiHealthBadge')) {
-              const s = document.createElement('span');
-              s.id = 'apiHealthBadge';
-              s.textContent = ' API ✓';
-              s.style.cssText = 'margin-left:8px;font-weight:700;color:#064e3b;background:#d1fae5;padding:2px 6px;border-radius:999px';
-              sub.appendChild(s);
-            }
-            return true;
-          }
-        } catch (_) {}
-        return false;
+      function toast(msg,ok=true){
+        let t=document.getElementById('apiToast'); if(!t){t=document.createElement('div');t.id='apiToast';t.style.cssText='position:fixed;right:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.15);transition:opacity .3s';document.body.appendChild(t);}
+        t.style.background=ok?'#ecfdf5':'#fef2f2'; t.style.color=ok?'#065f46':'#991b1b'; t.textContent=msg; t.style.opacity='1'; setTimeout(()=>{t.style.opacity='0'},3500);
       }
 
-      function ensureStopButton() {
-        if (document.getElementById('stopSearchBtn')) return;
-        const btn = document.createElement('button');
-        btn.id = 'stopSearchBtn';
-        btn.type = 'button';
-        btn.textContent = 'Stop searching';
-        btn.title = 'Disable this search so the bot stops scanning/swapping';
-        btn.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:8px;border:0;background:#fee2e2;color:#991b1b;font-weight:700;box-shadow:0 6px 18px rgba(0,0,0,.15);cursor:pointer';
-        btn.addEventListener('click', disableCurrentSearch);
-        document.body.appendChild(btn);
-      }
-
-      function currentSearchId() {
-        return localStorage.getItem('dvsa_last_search_id') || '';
-      }
-
-      async function disableCurrentSearch() {
-        const id = currentSearchId();
-        if (!id) { toast('No active search id found on this device.', false); return; }
-        try {
-          const r = await fetch(`${API_BASE}/search/${encodeURIComponent(id)}/disable`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${API_TOKEN}` }
-          });
-          const t = await r.text();
-          if (r.status === 501) {
-            toast('Disable not available in this build (backend). I can enable it if you want.', false);
-            return;
-          }
-          if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
-          toast('Search disabled. The bot will stop scanning.', true);
-          const b = document.getElementById('stopSearchBtn'); if (b) { b.disabled = true; b.style.opacity = '0.6'; b.textContent = 'Stopped'; }
-        } catch (e) {
-          toast('Failed to disable: ' + (e?.message || e), false);
-        }
-      }
-
-      /* FIXED: robust centresArray with () and null-safety */
-      function centresArray(){
-        return Array.from(document.querySelectorAll('.centre-input'))
-          .map((i) => (i && i.value ? i.value : '').trim())
-          .filter((v) => v);
-      }
-
-      function collectPayload() {
-        const centres = centresArray();
-
-        const swapSelected  = document.getElementById('btnSwap')?.classList.contains('selected');
-        const bookSelected  = document.getElementById('btnBook')?.classList.contains('selected');
-        const swapRef       = document.getElementById('swapRef')?.value.trim() || '';
-        const theoryPass    = document.getElementById('theoryPass')?.value.trim() || '';
-
-        const payload = {
-          email:  document.getElementById('email')?.value.trim() || null,
-          phone:  normalizePhone(document.getElementById('phoneRaw')?.value),
-
-          centres,  // array
-          from_date: ymd(document.getElementById('earliestDate')),
-          to_date:   ymd(document.getElementById('latestDate')),
-          time_from: toHH(document.getElementById('timeFrom')?.value),
-          time_to:   toHHpm(document.getElementById('timeTo')?.value),
-          notice_days: parseInt(document.getElementById('noticeDays')?.value || '0', 10) || 0,
-
-          surname:         document.getElementById('surname')?.value.trim() || null,
-          licence_number:  document.getElementById('drivingLicence')?.value.trim() || null,
-
-          booking_type:    bookSelected ? 'new' : (swapSelected ? 'swap' : undefined),
-          booking_reference: swapSelected ? swapRef : undefined,
-          theory_pass:       bookSelected ? theoryPass : undefined,
-
-          mode: 'auto',
-          auth_method: 3
+      function collectPayload(){
+        const swapSelected  = $('#btnSwap')?.classList.contains('selected');
+        const bookSelected  = $('#btnBook')?.classList.contains('selected');
+        const p = {
+          email:  $('#email')?.value.trim() || null,
+          phone:  normalizePhone($('#phoneRaw')?.value),
+          centres: centresArray(),
+          from_date: ymd($('#earliestDate')),
+          to_date:   ymd($('#latestDate')),
+          time_from: toHH($('#timeFrom')?.value),
+          time_to:   toHHpm($('#timeTo')?.value),
+          notice_days: parseInt($('#noticeDays')?.value || '0', 10) || 0,
+          surname:        $('#surname')?.value.trim() || null,
+          licence_number: $('#drivingLicence')?.value.trim() || null,
+          booking_type:      bookSelected ? 'new'  : (swapSelected ? 'swap' : undefined),
+          booking_reference: swapSelected ? ($('#swapRef')?.value.trim() || '') : undefined,
+          theory_pass:       bookSelected ? ($('#theoryPass')?.value.trim() || '') : undefined,
+          mode: 'auto', auth_method: 3
         };
-
-        Object.keys(payload).forEach(k => {
-          if (payload[k] === undefined || payload[k] === null || payload[k] === '') delete payload[k];
-        });
-
-        return payload;
+        Object.keys(p).forEach(k=>{ if(p[k]===undefined||p[k]===null||p[k]==='') delete p[k]; });
+        return p;
       }
 
       async function ensurePreSearch(){
-        let sid = localStorage.getItem('dvsa_last_search_id');
-        if (sid) return sid;
-
-        const surname = (document.getElementById('surname')?.value||'').trim();
-        const email   = (document.getElementById('email')?.value||'').trim();
-        const centres = centresArray();
-
-        if (!surname || !email || centres.length===0){
-          toast('Enter Surname, Email and at least one Test Centre before paying.', false);
-          throw new Error('missing fields');
-        }
-
-        const isBook = document.getElementById('btnBook')?.classList.contains('selected');
-        const isSwap = document.getElementById('btnSwap')?.classList.contains('selected');
-
-        const r = await fetch(`${API_BASE}/search`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            booking_type: isBook ? 'new' : (isSwap ? 'swap' : 'new'),
-            surname, email, centres
-          })
-        });
-        const text = await r.text();
-        let j; try { j = JSON.parse(text) } catch { j = null; }
-        if (!r.ok) throw new Error(j?.detail || j?.error || text || `HTTP ${r.status}`);
-
-        sid = j?.id || j?.search_id;
-        if (sid) localStorage.setItem('dvsa_last_search_id', String(sid));
-        return sid;
+        let sid=localStorage.getItem('dvsa_last_search_id'); if(sid) return sid;
+        const surname=($('#surname')?.value||'').trim(); const email=($('#email')?.value||'').trim(); const centres=centresArray();
+        if(!surname||!email||centres.length===0){ toast('Enter Surname, Email and at least one Test Centre before paying.', false); throw new Error('missing fields'); }
+        const r=await fetch(`${API_BASE}/search`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({booking_type: ($('#btnBook')?.classList.contains('selected')?'new':'swap'), surname, email, centres})});
+        const txt=await r.text(); let j; try{j=JSON.parse(txt)}catch{j=null}
+        if(!r.ok) throw new Error(j?.detail||j?.error||txt||`HTTP ${r.status}`);
+        sid=j?.id||j?.search_id; if(sid) localStorage.setItem('dvsa_last_search_id', String(sid)); return sid;
       }
 
-      async function submitToApi() {
-        const btn = document.getElementById('submitBtn');
-        if (!btn || btn.disabled) return;
+      async function submitToApi(){
+        const btn=$('#submitBtn'); if(!btn||btn.disabled) return;
+        const p=collectPayload();
+        if(!p.centres?.length) return toast('Select at least one test centre.', false);
+        if(!p.from_date || !p.to_date) return toast('Choose earliest/latest dates.', false);
+        if(!p.surname || !p.licence_number) return toast('Enter surname and licence number.', false);
+        if(!p.email) return toast('Enter your email.', false);
+        if(!p.phone) return toast('Enter your WhatsApp phone.', false);
+        if(p.booking_type==='swap' && !/^\d{8}$/.test($('#swapRef')?.value||'')) return toast('Swap selected: add the 8-digit DVSA booking reference.', false);
 
-        const p = collectPayload();
-
-        if (!p.centres || p.centres.length===0) return toast('Select at least one test centre.', false);
-        if (!p.from_date || !p.to_date)         return toast('Choose earliest/latest dates.', false);
-        if (!p.surname || !p.licence_number)    return toast('Enter surname and licence number.', false);
-        if (!p.email)                           return toast('Enter your email.', false);
-        if (!p.phone)                           return toast('Enter your WhatsApp phone.', false);
-        if (document.getElementById('btnSwap')?.classList.contains('selected') && !/^\d{8}$/.test(document.getElementById('swapRef')?.value||'')) {
-          return toast('Swap selected: add the 8-digit DVSA booking reference.', false);
-        }
-
-        try {
-          btn.disabled = true; btn.classList.remove('enabled');
-          toast('Submitting your search…');
-
-          const r = await fetch(`${API_BASE}/search`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(p)
-          });
-          const text = await r.text();
-          let j; try { j = JSON.parse(text) } catch { j = null; }
-
-          if (!r.ok) throw new Error(j?.error || text || `HTTP ${r.status}`);
-
-          const id = j?.id || j?.search_id || '';
-          if (id) {
-            localStorage.setItem('dvsa_last_search_id', id);
-            ensureStopButton();
-          }
-          toast(id ? `Search created: ${id}` : 'Search created', true);
-          console.log('Gateway response:', j);
-
-          /* NEW: hard reset the form after a successful submit */
-          resetAll();
-
-        } catch (err) {
-          console.error(err);
-          toast(`API error: ${err.message || err}`, false);
-        }
+        try{
+          btn.disabled=true; btn.classList.remove('enabled'); toast('Submitting your search…');
+          const r=await fetch(`${API_BASE}/search`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+          const text=await r.text(); let j; try{j=JSON.parse(text)}catch{j=null}; if(!r.ok) throw new Error(j?.error||text||`HTTP ${r.status}`);
+          const id=j?.id||j?.search_id||''; if(id) localStorage.setItem('dvsa_last_search_id', id);
+          toast(id?`Search created: ${id}`:'Search created', true); resetAll();
+        }catch(err){ console.error(err); toast(`API error: ${err.message||err}`, false); }
       }
 
       function resetAll(){
         document.querySelectorAll('input').forEach(inp=>{
-          if (inp.type === 'number'){
-            if (inp.id === 'timeFrom') inp.value = 7;
-            else if (inp.id === 'timeTo') inp.value = 7;
-            else if (inp.id === 'noticeDays') inp.value = 0;
-            else inp.value = '';
-          } else if (inp.type === 'date'){
-            inp.value = '';
-          } else {
-            inp.value = '';
-          }
-          inp.classList.remove('error');
-          inp.removeAttribute('aria-invalid');
+          if(inp.type==='number'){ if(inp.id==='timeFrom')inp.value=7; else if(inp.id==='timeTo')inp.value=7; else if(inp.id==='noticeDays')inp.value=0; else inp.value=''; }
+          else if(inp.type==='date'){inp.value='';} else {inp.value='';}
+          inp.classList.remove('error'); inp.removeAttribute('aria-invalid');
         });
-
-        const phone = document.getElementById('phoneRaw');
-        if (phone) phone.value = '+44';
-
-        document.querySelectorAll('.yesno button.selected').forEach(b=>{
-          b.classList.remove('selected'); b.setAttribute('aria-pressed','false');
-        });
-
-        const totalLine = document.getElementById('totalLine');
-        if (totalLine) totalLine.textContent = 'Total: £0.00';
-        const pill = document.getElementById('payStatus');
-        if (pill){ pill.textContent='Payment: Not Paid'; pill.classList.remove('paid'); }
-        const submitBtn = document.getElementById('submitBtn');
-        if (submitBtn){ submitBtn.disabled = true; submitBtn.classList.remove('enabled'); }
-
+        const phone=$('#phoneRaw'); if(phone) phone.value='+44';
+        document.querySelectorAll('.yesno button.selected').forEach(b=>{b.classList.remove('selected');b.setAttribute('aria-pressed','false')});
+        $('#totalLine').textContent='Total: £0.00';
+        const pill=$('#payStatus'); if(pill){pill.textContent='Payment: Not Paid'; pill.classList.remove('paid');}
+        const submitBtn=$('#submitBtn'); if(submitBtn){submitBtn.disabled=true; submitBtn.classList.remove('enabled');}
         localStorage.removeItem('dvsa_last_search_id');
-        const stopBtn = document.getElementById('stopSearchBtn'); if (stopBtn) stopBtn.remove();
-
-        ['btnBook','btnSwap'].forEach(id=>{
-          const el=document.getElementById(id);
-          if(el){ el.classList.remove('selected'); el.setAttribute('aria-pressed','false'); }
-        });
-
-        ['unavailInput','instrInput'].forEach(id=>{
-          const el = document.getElementById(id);
-          if (el) el.value = '';
-        });
-
-        const panel = document.getElementById('stripePanel');
-        if (panel) panel.style.display = 'none';
-        if (window.__stripeUnmount) { try{ window.__stripeUnmount(); }catch(_){} }
-
+        ['btnBook','btnSwap'].forEach(id=>{const el=document.getElementById(id); if(el){el.classList.remove('selected');el.setAttribute('aria-pressed','false');}});
+        ['unavailInput','instrInput'].forEach(id=>{const el=document.getElementById(id); if(el) el.value='';});
+        const panel=document.getElementById('stripePanel'); if(panel) panel.style.display='none';
+        if(window.__stripeUnmount){try{window.__stripeUnmount();}catch(_){}}
         window.scrollTo({top:0,behavior:'smooth'});
       }
 
-      window.resetAll = resetAll;
-      window.ensurePreSearch = ensurePreSearch;
+      window.ensurePreSearch=ensurePreSearch;
 
-      window.addEventListener('DOMContentLoaded', async () => {
-        await healthCheck();
-        if (currentSearchId()) ensureStopButton();
-
-        const btn = document.getElementById('submitBtn');
-        if (btn) {
-          btn.addEventListener('click', (e) => {
-            e.preventDefault();
-            submitToApi();
-          });
-        }
+      window.addEventListener('DOMContentLoaded',()=>{
+        const btn=document.getElementById('submitBtn');
+        btn?.addEventListener('click',e=>{e.preventDefault();submitToApi();});
       });
     })();
   </script>
@@ -1204,342 +628,136 @@
   <!-- Stripe.js -->
   <script src="https://js.stripe.com/v3/"></script>
   <script>
-  /* Stripe Payment Element (fixed request/response keys) */
-  (function(){
-    const STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || '';
-    const panel   = document.getElementById('stripePanel');
-    const msgBox  = document.getElementById('stripeMsg');
-    const payBtn  = document.getElementById('stripePayBtn');   /* single declaration */
-    const confBtn = document.getElementById('stripeConfirmBtn');/* single declaration */
-
-    let stripe, elements, paymentElement, lastClientSecret = '';
-    let currentMethodType = 'card';
-
-    const redirectMethods = new Set(['klarna','revolut_pay','amazon_pay']);
-
-    function amountFromTotalLine(){
-      const txt = (document.getElementById('totalLine')?.textContent || '');
-      const m   = txt.match(/£([\d.]+)/);
-      const v   = m ? parseFloat(m[1]) : 0;
-      return v.toFixed(2);
-    }
-
-    function markPaid(){
-      const pill = document.getElementById('payStatus');
-      if (pill){ pill.textContent='Payment: Paid'; pill.classList.add('paid'); }
-      const submitBtn = document.getElementById('submitBtn');
-      if (submitBtn){ submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
-    }
-
-    function showMsg(text, ok=false){
-      panel.style.display = 'block';
-      if (!msgBox) return;
-      msgBox.textContent = text || '';
-      msgBox.style.display = text ? 'block' : 'none';
-      msgBox.classList.remove('success','fail');
-      msgBox.classList.add(ok ? 'success' : 'fail');
-    }
-
-    function requireBookingTypeOrReject(){
-      const isBook = document.getElementById('btnBook')?.classList.contains('selected');
-      const isSwap = document.getElementById('btnSwap')?.classList.contains('selected');
-      if (!isBook && !isSwap){
-        showMsg('Please select Book (£150) or Swap (£70) first.');
-        return false;
-      }
-      return true;
-    }
-
-    async function ensurePreSearch(){
-      return await window.ensurePreSearch?.();
-    }
-
-    async function createIntentIfNeeded(){
-      const amountStr = amountFromTotalLine();
-      const pounds = parseFloat(amountStr);
-      if (!Number.isFinite(pounds) || pounds <= 0){
-        showMsg('Total is not valid.');
-        return false;
-      }
-
-      let searchId;
-      try { searchId = await ensurePreSearch(); }
-      catch (e) { console.error(e); return false; }
-
-      try{
-        const r = await fetch(`${API_BASE}/pay/create-intent`, {
-          method:'POST',
-          headers:{ 'Content-Type':'application/json' },
-          body: JSON.stringify({
-            search_id: Number(searchId),
-            amount: Math.round(pounds * 100),
-            currency: 'gbp',
-            description: `Search #${searchId}`,
-            metadata: { search_id: String(searchId) }
-          })
-        });
-        const j = await r.json();
-        if(!r.ok || !j?.clientSecret){
-          throw new Error(j?.detail || j?.error || 'Failed to create payment intent');
-        }
-        lastClientSecret = j.clientSecret;
-        return true;
-      }catch(err){
-        console.error(err);
-        showMsg('Stripe error: ' + (err?.message || err));
-        return false;
-      }
-    }
-
-    async function openStripePanel(){
-      panel.style.display = 'block';
-      if (!STRIPE_PUBLISHABLE_KEY){
-        showMsg('Stripe publishable key is missing on this page. Add window.STRIPE_PUBLISHABLE_KEY in <head>.');
-        return;
-      }
-      if (!requireBookingTypeOrReject()) return;
-
-      const ok = await createIntentIfNeeded();
-      if (!ok) return;
-
-      try{
-        stripe = Stripe(STRIPE_PUBLISHABLE_KEY);
-        elements = stripe.elements({ clientSecret: lastClientSecret });
-        if (paymentElement) paymentElement.unmount();
-        paymentElement = elements.create('payment');
-        paymentElement.mount('#payment-element');
-
-        window.__stripeUnmount = () => { try{ paymentElement.unmount(); }catch(_){} };
-
-        paymentElement.on('change', async (ev) => {
-          currentMethodType = (ev?.value && ev.value.type) ? ev.value.type : 'card';
-          if (redirectMethods.has(currentMethodType)) {
-            showMsg('You will be redirected to complete payment…');
-            if (ev.complete) {
-              await confirmRedirectMethod();
-            }
-          } else {
-            showMsg('', true);
-          }
-        });
-
-        showMsg('', true);
-        document.getElementById('stripePanel').scrollIntoView({behavior:'smooth', block:'center'});
-      }catch(err){
-        console.error(err);
-        showMsg('Stripe initialisation failed.');
-      }
-    }
-
-    async function confirmRedirectMethod(){
-      const returnUrl = window.location.origin + window.location.pathname;
-      const {error} = await stripe.confirmPayment({
-        elements,
-        confirmParams: { return_url: returnUrl },
-        redirect: 'always'
-      });
-      if (error){
-        showMsg(error.message || 'Payment failed.');
-      }
-    }
-
-    async function confirmStripePayment(){
-      if (redirectMethods.has(currentMethodType)) {
-        showMsg('For Klarna, Revolut Pay or Amazon Pay, select the option above and you will be redirected automatically.');
-        return;
-      }
-      if (!stripe || !elements){
-        showMsg('Payment form is not ready yet.');
-        return;
-      }
-      const confBtn = document.getElementById('stripeConfirmBtn');
-      confBtn.disabled = true;
-
-      const returnUrl = window.location.origin + window.location.pathname;
-
-      const {error, paymentIntent} = await stripe.confirmPayment({
-        elements,
-        confirmParams: { return_url: returnUrl },
-        redirect: 'if_required'
-      });
-
-      if (error){
-        showMsg(error.message || 'Payment failed.');
-        confBtn.disabled = false;
-        return;
-      }
-      if (paymentIntent && paymentIntent.status === 'succeeded'){
-        showMsg('Payment successful.', true);
-        markPaid();
-      }else{
-        showMsg('Payment was not completed.');
-        confBtn.disabled = false;
-      }
-    }
-
-    /* FIXED: no duplicate const declarations — reuse these variables */
-    payBtn?.addEventListener('click', (e)=>{ e.preventDefault(); openStripePanel(); });
-    confBtn?.addEventListener('click', (e)=>{ e.preventDefault(); confirmStripePayment(); });
-
-    (function handleStripeReturn(){
-      const params = new URLSearchParams(window.location.search);
-      const clientSecret = params.get('payment_intent_client_secret');
-      if (clientSecret && STRIPE_PUBLISHABLE_KEY){
-        try{
-          const stripeInstance = Stripe(STRIPE_PUBLISHABLE_KEY);
-          stripeInstance.retrievePaymentIntent(clientSecret).then(({paymentIntent})=>{
-            if (!paymentIntent) return;
-            if (paymentIntent.status === 'succeeded'){
-              showMsg('Payment successful.', true);
-              markPaid();
-            } else if (paymentIntent.status === 'processing'){
-              showMsg('Payment processing… please wait a moment.');
-            } else if (paymentIntent.last_payment_error){
-              showMsg(paymentIntent.last_payment_error.message || 'Payment failed.');
-            }
-          });
-        }catch(e){}
-      }
-    })();
-  })();
-  </script>
-
-  <script>
     (function(){
-      function clearBookingToggles(){
-        ['btnBook','btnSwap'].forEach(id=>{
-          const el=document.getElementById(id);
-          if(el){ el.classList.remove('selected'); el.setAttribute('aria-pressed','false'); }
-        });
+      const STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || '';
+      const panel=document.getElementById('stripePanel');
+      const msgBox=document.getElementById('stripeMsg');
+      const payBtn=document.getElementById('stripePayBtn');
+      const confBtn=document.getElementById('stripeConfirmBtn');
+
+      let stripe,elements,paymentElement,lastClientSecret='';
+      let currentMethodType='card';
+      const redirectMethods=new Set(['klarna','revolut_pay','amazon_pay']);
+
+      function showMsg(text, ok=false){
+        panel.style.display='block';
+        if(!msgBox) return;
+        msgBox.textContent=text||''; msgBox.style.display=text?'block':'none';
+        msgBox.classList.remove('success','fail'); msgBox.classList.add(ok?'success':'fail');
       }
-      if (document.readyState === 'loading'){
-        document.addEventListener('DOMContentLoaded', clearBookingToggles);
-      } else {
-        clearBookingToggles();
+      function markPaid(){
+        const pill=document.getElementById('payStatus');
+        if(pill){pill.textContent='Payment: Paid'; pill.classList.add('paid');}
+        const submitBtn=document.getElementById('submitBtn');
+        if(submitBtn){submitBtn.disabled=false; submitBtn.classList.add('enabled');}
       }
+      function amountFromTotalLine(){
+        const txt=(document.getElementById('totalLine')?.textContent||''); const m=txt.match(/£([\d.]+)/); const v=m?parseFloat(m[1]):0; return v.toFixed(2);
+      }
+
+      async function createIntentIfNeeded(){
+        const pounds=parseFloat(amountFromTotalLine()); if(!Number.isFinite(pounds)||pounds<=0){showMsg('Total is not valid.');return false;}
+        let searchId; try{ searchId=await window.ensurePreSearch(); }catch(e){ console.error(e); return false; }
+        try{
+          const r=await fetch(`${API_BASE}/pay/create-intent`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({search_id:Number(searchId), amount:Math.round(pounds*100), currency:'gbp', description:`Search #${searchId}`, metadata:{search_id:String(searchId)}})});
+          const j=await r.json(); if(!r.ok||!j?.clientSecret) throw new Error(j?.detail||j?.error||'Failed to create payment intent'); lastClientSecret=j.clientSecret; return true;
+        }catch(err){ console.error(err); showMsg('Stripe error: '+(err?.message||err)); return false; }
+      }
+
+      async function openStripePanel(){
+        panel.style.display='block';
+        if(!STRIPE_PUBLISHABLE_KEY){ showMsg('Stripe publishable key is missing on this page.'); return; }
+        const ok=await createIntentIfNeeded(); if(!ok) return;
+        try{
+          stripe=Stripe(STRIPE_PUBLISHABLE_KEY);
+          elements=stripe.elements({clientSecret:lastClientSecret});
+          if(paymentElement) paymentElement.unmount();
+          paymentElement=elements.create('payment'); paymentElement.mount('#payment-element');
+          window.__stripeUnmount=()=>{try{paymentElement.unmount();}catch(_){}}; showMsg('', true);
+
+          paymentElement.on('change', async (ev)=>{
+            currentMethodType=(ev?.value && ev.value.type) ? ev.value.type : 'card';
+            if(redirectMethods.has(currentMethodType)){
+              showMsg('You will be redirected to complete payment…'); if(ev.complete){ await confirmRedirectMethod(); }
+            } else { showMsg('', true); }
+          });
+          document.getElementById('stripePanel').scrollIntoView({behavior:'smooth',block:'center'});
+        }catch(err){ console.error(err); showMsg('Stripe initialisation failed.'); }
+      }
+
+      async function confirmRedirectMethod(){
+        const returnUrl=window.location.origin+window.location.pathname;
+        const {error}=await stripe.confirmPayment({elements,confirmParams:{return_url:returnUrl},redirect:'always'});
+        if(error){ showMsg(error.message||'Payment failed.'); }
+      }
+
+      async function confirmStripePayment(){
+        if(redirectMethods.has(currentMethodType)){ showMsg('For Klarna, Revolut Pay or Amazon Pay, select the option above and you will be redirected automatically.'); return; }
+        if(!stripe||!elements){ showMsg('Payment form is not ready yet.'); return; }
+        confBtn.disabled=true;
+        const returnUrl=window.location.origin+window.location.pathname;
+        const {error,paymentIntent}=await stripe.confirmPayment({elements,confirmParams:{return_url:returnUrl},redirect:'if_required'});
+        if(error){ showMsg(error.message||'Payment failed.'); confBtn.disabled=false; return; }
+        if(paymentIntent && paymentIntent.status==='succeeded'){ showMsg('Payment successful.', true); markPaid(); } else { showMsg('Payment was not completed.'); confBtn.disabled=false; }
+      }
+
+      payBtn?.addEventListener('click', e=>{ e.preventDefault(); openStripePanel(); });
+      confBtn?.addEventListener('click', e=>{ e.preventDefault(); confirmStripePayment(); });
+
+      (function handleStripeReturn(){
+        const params=new URLSearchParams(window.location.search);
+        const cs=params.get('payment_intent_client_secret');
+        if(cs && STRIPE_PUBLISHABLE_KEY){
+          try{
+            const s=Stripe(STRIPE_PUBLISHABLE_KEY);
+            s.retrievePaymentIntent(cs).then(({paymentIntent})=>{
+              if(!paymentIntent) return;
+              if(paymentIntent.status==='succeeded'){ showMsg('Payment successful.', true); markPaid(); }
+              else if(paymentIntent.status==='processing'){ showMsg('Payment processing… please wait.'); }
+              else if(paymentIntent.last_payment_error){ showMsg(paymentIntent.last_payment_error.message||'Payment failed.'); }
+            });
+          }catch(e){}
+        }
+      })();
     })();
   </script>
 
-  <!-- ============ Live Chat Bot (Option C) ============ -->
+  <!-- Live Chat Bot (unchanged) -->
   <style>
-    #fdtf-chat-toggle{
-      position:fixed; right:16px; bottom:16px; z-index:9999;
-      width:56px; height:56px; border-radius:50%; border:none;
-      background:#2563eb; color:#fff; font-weight:800; cursor:pointer;
-      box-shadow:0 10px 24px rgba(0,0,0,.18);
-    }
-    #fdtf-chat-box{
-      position:fixed; right:16px; bottom:84px; z-index:9999;
-      width:320px; max-width:90vw; height:420px; display:none;
-      background:#fff; border:1px solid #e5e7eb; border-radius:12px;
-      box-shadow:0 16px 36px rgba(0,0,0,.18); overflow:hidden;
-      flex-direction:column;
-    }
-    #fdtf-chat-header{
-      background:#1e40af; color:#fff; padding:10px 12px; font-weight:700;
-      display:flex; align-items:center; justify-content:space-between;
-    }
-    #fdtf-chat-messages{
-      flex:1; padding:10px; overflow:auto; background:#f8fafc;
-    }
-    .bubble{max-width:78%; margin:6px 0; padding:8px 10px; border-radius:10px; line-height:1.35; font-size:14px;}
-    .me{background:#dbeafe; margin-left:auto;}
-    .bot{background:#e5e7eb; color:#0f172a}
-    #fdtf-chat-input{display:flex; gap:6px; padding:10px; border-top:1px solid #e5e7eb; background:#fff}
-    #fdtf-chat-input input{flex:1; height:36px; border:1px solid #e5e7eb; border-radius:8px; padding:0 10px}
-    #fdtf-chat-input button{height:36px; background:#2563eb; color:#fff; border:none; border-radius:8px; padding:0 12px; font-weight:700; cursor:pointer}
-    .suggested{display:flex; flex-wrap:wrap; gap:6px; margin-top:6px}
-    .chip{background:#eef2ff; color:#1e40af; border:1px solid #c7d2fe; border-radius:999px; padding:4px 8px; font-size:12px; cursor:pointer}
+    #fdtf-chat-toggle{position:fixed;right:16px;bottom:16px;z-index:9999;width:56px;height:56px;border-radius:50%;border:none;background:#2563eb;color:#fff;font-weight:800;cursor:pointer;box-shadow:0 10px 24px rgba(0,0,0,.18)}
+    #fdtf-chat-box{position:fixed;right:16px;bottom:84px;z-index:9999;width:320px;max-width:90vw;height:420px;display:none;background:#fff;border:1px solid #e5e7eb;border-radius:12px;box-shadow:0 16px 36px rgba(0,0,0,.18);overflow:hidden;flex-direction:column}
+    #fdtf-chat-header{background:#1e40af;color:#fff;padding:10px 12px;font-weight:700;display:flex;align-items:center;justify-content:space-between}
+    #fdtf-chat-messages{flex:1;padding:10px;overflow:auto;background:#f8fafc}
+    .bubble{max-width:78%;margin:6px 0;padding:8px 10px;border-radius:10px;line-height:1.35;font-size:14px}.me{background:#dbeafe;margin-left:auto}.bot{background:#e5e7eb;color:#0f172a}
+    #fdtf-chat-input{display:flex;gap:6px;padding:10px;border-top:1px solid #e5e7eb;background:#fff}
+    #fdtf-chat-input input{flex:1;height:36px;border:1px solid #e5e7eb;border-radius:8px;padding:0 10px}#fdtf-chat-input button{height:36px;background:#2563eb;color:#fff;border:none;border-radius:8px;padding:0 12px;font-weight:700;cursor:pointer}
+    .suggested{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.chip{background:#eef2ff;color:#1e40af;border:1px solid #c7d2fe;border-radius:999px;padding:4px 8px;font-size:12px;cursor:pointer}
   </style>
   <button id="fdtf-chat-toggle" aria-label="Chat">💬</button>
   <div id="fdtf-chat-box" role="dialog" aria-label="Chat with FastDrivingTestFinder">
-    <div id="fdtf-chat-header">
-      <span>Need help?</span>
-      <button id="fdtf-chat-close" style="background:transparent;border:0;color:#fff;font-weight:900;cursor:pointer">✕</button>
-    </div>
+    <div id="fdtf-chat-header"><span>Need help?</span><button id="fdtf-chat-close" style="background:transparent;border:0;color:#fff;font-weight:900;cursor:pointer">✕</button></div>
     <div id="fdtf-chat-messages"></div>
-    <div id="fdtf-chat-input">
-      <input id="fdtf-chat-text" type="text" placeholder="Type a message…" />
-      <button id="fdtf-chat-send">Send</button>
-    </div>
+    <div id="fdtf-chat-input"><input id="fdtf-chat-text" type="text" placeholder="Type a message…"/><button id="fdtf-chat-send">Send</button></div>
   </div>
   <script>
     (function(){
-      const toggle = document.getElementById('fdtf-chat-toggle');
-      const box    = document.getElementById('fdtf-chat-box');
-      const closeB = document.getElementById('fdtf-chat-close');
-      const msgs   = document.getElementById('fdtf-chat-messages');
-      const input  = document.getElementById('fdtf-chat-text');
-      const send   = document.getElementById('fdtf-chat-send');
-
-      function sid(){
-        let v = localStorage.getItem('chat_session_id');
-        if(!v){ v = Math.random().toString(36).slice(2); localStorage.setItem('chat_session_id', v); }
-        return v;
-      }
-      function userName(){
-        return (document.getElementById('surname')?.value || '').trim() || null;
-      }
-
-      function scrollBottom(){ msgs.scrollTop = msgs.scrollHeight; }
-      function addBubble(text, who='bot'){
-        const b = document.createElement('div');
-        b.className = 'bubble ' + (who==='me'?'me':'bot');
-        b.textContent = text;
-        msgs.appendChild(b);
-        scrollBottom();
-      }
-      function addSuggested(list){
-        if(!list || !list.length) return;
-        const wrap = document.createElement('div');
-        wrap.className = 'suggested';
-        list.forEach(t=>{
-          const chip = document.createElement('span');
-          chip.className = 'chip'; chip.textContent = t;
-          chip.onclick = ()=>{ sendText(t); };
-          wrap.appendChild(chip);
-        });
-        msgs.appendChild(wrap);
-        scrollBottom();
-      }
-
+      const toggle=document.getElementById('fdtf-chat-toggle'), box=document.getElementById('fdtf-chat-box'), closeB=document.getElementById('fdtf-chat-close'), msgs=document.getElementById('fdtf-chat-messages'), input=document.getElementById('fdtf-chat-text'), send=document.getElementById('fdtf-chat-send');
+      function sid(){let v=localStorage.getItem('chat_session_id'); if(!v){v=Math.random().toString(36).slice(2); localStorage.setItem('chat_session_id',v);} return v;}
+      function userName(){return (document.getElementById('surname')?.value||'').trim()||null;}
+      function scrollBottom(){msgs.scrollTop=msgs.scrollHeight;}
+      function addBubble(t,who='bot'){const b=document.createElement('div');b.className='bubble '+(who==='me'?'me':'bot');b.textContent=t;msgs.appendChild(b);scrollBottom();}
+      function addSuggested(list){ if(!list||!list.length)return; const wrap=document.createElement('div');wrap.className='suggested'; list.forEach(t=>{const chip=document.createElement('span'); chip.className='chip'; chip.textContent=t; chip.onclick=()=>sendText(t); wrap.appendChild(chip);}); msgs.appendChild(wrap); scrollBottom(); }
       async function askBot(message){
-        try{
-          const r = await fetch(`${API_BASE}/chat/message`, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ session_id: sid(), message, user_name: userName() })
-          });
-          const j = await r.json();
-          if(!r.ok) throw new Error(j?.detail || 'Chat error');
-          addBubble(j.reply || 'Okay.');
-          if (j.follow_up){ addBubble(j.follow_up); }
-          if (Array.isArray(j.suggested)) addSuggested(j.suggested);
-        }catch(e){
-          addBubble('Sorry, something went wrong. Please try again.');
-        }
+        try{ const r=await fetch(`${API_BASE}/chat/message`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:sid(),message,user_name:userName()})}); const j=await r.json();
+          if(!r.ok) throw new Error(j?.detail||'Chat error'); addBubble(j.reply||'Okay.'); if(j.follow_up){addBubble(j.follow_up);} if(Array.isArray(j.suggested)) addSuggested(j.suggested);
+        }catch(e){ addBubble('Sorry, something went wrong. Please try again.'); }
       }
-
-      function sendText(t){
-        const m = (t ?? input.value || '').trim();
-        if(!m) return;
-        addBubble(m, 'me');
-        input.value = '';
-        askBot(m);
-      }
-
-      toggle.onclick = ()=>{
-        const visible = box.style.display === 'flex';
-        box.style.display = visible ? 'none' : 'flex';
-        if(!visible && msgs.childElementCount===0){
-          addBubble('Hi! I can help with swaps, new bookings, and booking status. Ask me anything or try a suggestion below.');
-          addSuggested(['Can you swap my test for me?', 'Can you book a new test?', 'What’s the status of booking 1234?']);
-        }
-        if(!visible) setTimeout(()=>input.focus(), 120);
+      function sendText(t){const m=(t??input.value||'').trim(); if(!m)return; addBubble(m,'me'); input.value=''; askBot(m); }
+      toggle.onclick=()=>{const visible=box.style.display==='flex'; box.style.display=visible?'none':'flex';
+        if(!visible && msgs.childElementCount===0){addBubble('Hi! I can help with swaps, new bookings, and booking status. Ask me anything or try a suggestion below.'); addSuggested(['Can you swap my test for me?','Can you book a new test?','What’s the status of booking 1234?']);}
+        if(!visible) setTimeout(()=>input.focus(),120);
       };
-      closeB.onclick = ()=>{ box.style.display = 'none'; };
-      send.onclick = ()=> sendText();
-      input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') sendText(); });
+      closeB.onclick=()=>{box.style.display='none'}; send.onclick=()=>sendText(); input.addEventListener('keydown',e=>{if(e.key==='Enter')sendText();});
     })();
   </script>
 </body>
