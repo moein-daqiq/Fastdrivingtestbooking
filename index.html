@@ -1,281 +1,443 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>FastDrivingTestFinder — Book/Swap</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>FastDrivingTestFinder — Book or Swap a DVSA Test</title>
 
-  <!-- Config (no stray tokens) -->
-  <script>
-    window.API_BASE = "https://api.fastdrivingtestfinder.co.uk/api";
-    window.STRIPE_PUBLISHABLE_KEY = "pk_live_51S4HI5KDKDIajo9AAvqU8YiqHVgZQhQne3pJzejDKrL0s1OCWnOsRk7gcJWdHPl4k5yPIGoGiQ2QFRPzHPm884fO00YoZJ0mDn";
-  </script>
+<!-- API base + Stripe publishable key -->
+<script>
+  window.API_BASE = "https://api.fastdrivingtestfinder.co.uk/api";
+  window.STRIPE_PUBLISHABLE_KEY = "pk_live_51S4HI5KDKDIajo9AAvqU8YiqHVgZQhQne3pJzejDKrL0s1OCWnOsRk7gcJWdHPl4k5yPIGoGiQ2QFRPzHPm884fO00YoZJ0mDn";
+</script>
 
-  <style>
-    body{font-family:Segoe UI,system-ui,Arial,sans-serif;background:#f7fafc;color:#0f172a;margin:0}
-    .wrap{max-width:760px;margin:24px auto;background:#fff;border:1px solid #e5e7eb;border-radius:10px;box-shadow:0 2px 12px rgba(0,0,0,.06);padding:18px}
-    h1{margin:0 0 10px 0}
-    .row{display:grid;grid-template-columns:180px 1fr;gap:12px;align-items:center;margin:8px 0}
-    label{font-weight:600}
-    input,select{height:34px;border:1px solid #e5e7eb;border-radius:6px;padding:6px 8px}
-    .btn{background:#2563eb;color:#fff;border:none;border-radius:6px;padding:10px 12px;font-weight:700;cursor:pointer}
-    .btn.secondary{background:#64748b}
-    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-    .panel{border:1px dashed #cbd5e1;border-radius:10px;padding:12px;margin-top:14px}
-    .pill{display:inline-block;background:#eef2ff;color:#1e40af;border-radius:999px;padding:6px 10px;font-weight:700}
-    .error{color:#dc2626;margin-top:8px}
-    .success{color:#16a34a;margin-top:8px}
-    .note{color:#475569;font-size:13px}
-    #payment-element{margin-top:8px}
-  </style>
+<style>
+  :root{
+    --ink:#0f172a; --muted:#475569; --line:#e5e7eb;
+    --primary:#2563eb; --primary-dark:#1e40af;
+    --green:#16a34a; --red:#dc2626; --chip:#eef2ff;
+  }
+  html,body{background:#f3f4f6; color:var(--ink); font-family:"Segoe UI","Helvetica Neue",Arial,sans-serif}
+  .wrap{max-width:760px;margin:28px auto;background:#fff;border:1px solid #e5e7eb;box-shadow:0 4px 28px rgba(15,23,42,.08)}
+  .strip{padding:10px 12px;text-align:center;color:#fff;font-weight:800}
+  .strip.title{background:linear-gradient(180deg,#60a5fa 0%, #3b82f6 100%)}
+  .strip.subtitle{background:#10b981}
+  .strip.important{background:#f59e0b;color:#111827}
+  section{padding:16px 18px;border-top:1px dashed #e5e7eb}
+  h3{margin:0 0 10px 0}
+  label{font-size:13px;font-weight:700}
+  .grid2{display:grid;grid-template-columns:220px 1fr;gap:12px;align-items:center}
+  input,select{height:34px;border:1px solid #e5e7eb;border-radius:6px;padding:6px 10px;font:14px/22px inherit;background:#fff}
+  input:focus,select:focus{outline:none;border-color:#2563eb; box-shadow:0 0 0 2px rgba(37,99,235,.15)}
+  .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .centres{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .hint{color:var(--muted);font-size:12px}
+  .btn{height:34px;padding:6px 12px;border-radius:6px;border:1px solid #bfdbfe;background:#93c5fd;font-weight:800;cursor:pointer}
+  .btn:hover{background:#60a5fa;color:#fff}
+  .type-toggle{display:flex;gap:6px}
+  .type-toggle button{flex:1}
+  .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef2ff;color:#1e3a8a;font-weight:800;font-size:12px}
+  .submit-row{display:flex;gap:12px;align-items:center;margin-top:10px}
+  .submit{flex:1;background:#2563eb;color:#fff;border:none}
+  .submit[disabled]{opacity:.5;cursor:not-allowed}
+  .paybtn{background:#635bff;color:#fff;border:none}
+  .errmsg{color:#b91c1c;font-weight:700}
+  .okmsg{color:#065f46;font-weight:700}
+  @media(max-width:560px){
+    .wrap{margin:0;border:0;border-radius:0}
+    .grid2{grid-template-columns:1fr}
+    .centres{grid-template-columns:1fr}
+  }
+</style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Book or Swap a DVSA Test</h1>
+    <div class="strip title">Risk-Free, Stress-Free Booking</div>
+    <div class="strip subtitle">Money-Back Guarantee</div>
+    <div class="strip important">❗ Important: Please read carefully and provide accurate information.</div>
 
-    <div class="panel">
-      <div class="grid2">
-        <button id="btnBook" class="btn secondary" type="button">Book a New Test</button>
-        <button id="btnSwap" class="btn secondary" type="button">Swap an Existing Test</button>
+    <!-- TYPE -->
+    <section>
+      <div class="type-toggle">
+        <button id="btnBook" class="btn" type="button" aria-pressed="false">Book a New Test</button>
+        <button id="btnSwap" class="btn" type="button" aria-pressed="false">Swap an Existing Test</button>
       </div>
-      <div class="row">
+      <div style="margin-top:10px" class="grid2">
         <label for="theoryPass">Theory Pass No (for Book):</label>
-        <input id="theoryPass" placeholder="e.g. 1234567890" maxlength="16"/>
-      </div>
-      <div class="row">
+        <input id="theoryPass" placeholder="e.g., 123456780" maxlength="16" />
+
         <label for="swapRef">Booking Ref (for Swap):</label>
-        <input id="swapRef" placeholder="8-digit booking ref" maxlength="8" inputmode="numeric"/>
+        <input id="swapRef" placeholder="8-digit booking ref" maxlength="8" inputmode="numeric" />
       </div>
-    </div>
+    </section>
 
-    <div class="panel">
-      <div class="row"><label for="surname">Surname:</label><input id="surname" placeholder="As on licence"/></div>
-      <div class="row"><label for="email">Email:</label><input id="email" type="email" placeholder="you@email.com"/></div>
-      <div class="row"><label for="licence">Licence No (first 16):</label><input id="licence" maxlength="16" placeholder="16 chars only"/></div>
-      <div class="row"><label for="phone">UK WhatsApp:</label><input id="phone" placeholder="+44 7xxxxxxxxx"/></div>
-    </div>
-
-    <div class="panel">
-      <div class="row"><label>Test Centre 1:</label><input class="centre" placeholder="Type a centre"/></div>
-      <div class="row"><label>Test Centre 2:</label><input class="centre" placeholder="Optional"/></div>
-      <div class="row"><label>Test Centre 3:</label><input class="centre" placeholder="Optional"/></div>
-    </div>
-
-    <div class="panel">
-      <div class="row"><label>High-priority? (+£30)</label>
-        <select id="prio"><option value="0">No</option><option value="30">Yes</option></select>
-      </div>
-      <div class="row"><label>Weekend slots? (+£30)</label>
-        <select id="weekend"><option value="0">No</option><option value="30">Yes</option></select>
-      </div>
-      <div style="text-align:right;margin-top:8px"><span id="total" class="pill">Total: £70.00</span></div>
-    </div>
-
-    <div class="panel">
+    <!-- APPLICANT -->
+    <section>
+      <h3>Applicant Details</h3>
       <div class="grid2">
-        <button id="stripePayBtn" class="btn" type="button">Payment options</button>
-        <button id="stripeConfirmBtn" class="btn secondary" type="button">Pay now</button>
-      </div>
-      <div id="stripePanel" style="display:none">
-        <div id="stripeMsg" class="note" style="margin-top:8px"></div>
-        <div id="payment-element"></div>
-      </div>
-      <div id="payStatusWrap" style="margin-top:12px"><span id="payStatus" class="pill">Payment: Not Paid</span></div>
-      <div id="payError" class="error" style="display:none"></div>
-    </div>
+        <label for="surname">Surname (as on licence):</label>
+        <input id="surname" placeholder="As on licence" />
 
-    <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
-      <button id="submitBtn" class="btn secondary" type="button" disabled>SUBMIT</button>
-      <div id="liveMsg" class="note"></div>
-    </div>
+        <label for="email">Email:</label>
+        <input id="email" placeholder="you@email.com" inputmode="email" autocomplete="email" />
+
+        <label for="licence">Licence No (first 16):</label>
+        <input id="licence" maxlength="16" placeholder="16 chars only" />
+
+        <label for="whatsapp">UK WhatsApp:</label>
+        <input id="whatsapp" placeholder="+44 7xxxxxxxxx" />
+      </div>
+    </section>
+
+    <!-- CENTRES -->
+    <section>
+      <h3>Test Centres</h3>
+      <div class="centres">
+        <div>
+          <label>Test Centre 1</label>
+          <input class="centre" list="centresList" placeholder="Type a centre" />
+        </div>
+        <div>
+          <label>Test Centre 2</label>
+          <input class="centre" list="centresList" placeholder="Optional" />
+        </div>
+        <div>
+          <label>Test Centre 3</label>
+          <input class="centre" list="centresList" placeholder="Optional" />
+        </div>
+        <div>
+          <label>Test Centre 4</label>
+          <input class="centre" list="centresList" placeholder="Optional" />
+        </div>
+        <div>
+          <label>Test Centre 5</label>
+          <input class="centre" list="centresList" placeholder="Optional" />
+        </div>
+        <div>
+          <label>Test Centre 6</label>
+          <input class="centre" list="centresList" placeholder="Optional" />
+        </div>
+      </div>
+      <datalist id="centresList"></datalist>
+      <p class="hint" style="margin-top:8px">We cover all centres UK-wide. Adding more centres helps us find a slot faster.</p>
+    </section>
+
+    <!-- DATE / TIME -->
+    <section>
+      <h3>Date & Time Window</h3>
+      <div class="grid2">
+        <label for="dFrom">Earliest Date:</label>
+        <input id="dFrom" type="date" />
+        <label for="dTo">Latest Date:</label>
+        <input id="dTo" type="date" />
+
+        <label for="tFrom">Time Window:</label>
+        <div class="row">
+          <select id="tFrom">
+            <option>07:00</option><option>08:00</option><option>09:00</option>
+            <option>10:00</option><option>11:00</option><option>12:00</option>
+          </select>
+          <span>to</span>
+          <select id="tTo">
+            <option>13:00</option><option>14:00</option><option>15:00</option>
+            <option>16:00</option><option>17:00</option><option>18:00</option>
+          </select>
+        </div>
+
+        <label for="noticeDays">Notice Period:</label>
+        <div class="row">
+          <input id="noticeDays" type="number" min="0" max="15" value="0" style="width:100px" />
+          <span>Day(s)</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- AGREEMENTS -->
+    <section>
+      <h3>Confirmation & Agreement</h3>
+      <label class="row"><input id="a1" type="checkbox" /> I confirm I have read the pricing, refund policy and terms of service.</label>
+      <label class="row"><input id="a2" type="checkbox" /> I consent to my data being stored temporarily until my test is booked.</label>
+      <label class="row"><input id="a3" type="checkbox" /> If we cannot find a test within your date range, you authorise us to continue searching for up to 30 additional days.</label>
+      <label class="row"><input id="a4" type="checkbox" /> Changing your selected centres later will be treated as a new search (additional fees apply).</label>
+    </section>
+
+    <!-- PAYMENT -->
+    <section>
+      <h3>Payment</h3>
+      <div class="grid2">
+        <label>High-priority? (+£30)</label>
+        <select id="optHigh"><option value="0">No</option><option value="30">Yes</option></select>
+        <label>Include weekend slots? (+£30)</label>
+        <select id="optWeekend"><option value="0">No</option><option value="30">Yes</option></select>
+      </div>
+
+      <div class="row" style="justify-content:flex-end;margin-top:8px">
+        <strong>Total:&nbsp;<span id="total">£70.00</span></strong>
+      </div>
+
+      <div id="stripeMsg" style="margin-top:8px"></div>
+      <div class="row" style="margin-top:8px">
+        <button id="payOptions" class="btn" type="button">Payment options</button>
+        <button id="payNow" class="btn paybtn" type="button">Pay now</button>
+      </div>
+      <div id="stripePanel" style="display:none;border:1px dashed #e5e7eb;border-radius:10px;padding:12px;margin-top:10px">
+        <div id="payment-element"></div>
+        <button id="confirmPay" class="btn paybtn" type="button" style="margin-top:10px">Confirm payment</button>
+      </div>
+
+      <div class="submit-row">
+        <div id="payStatus" class="pill">Payment: Not Paid</div>
+        <button id="submitBtn" class="btn submit" type="button" disabled>SUBMIT</button>
+      </div>
+      <div id="liveErrors" style="margin-top:8px"></div>
+    </section>
   </div>
 
-  <!-- Stripe -->
-  <script src="https://js.stripe.com/v3/"></script>
+<!-- Stripe.js -->
+<script src="https://js.stripe.com/v3/"></script>
 
-  <script>
-    const API_BASE = window.API_BASE;
-    const STRIPE_KEY = window.STRIPE_PUBLISHABLE_KEY;
+<script>
+/* ---------- Helpers ---------- */
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const money = n => "£" + n.toFixed(2);
+const toast = (msg, ok=true) => {
+  const el = $('#liveErrors');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = ok ? 'okmsg' : 'errmsg';
+};
 
-    const $  = (s)=>document.querySelector(s);
-    const $$ = (s)=>Array.from(document.querySelectorAll(s));
+/* ---------- Centres: single list (ALL centres) ---------- */
+(function loadCentres(){
+  const ALL = [
+    "Aberdeen","Aberystwyth","Abergavenny","Armagh","Ashford","Atherton","Barking (Tanner Street)","Barnet",
+    "Basingstoke","Belfast","Birmingham (Garretts Green)","Birmingham (Kings Heath)","Blackburn","Blackpool",
+    "Borehamwood","Bradford","Brentwood","Bridgend","Brighton","Bristol (Avonmouth)","Bristol (Kingswood)",
+    "Bromley","Burnley","Burton on Trent","Cambridge (Brookmount Court)","Canterbury","Cardiff (Llanishen)",
+    "Carlisle","Chertsey","Chingford","Colchester","Coventry","Croydon","Derby (Alvaston)","Doncaster",
+    "Dudley","Dundee","Edinburgh (Currie)","Elgin","Exeter","Farnborough","Glasgow (Shieldhall)","Goodmayes",
+    "Greenford (Whitton Ave East)","Guildford","Hendon","Hornchurch","Hounslow","High Wycombe",
+    "Ipswich","Leeds","Leicester","Leighton Buzzard","Letchworth","Liverpool","London Mill Hill","Luton",
+    "Manchester (Cheetham Hill)","West Didsbury (Manchester)","Morden","Newcastle upon Tyne (Elswick)","Norwich",
+    "Nottingham (Chilwell)","Oxford (Cowley)","Pinner","Reading","Portsmouth","Preston","Slough","Southall",
+    "Southampton (Forest Hills)","St Albans","Stevenage","Tolworth","Uxbridge (Cowley Mill Rd)","Watford",
+    "Wimbledon (Morden)","Wolverhampton","York"
+  ];
+  const dl = $('#centresList');
+  dl.innerHTML = '';
+  const f = document.createDocumentFragment();
+  ALL.forEach(c => {
+    const o = document.createElement('option');
+    o.value = c;
+    f.appendChild(o);
+  });
+  dl.appendChild(f);
+})();
 
-    const btnBook = $('#btnBook');
-    const btnSwap = $('#btnSwap');
-    const theory  = $('#theoryPass');
-    const swapRef = $('#swapRef');
+/* ---------- UI logic ---------- */
+(function typeToggles(){
+  const book = $('#btnBook');
+  const swap = $('#btnSwap');
+  const tp = $('#theoryPass');
+  const sr = $('#swapRef');
+  function pick(b){
+    book.setAttribute('aria-pressed', b===book ? 'true' : 'false');
+    swap.setAttribute('aria-pressed', b===swap ? 'true' : 'false');
+    book.classList.toggle('selected', b===book);
+    swap.classList.toggle('selected', b===swap);
+    if (b===swap){ sr.required = true; } else { sr.required = false; }
+  }
+  book.onclick = () => pick(book);
+  swap.onclick = () => pick(swap);
+})();
 
-    let bookingType = null; // 'new' or 'swap'
+(function validators(){
+  const lic = $('#licence');
+  lic.addEventListener('input', ()=>{ lic.value = lic.value.replace(/[^a-z0-9]/gi,'').toUpperCase().slice(0,16); });
+  const sr = $('#swapRef');
+  sr.addEventListener('input', ()=>{ sr.value = sr.value.replace(/\D/g,'').slice(0,8); });
+  const tp = $('#theoryPass');
+  tp.addEventListener('input', ()=>{ tp.value = tp.value.replace(/[^a-z0-9]/gi,'').slice(0,16); });
+})();
 
-    function setType(t){
-      bookingType = t;
-      [btnBook,btnSwap].forEach(b=>b.classList.add('secondary'));
-      (t==='new'?btnBook:btnSwap).classList.remove('secondary');
-    }
-    btnBook.onclick = ()=>setType('new');
-    btnSwap.onclick = ()=>setType('swap');
+/* ---------- Total ---------- */
+(function totals(){
+  const high = $('#optHigh'), wkd = $('#optWeekend'), out = $('#total');
+  function recalc(){
+    const base = ($('#btnBook').getAttribute('aria-pressed')==='true') ? 150 :
+                 ($('#btnSwap').getAttribute('aria-pressed')==='true') ? 70 : 0;
+    const sum = base + (+high.value||0) + (+wkd.value||0);
+    out.textContent = money(sum || 0);
+  }
+  [high,wkd,$('#btnBook'),$('#btnSwap')].forEach(el => el.addEventListener('click',recalc));
+  high.addEventListener('change',recalc);
+  wkd.addEventListener('change',recalc);
+  recalc();
+})();
 
-    function centres(){
-      return $$('.centre').map(i=>i.value.trim()).filter(Boolean);
-    }
+/* ---------- Collect & Presearch ---------- */
+function centresArray(){
+  return $$('.centre').map(i => (i.value||'').trim()).filter(Boolean);
+}
+function ymd(v){ return v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : ''; }
 
-    function pounds(){
-      const base = (bookingType==='new') ? 150 : 70;
-      const add  = (+($('#prio').value||0)) + (+($('#weekend').value||0));
-      return base + add;
-    }
-    function refreshTotal(){
-      $('#total').textContent = `Total: £${pounds().toFixed(2)}`;
-    }
-    $('#prio').onchange = refreshTotal;
-    $('#weekend').onchange = refreshTotal;
-    refreshTotal();
+function buildPayload(){
+  const isBook = $('#btnBook').getAttribute('aria-pressed')==='true';
+  const isSwap = $('#btnSwap').getAttribute('aria-pressed')==='true';
+  const payload = {
+    booking_type: isBook ? 'new' : (isSwap ? 'swap' : 'new'),
+    licence_number: ($('#licence').value||'').trim() || null,
+    booking_reference: isSwap ? ($('#swapRef').value||'').trim() : null,
+    theory_pass: isBook ? ($('#theoryPass').value||'').trim() : null,
+    date_window_from: ymd($('#dFrom').value),
+    date_window_to:   ymd($('#dTo').value),
+    time_window_from: ($('#tFrom').value||'').trim(),
+    time_window_to:   ($('#tTo').value||'').trim(),
+    phone:  ($('#whatsapp').value||'').trim() || null,
+    email:  ($('#email').value||'').trim() || null,
+    centres: centresArray(),
+    options: {
+      high_priority: +($('#optHigh').value||0) > 0,
+      weekend: +($('#optWeekend').value||0) > 0,
+      notice_days: +(($('#noticeDays').value||'0'))
+    },
+    notes: null
+  };
+  Object.keys(payload).forEach(k=>{
+    if (payload[k]===undefined || payload[k]==='' || payload[k]===null) delete payload[k];
+  });
+  return payload;
+}
 
-    function toast(msg, ok=true){
-      const el = $('#liveMsg');
-      el.textContent = msg || '';
-      el.style.color = ok ? '#065f46' : '#991b1b';
-    }
+async function ensureSearchId(){
+  let sid = localStorage.getItem('dvsa_last_search_id');
+  if (sid) return sid;
 
-    function normPhone(v){
-      let d = (v||'').replace(/\D/g,'');
-      if (d.startsWith('44')) d = d.slice(2);
-      if (d.startsWith('0'))  d = d.slice(1);
-      d = d.slice(0,10);
-      return d ? ('0' + d) : '';
-    }
+  const p = buildPayload();
+  // require a minimum to create
+  if (!p.email || !p.centres || p.centres.length===0){
+    toast('Please enter Email and at least one Test Centre before payment.', false);
+    throw new Error('missing minimal fields');
+  }
+  const r = await fetch(`${API_BASE}/search`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(p)
+  });
+  const text = await r.text(); let j; try{ j = JSON.parse(text) }catch{ j = null; }
+  if (!r.ok) throw new Error(j?.detail || text || `HTTP ${r.status}`);
+  sid = j?.search_id || j?.id;
+  if (!sid) throw new Error('No search_id returned');
+  localStorage.setItem('dvsa_last_search_id', String(sid));
+  return sid;
+}
 
-    function validateMinimal(){
-      if (!bookingType){ toast('Choose Book or Swap.'); return false; }
-      if (!$('#surname').value.trim()){ toast('Enter surname.'); return false; }
-      if (!$('#email').value.trim()){ toast('Enter email.'); return false; }
-      if (!$('#licence').value.trim() || $('#licence').value.trim().length<10){ toast('Enter licence (first 16 chars).'); return false; }
-      if (centres().length===0){ toast('Add at least one test centre.'); return false; }
-      if (bookingType==='swap' && !/^\d{8}$/.test(swapRef.value.trim())){ toast('Add the 8-digit DVSA booking reference.'); return false; }
-      return true;
-    }
+/* ---------- Stripe ---------- */
+let stripe, elements, paymentElement, lastClientSecret = '';
+const redirectMethods = new Set(['klarna','revolut_pay','amazon_pay']);
 
-    async function ensureSearchId(){
-      let id = localStorage.getItem('dvsa_last_search_id');
-      if (id) return id;
+function markPaid(){
+  const pill = $('#payStatus'); pill.textContent = 'Payment: Paid'; pill.classList.add('paid');
+  $('#submitBtn').disabled = false;
+}
 
-      if (!validateMinimal()) throw new Error('missing fields');
+function showStripePanel(msg, ok){
+  const p = $('#stripePanel'); p.style.display = 'block';
+  const m = $('#stripeMsg'); m.textContent = msg || ''; m.className = ok ? 'okmsg' : 'errmsg';
+}
 
-      const payload = {
-        booking_type: bookingType,
-        licence_number: $('#licence').value.trim() || null,
-        booking_reference: bookingType==='swap' ? swapRef.value.trim() : null,
-        theory_pass: bookingType==='new' ? theory.value.trim() : null,
-        phone: normPhone($('#phone').value),
-        email: $('#email').value.trim(),
-        centres: centres(),
-        options: {
-          high_priority: +($('#prio').value||0)>0,
-          weekend: +($('#weekend').value||0)>0
-        }
-      };
+async function createIntent(){
+  const totalTxt = $('#total').textContent;
+  const pounds = parseFloat(totalTxt.replace(/[£,]/g,'')||'0');
+  if (!Number.isFinite(pounds) || pounds<=0) { toast('Total is invalid.', false); return false; }
+  const searchId = await ensureSearchId();
 
-      const r = await fetch(`${API_BASE}/search`, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(payload)
-      });
-      const t = await r.text(); let j=null; try{ j=JSON.parse(t) }catch{}
-      if (!r.ok || !j?.search_id) throw new Error(j?.detail || t || `HTTP ${r.status}`);
-      id = String(j.search_id);
-      localStorage.setItem('dvsa_last_search_id', id);
-      return id;
-    }
+  const r = await fetch(`${API_BASE}/pay/create-intent`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      search_id: Number(searchId),
+      amount: Math.round(pounds*100),
+      currency:'gbp',
+      description:`Search #${searchId}`,
+      metadata:{search_id:String(searchId)}
+    })
+  });
+  const j = await r.json();
+  if(!r.ok || !j?.clientSecret){
+    toast(j?.detail || j?.error || 'Stripe: failed to create intent', false);
+    return false;
+  }
+  lastClientSecret = j.clientSecret;
+  return true;
+}
 
-    // ==== Stripe ====
-    let stripe, elements, paymentElement, lastClientSecret = '';
-    const redirectMethods = new Set(['klarna','revolut_pay','amazon_pay']);
+async function openStripe(){
+  try{
+    const ok = await createIntent();
+    if(!ok) return;
+    showStripePanel('', true);
+    stripe = Stripe(window.STRIPE_PUBLISHABLE_KEY);
+    elements = stripe.elements({ clientSecret: lastClientSecret });
+    if (paymentElement) paymentElement.unmount();
+    paymentElement = elements.create('payment');
+    paymentElement.mount('#payment-element');
+    paymentElement.on('change', ev=>{
+      const type = ev?.value?.type || 'card';
+      if (redirectMethods.has(type)) showStripePanel('You will be redirected to complete payment…', true);
+      else showStripePanel('', true);
+    });
+  }catch(e){ toast(e?.message||String(e), false); }
+}
+async function confirmPay(){
+  if (!stripe || !elements) return showStripePanel('Payment form is not ready.', false);
+  const {error, paymentIntent} = await stripe.confirmPayment({ elements, redirect:'if_required' });
+  if (error) return showStripePanel(error.message||'Payment failed.', false);
+  if (paymentIntent?.status==='succeeded'){
+    showStripePanel('Payment successful.', true);
+    markPaid();
+  } else {
+    showStripePanel('Payment not completed.', false);
+  }
+}
 
-    function markPaid(){
-      $('#payStatus').textContent = 'Payment: Paid';
-      const s = $('#submitBtn');
-      s.disabled = false;
-      s.classList.remove('secondary');
-    }
+$('#payOptions').onclick = openStripe;
+$('#payNow').onclick = openStripe;
+$('#confirmPay').onclick = confirmPay;
 
-    $('#stripePayBtn').onclick = async (e)=>{
-      e.preventDefault();
-      $('#payError').style.display='none';
-      toast('');
+/* Handle redirect return */
+(function handleStripeReturn(){
+  const qs = new URLSearchParams(location.search);
+  const cs = qs.get('payment_intent_client_secret');
+  if (!cs) return;
+  try{
+    const s = Stripe(window.STRIPE_PUBLISHABLE_KEY);
+    s.retrievePaymentIntent(cs).then(({paymentIntent})=>{
+      if (!paymentIntent) return;
+      if (paymentIntent.status==='succeeded'){ showStripePanel('Payment successful.', true); markPaid(); }
+      else if (paymentIntent.status==='processing'){ showStripePanel('Payment processing…', false); }
+      else if (paymentIntent.last_payment_error){ showStripePanel(paymentIntent.last_payment_error.message||'Payment failed.', false); }
+    });
+  }catch(_){}
+})();
 
-      if (!validateMinimal()) return;
+/* ---------- Submit ---------- */
+$('#submitBtn').onclick = async () => {
+  const p = buildPayload();
+  if (!p.centres || p.centres.length===0) return toast('Select at least one test centre.', false);
+  if (!p.email) return toast('Email is required.', false);
 
-      // 1) Ensure we have a search id
-      let sid;
-      try{ sid = await ensureSearchId(); }
-      catch(err){ $('#payError').textContent = err.message || String(err); $('#payError').style.display='block'; return; }
-
-      // 2) Create a payment intent for the current total
-      const amount = Math.round(pounds()*100);
-      try{
-        const r = await fetch(`${API_BASE}/pay/create-intent`, {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({
-            search_id: Number(sid),
-            amount, currency:'gbp',
-            description: `Search #${sid}`,
-            metadata: { search_id: String(sid) }
-          })
-        });
-        const j = await r.json();
-        if(!r.ok || !j?.clientSecret) throw new Error(j?.detail || 'Stripe create-intent failed');
-        lastClientSecret = j.clientSecret;
-      }catch(err){
-        $('#payError').textContent = (err && err.message) ? err.message : String(err);
-        $('#payError').style.display='block';
-        return;
-      }
-
-      // 3) Render the Payment Element
-      try{
-        $('#stripePanel').style.display='block';
-        stripe = Stripe(STRIPE_KEY);
-        elements = stripe.elements({ clientSecret: lastClientSecret });
-        if (paymentElement) try{ paymentElement.unmount(); }catch(_){}
-        paymentElement = elements.create('payment');
-        paymentElement.mount('#payment-element');
-        $('#stripeMsg').textContent = '';
-      }catch(err){
-        $('#payError').textContent = 'Stripe initialisation failed.';
-        $('#payError').style.display='block';
-      }
-    };
-
-    $('#stripeConfirmBtn').onclick = async (e)=>{
-      e.preventDefault();
-      if (!stripe || !elements){ $('#payError').textContent='Payment form is not ready.'; $('#payError').style.display='block'; return; }
-
-      const {error, paymentIntent} = await stripe.confirmPayment({
-        elements,
-        confirmParams:{ return_url: window.location.origin + window.location.pathname },
-        redirect:'if_required'
-      });
-      if (error){
-        $('#payError').textContent = error.message || 'Payment failed.';
-        $('#payError').style.display='block';
-        return;
-      }
-      if (paymentIntent && paymentIntent.status==='succeeded'){
-        $('#payError').style.display='none';
-        toast('Payment successful.', true);
-        markPaid();
-      } else {
-        $('#payError').textContent='Payment was not completed.';
-        $('#payError').style.display='block';
-      }
-    };
-
-    // Submit (after paid) — keeps same row; API already has all details from /search earlier
-    $('#submitBtn').onclick = ()=>{
-      toast('Thanks! Your search is active. We’ll notify you when we find a slot.', true);
-      // You can hard-reset the form if you want here.
-    };
-  </script>
+  try{
+    toast('Submitting…', true);
+    const r = await fetch(`${API_BASE}/search`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(p)
+    });
+    const t = await r.text(); let j; try{ j = JSON.parse(t) }catch{ j = null; }
+    if (!r.ok) throw new Error(j?.detail || t || `HTTP ${r.status}`);
+    const id = j?.search_id || j?.id || '(created)';
+    toast(`Search submitted: #${id}`, true);
+  }catch(e){
+    toast(e?.message||String(e), false);
+  }
+};
+</script>
 </body>
 </html>
