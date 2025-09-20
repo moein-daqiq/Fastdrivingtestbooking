@@ -35,13 +35,18 @@ stripe.max_network_retries = 2
 # ---------- APP ----------
 app = FastAPI(title="FastDrivingTestFinder API", version="1.3.1")
 
-# CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
+# === FIXED CORS: explicit origins (works reliably behind proxies/CDNs) ===
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^https://([a-z0-9-]+\.)?fastdrivingtestfinder\.co\.uk$",
+    allow_origins=[
+        "https://fastdrivingtestfinder.co.uk",
+        "https://www.fastdrivingtestfinder.co.uk",
+    ],
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
 )
 
 # ---------- DB ----------
@@ -193,13 +198,7 @@ def _verify_worker(authorization: str | None = Header(default=None)):
 
 # ---------- EMAIL ----------
 def _send_order_email(search_id: int, to_email: str):
-    """
-    Sends a simple order confirmation email.
-    Uses env: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM, SMTP_TLS, SMTP_REPLY_TO
-    Writes success/failure into searches.last_event (no schema change).
-    """
     if not (SMTP_HOST and SMTP_FROM and to_email):
-        # Not configured — don't mark this as an error; just skip silently.
         return
 
     subject = f"Order #{search_id} received — FastDrivingTestFinder"
@@ -243,7 +242,6 @@ def _send_order_email(search_id: int, to_email: str):
                     s.login(SMTP_USER, SMTP_PASS)
                 s.send_message(msg)
 
-        # mark success
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("UPDATE searches SET last_event=?, updated_at=? WHERE id=?",
@@ -251,7 +249,6 @@ def _send_order_email(search_id: int, to_email: str):
         conn.commit()
         conn.close()
     except Exception as e:
-        # mark failure in last_event (non-fatal)
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("UPDATE searches SET last_event=?, updated_at=? WHERE id=?",
@@ -306,22 +303,17 @@ def chat_message(body: ChatMessageIn):
     import re
     text = body.message or ""
     intent = _intent_router(text)
-
-    # try to extract a number as booking ID if present
     m = re.search(r"\b(\d{1,6})\b", text)
     possible_id = int(m.group(1)) if m else None
 
     if intent == "swap":
         return ChatMessageOut(
-            reply="Sure, we can do that — it’s our everyday job. "
-                  "If you already have a booking and want us to swap it, just place a ‘Swap’ order on our site. "
-                  "We’ll start checking for earlier slots at your preferred centres.",
+            reply="Sure, we can do that — it’s our everyday job. If you already have a booking and want us to swap it, just place a ‘Swap’ order on our site. We’ll start checking for earlier slots at your preferred centres.",
             suggested=["How do I start a swap?", "What info do you need for a swap?"]
         )
     if intent == "book":
         return ChatMessageOut(
-            reply="Yes, we can book a new test for you. Place a ‘New’ booking on our site, choose your centres, "
-                  "and we’ll search for the earliest suitable slots. We’ll notify you via WhatsApp/email.",
+            reply="Yes, we can book a new test for you. Place a ‘New’ booking on our site, choose your centres, and we’ll search for the earliest suitable slots. We’ll notify you via WhatsApp/email.",
             suggested=["What centres can you check?", "How quickly can you find a slot?"]
         )
     if intent == "status":
@@ -349,8 +341,7 @@ def chat_message(body: ChatMessageIn):
             suggested=["Can you swap my test for me?", "How is my booking going?"]
         )
     return ChatMessageOut(
-        reply="I can help with swaps, new bookings, and booking status updates. "
-              "You can ask things like ‘Can you swap my test?’ or ‘What’s the status of booking 1234?’",
+        reply="I can help with swaps, new bookings, and booking status updates. You can ask things like ‘Can you swap my test?’ or ‘What’s the status of booking 1234?’",
         suggested=["Can you swap my test for me?", "What’s the status of booking 1234?"]
     )
 
@@ -388,7 +379,6 @@ async def create_search(payload: SearchIn, background: BackgroundTasks):
     conn.commit()
     conn.close()
 
-    # send email in background if we have an email
     if payload.email:
         background.add_task(_send_order_email, search_id, payload.email)
 
@@ -521,12 +511,6 @@ def _badge(s: str) -> str:
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
 
 def _derive_flags(row: sqlite3.Row):
-    """
-    Derive:
-      - reached: True if we've interacted with a centre or found/booked/failed a slot
-      - last_centre: centre-like token parsed from event payload if present
-      - captcha: True if last_event indicates a captcha cooldown
-    """
     ev = (row["last_event"] or "").strip()
     reached = False
     last_centre = ""
@@ -565,9 +549,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
     def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
 
     statuses = ["new","queued","searching","found","booked","failed"]
-    # GOOD
     pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
-
     clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
 
     rows_html = []
@@ -595,12 +577,9 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             td(r["last_event"] or "") +
             td(r["paid"]) +
             td(r["payment_intent_id"] or "") +
-
-            # NEW derived columns
             td(reached_html) +
             td(last_centre or "—") +
             td(captcha_html) +
-
             td(r["created_at"] or "") +
             td(r["updated_at"] or "") +
             "</tr>"
