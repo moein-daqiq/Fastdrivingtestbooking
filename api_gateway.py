@@ -1,4 +1,3 @@
-
 import os
 import json
 import sqlite3
@@ -23,7 +22,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.3.1")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.2.0")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -54,37 +53,26 @@ def migrate():
             paid INTEGER DEFAULT 0,
             payment_intent_id TEXT,
             amount INTEGER,
+
             booking_type TEXT,
             licence_number TEXT,
             booking_reference TEXT,
             theory_pass TEXT,
+
             date_window_from TEXT,
             date_window_to TEXT,
             time_window_from TEXT,
             time_window_to TEXT,
+
             phone TEXT,
             whatsapp TEXT,
             email TEXT,
+
             centres_json TEXT,
             options_json TEXT,
             notes TEXT
         )
     """)
-    expected_cols = {
-        "created_at","updated_at","status","last_event","paid",
-        "payment_intent_id","amount",
-        "booking_type","licence_number","booking_reference","theory_pass",
-        "date_window_from","date_window_to","time_window_from","time_window_to",
-        "phone","whatsapp","email","centres_json","options_json","notes"
-    }
-    cur.execute("PRAGMA table_info(searches)")
-    have = {row["name"] for row in cur.fetchall()}
-    missing = expected_cols - have
-    for col in missing:
-        coltype = "INTEGER" if col in {"paid","amount"} else "TEXT"
-        cur.execute(f"ALTER TABLE searches ADD COLUMN {col} {coltype}")
-
-    # Idempotency table for Stripe events
     cur.execute("""
         CREATE TABLE IF NOT EXISTS stripe_events (
             id TEXT PRIMARY KEY,
@@ -108,8 +96,8 @@ class SearchIn(BaseModel):
 
     date_window_from: Optional[str] = Field(None, description="YYYY-MM-DD")
     date_window_to: Optional[str]   = Field(None, description="YYYY-MM-DD")
-    time_window_from: Optional[str] = Field(None, description="HH:MM (24h)")
-    time_window_to: Optional[str]   = Field(None, description="HH:MM (24h)")
+    time_window_from: Optional[str] = Field(None, description="HH:MM")
+    time_window_to: Optional[str]   = Field(None, description="HH:MM")
 
     phone: Optional[str] = None
     whatsapp: Optional[str] = None
@@ -125,7 +113,7 @@ class PayCreateIntentIn(BaseModel):
     amount:      Optional[int] = None   # legacy
     currency: str = "gbp"
     description: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None   # passthrough (we enforce search_id)
+    metadata: Optional[Dict[str, Any]] = None
 
 class WorkerClaimRequest(BaseModel):
     limit: int = 8
@@ -184,9 +172,9 @@ def _verify_worker(authorization: str | None = Header(default=None)):
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.3.1"}
+    return {"ok": True, "ts": now_iso(), "version": "1.2.0"}
 
-# ---------- ROUTES ----------
+# ---------- CREATE SEARCH ----------
 @app.post("/api/search")
 async def create_search(payload: SearchIn):
     centres_list = _parse_centres(payload.centres)
@@ -214,9 +202,10 @@ async def create_search(payload: SearchIn):
     search_id = cur.lastrowid
     conn.commit()
     conn.close()
+
     return {"ok": True, "search_id": search_id, "status": "new"}
 
-# Explicit OPTIONS route (some proxies require it even with CORSMiddleware)
+# ---------- STRIPE ----------
 @app.options("/api/pay/create-intent")
 async def options_pay_create_intent():
     return Response(status_code=204)
@@ -342,6 +331,27 @@ def _badge(s: str) -> str:
     c = colors.get(s, "#334155")
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
 
+def _derive_flags(row: sqlite3.Row):
+    ev = (row["last_event"] or "").strip()
+    reached = False
+    last_centre = ""
+    captcha = False
+
+    if ev.startswith(("checked:", "slot_found:", "booked:", "booking_failed:", "captcha_cooldown:")):
+        try:
+            payload = ev.split(":", 1)[1]
+            last_centre = (payload.split("·", 1)[0] or "").strip()
+        except Exception:
+            last_centre = ""
+
+    if ev.startswith(("checked:", "slot_found:", "booked:", "booking_failed:")):
+        reached = True
+
+    if ev.startswith("captcha_cooldown:"):
+        captcha = True
+
+    return reached, last_centre, captcha
+
 @app.get("/api/admin", response_class=HTMLResponse)
 async def admin(request: Request, status: Optional[str] = Query(None)):
     require_admin(request)
@@ -360,18 +370,17 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
     def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
 
     statuses = ["new","queued","searching","found","booked","failed"]
-    # BAD (has mixed quotes → SyntaxError)
-# pills = " ".join(f'<a href=\"?status={s}\" style='text-decoration:none'>{_badge(s)}</a>' for s in statuses)
-
-# GOOD
-pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
-
-    clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
+    pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
 
     rows_html = []
     for r in rows:
         centres = ", ".join((json.loads(r["centres_json"] or "[]")))
         opts = r["options_json"] or ""
+
+        reached, last_centre, captcha = _derive_flags(r)
+        reached_html = "✅" if reached else "—"
+        captcha_html = "🚧" if captcha else "—"
+
         rows_html.append(
             "<tr>" +
             td(r["id"]) +
@@ -388,6 +397,9 @@ pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)
             td(r["last_event"] or "") +
             td(r["paid"]) +
             td(r["payment_intent_id"] or "") +
+            td(reached_html) +
+            td(last_centre or "—") +
+            td(captcha_html) +
             td(r["created_at"] or "") +
             td(r["updated_at"] or "") +
             "</tr>"
@@ -415,7 +427,7 @@ pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)
       <div class="wrap">
         <h1>Searches</h1>
         <div class="bar">
-          <div class="pill">{pills}{clear}</div>
+          <div class="pill">{pills}</div>
         </div>
         <div class="counts">
           {"".join(f"<span>{_badge(k)} {v}</span>" for k,v in counts.items())}
@@ -425,7 +437,9 @@ pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)
             <tr>
               <th>ID</th><th>Status</th><th>Type</th><th>Licence</th><th>Booking Ref</th><th>Theory</th>
               <th>Date/Time Window</th><th>Phone</th><th>Email</th><th>Centres</th><th>Options</th>
-              <th>Last Event</th><th>Paid</th><th>PI</th><th>Created</th><th>Updated</th>
+              <th>Last Event</th><th>Paid</th><th>PI</th>
+              <th>Reached?</th><th>Last centre</th><th>Captcha?</th>
+              <th>Created</th><th>Updated</th>
             </tr>
           </thead>
           <tbody>
@@ -486,4 +500,4 @@ def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
     conn.commit()
     conn.close()
     return {"ok": True}
-
+v
