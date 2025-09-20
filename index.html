@@ -566,7 +566,7 @@
     })();
   </script>
 
-<script>
+  <script>
   /* Centres: build list, collapse "London X" -> "X", split & de-dupe, then populate datalist */
   (function(){
     const BASE_CENTRES = [
@@ -1207,89 +1207,111 @@
     })();
   </script>
 
- <!-- Stripe.js -->
-<script src="https://js.stripe.com/v3/"></script>
+  <!-- Stripe.js -->
+  <script src="https://js.stripe.com/v3/"></script>
+  <script>
+  /* Stripe Payment Element (with self-healing create-intent) */
+  (function(){
+    const STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || '';
+    const panel   = document.getElementById('stripePanel');
+    const msgBox  = document.getElementById('stripeMsg');
+    const payBtn  = document.getElementById('stripePayBtn');
+    const confBtn = document.getElementById('stripeConfirmBtn');
 
-<script>
-  // minimal glue: assumes API_BASE and window.STRIPE_PUBLISHABLE_KEY are set in <head>
+    let stripe, elements, paymentElement, lastClientSecret = '';
+    let currentMethodType = 'card';
 
-  let stripe, elements, paymentElement, lastClientSecret = '';
+    const redirectMethods = new Set(['klarna','revolut_pay','amazon_pay']);
 
-  async function ensureSearchId() {
-    // your existing ensurePreSearch(), or a wrapper that POSTs /api/search and stores dvsa_last_search_id
-    if (window.ensurePreSearch) return await window.ensurePreSearch();
-    return localStorage.getItem('dvsa_last_search_id');
-  }
-
-  async function createIntentIfNeeded() {
-    const amountText = (document.getElementById('totalLine')?.textContent || '');
-    const m = amountText.match(/£([\d.]+)/);
-    const pounds = m ? parseFloat(m[1]) : 0;
-    if (!Number.isFinite(pounds) || pounds <= 0) { return false; }
-
-    let searchId = await ensureSearchId();
-    if (!searchId) { throw new Error('search_id not found'); }
-
-    const r = await fetch(`${API_BASE}/pay/create-intent`, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({
-        search_id: Number(searchId),
-        amount: Math.round(pounds * 100),
-        currency: 'gbp',
-        description: `Search #${searchId}`,
-        metadata: { search_id: String(searchId) }
-      })
-    });
-    const j = await r.json();
-    if (!r.ok || !j?.clientSecret) throw new Error(j?.detail || 'Failed to create payment intent');
-
-    lastClientSecret = j.clientSecret;
-    return true;
-  }
-
-  async function openStripePanel(e){
-    if (e) e.preventDefault();
-    const panel = document.getElementById('stripePanel');
-    if (panel) panel.style.display = 'block';
-
-    if (!window.STRIPE_PUBLISHABLE_KEY){ alert('Stripe publishable key missing'); return; }
-    const ok = await createIntentIfNeeded();
-    if (!ok) return;
-
-    stripe = Stripe(window.STRIPE_PUBLISHABLE_KEY);
-    elements = stripe.elements({ clientSecret: lastClientSecret });
-    if (paymentElement) paymentElement.unmount();
-    paymentElement = elements.create('payment');
-    paymentElement.mount('#payment-element');
-  }
-
-  async function confirmStripePayment(e){
-    if (e) e.preventDefault();
-    if (!stripe || !elements) return;
-
-    const {error, paymentIntent} = await stripe.confirmPayment({
-      elements,
-      confirmParams: { return_url: window.location.origin + window.location.pathname },
-      redirect: 'if_required'
-    });
-    if (error) { alert(error.message || 'Payment failed.'); return; }
-    if (paymentIntent?.status === 'succeeded') {
-      document.getElementById('payStatus')?.classList.add('paid');
-      document.getElementById('payStatus').textContent = 'Payment: Paid';
-      const submitBtn = document.getElementById('submitBtn');
-      if (submitBtn) { submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
+    function amountFromTotalLine(){
+      const txt = (document.getElementById('totalLine')?.textContent || '');
+      const m   = txt.match(/£([\d.]+)/);
+      const v   = m ? parseFloat(m[1]) : 0;
+      return v.toFixed(2);
     }
-  }
 
-  document.getElementById('stripePayBtn')?.addEventListener('click', openStripePanel);
-  document.getElementById('stripeConfirmBtn')?.addEventListener('click', confirmStripePayment);
-</script>
+    function markPaid(){
+      const pill = document.getElementById('payStatus');
+      if (pill){ pill.textContent='Payment: Paid'; pill.classList.add('paid'); }
+      const submitBtn = document.getElementById('submitBtn');
+      if (submitBtn){ submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
+    }
 
+    function showMsg(text, ok=false){
+      panel.style.display = 'block';
+      if (!msgBox) return;
+      msgBox.textContent = text || '';
+      msgBox.style.display = text ? 'block' : 'none';
+      msgBox.classList.remove('success','fail');
+      msgBox.classList.add(ok ? 'success' : 'fail');
+    }
 
-  // ====== end of self-healing block ======
-</script>
+    function requireBookingTypeOrReject(){
+      const isBook = document.getElementById('btnBook')?.classList.contains('selected');
+      const isSwap = document.getElementById('btnSwap')?.classList.contains('selected');
+      if (!isBook && !isSwap){
+        showMsg('Please select Book (£150) or Swap (£70) first.');
+        return false;
+      }
+      return true;
+    }
 
+    async function ensurePreSearch(){
+      return await window.ensurePreSearch?.();
+    }
+
+    /* ===== SELF-HEALING createIntentIfNeeded() ===== */
+    async function createIntentIfNeeded(){
+      const amountStr = amountFromTotalLine();
+      const pounds = parseFloat(amountStr);
+      if (!Number.isFinite(pounds) || pounds <= 0){
+        showMsg('Total is not valid.');
+        return false;
+      }
+
+      // obtain (or create) search id using your existing helper
+      let searchId;
+      try {
+        searchId = await ensurePreSearch();
+      } catch (e) {
+        showMsg('Please fill Surname, Email and at least one Test Centre before paying.');
+        return false;
+      }
+
+      async function callCreateIntent(id){
+        return fetch(`${API_BASE}/pay/create-intent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            search_id: Number(id),
+            amount: Math.round(pounds * 100),
+            currency: 'gbp',
+            description: `Search #${id}`,
+            metadata: { search_id: String(id) }
+          })
+        });
+      }
+
+      // first attempt
+      let r = await callCreateIntent(searchId);
+
+      // self-heal once on 404 (stale/missing id)
+      if (r.status === 404) {
+        localStorage.removeItem('dvsa_last_search_id');
+        searchId = await ensurePreSearch();
+        r = await callCreateIntent(searchId);
+      }
+
+      const j = await r.json().catch(()=>null);
+      if (!r.ok || !(j?.clientSecret || j?.client_secret)){
+        showMsg((j && (j.detail || j.error)) || 'Stripe: failed to create payment intent');
+        return false;
+      }
+
+      lastClientSecret = j.clientSecret || j.client_secret;
+      return true;
+    }
+    /* ===== end self-heal ===== */
 
     async function openStripePanel(){
       panel.style.display = 'block';
