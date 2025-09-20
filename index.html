@@ -294,7 +294,6 @@
       <div class="row heading"><label class="small dt-heading">Date and Time Window:</label></div>
 
       <div class="dt-grid">
-        <!-- Row 1 -->
         <div class="field-col">
           <label for="earliestDate">Earliest Date:</label>
           <input id="earliestDate" class="lock-full" type="date" placeholder="dd/mm/yyyy"/>
@@ -304,7 +303,6 @@
           <input id="latestDate" class="lock-full" type="date" placeholder="dd/mm/yyyy"/>
         </div>
 
-        <!-- Row 2 -->
         <div class="field-col">
           <label for="unavailInput">My Unavailable Dates:</label>
           <div class="multi-date" id="unavail">
@@ -320,7 +318,6 @@
           </div>
         </div>
 
-        <!-- Row 3 -->
         <div class="field-col">
           <label>Available Time Window:</label>
           <div class="time-inline">
@@ -646,7 +643,6 @@
       (parts.length?parts:[noParens]).forEach(p=>{
         let canon = p.replace(/\s+/g,' ').trim();
         if (!canon) return;
-        // collapse "London X" -> "X" for duplicates (e.g., London Pinner/Hendon)
         const collapsed = stripLondonPrefix(canon);
         const key = collapsed.toLowerCase();
         if (IGNORE.has(key)) return;
@@ -657,7 +653,6 @@
     BASE_CENTRES.forEach(addName);
     EXTRA_RAW.forEach(addName);
 
-    // tiny typo fixes
     const fixes = {
       "aberystwyh": "Aberystwyth",
       "derby alverston": "Derby Alvaston",
@@ -683,9 +678,9 @@
       dl.appendChild(frag);
     }
 
-    window.__centres = merged.slice(); // expose for mobile typeahead
+    window.__centres = merged.slice();
   })();
-</script>
+  </script>
 
   <!-- MOBILE TYPEAHEAD for centre inputs (keeps datalist for desktop) -->
   <script>
@@ -694,7 +689,6 @@
       const isIOS = /iPad|iPhone|iPod/.test(ua);
       const isAndroid = /Android/.test(ua);
       const useCustom = isIOS || isAndroid;
-
       if (!useCustom) return;
 
       const CENTRES = Array.isArray(window.__centres) ? window.__centres : [];
@@ -827,8 +821,8 @@
     function normalizeCentreName(v){
       return (v||'')
         .toLowerCase()
-        .replace(/\s*\([^)]*\)/g,'')  // remove parentheticals
-        .replace(/^london\s+/,'')     // strip leading "london "
+        .replace(/\s*\([^)]*\)/g,'')
+        .replace(/^london\s+/,'')
         .replace(/\s+/g,' ')
         .trim();
     }
@@ -1018,13 +1012,13 @@
         const swapSelected  = document.getElementById('btnSwap')?.classList.contains('selected');
         const bookSelected  = document.getElementById('btnBook')?.classList.contains('selected');
         const swapRef       = document.getElementById('swapRef')?.value.trim() || '';
-        const theoryPass    = document.getElementById('theoryPass')?.value.trim() || '';
+        the oryPass    = document.getElementById('theoryPass')?.value.trim() || '';
 
         const payload = {
           email:  document.getElementById('email')?.value.trim() || null,
           phone:  normalizePhone(document.getElementById('phoneRaw')?.value),
 
-          centres,  // array
+          centres,
           from_date: ymd(document.getElementById('earliestDate')),
           to_date:   ymd(document.getElementById('latestDate')),
           time_from: toHH(document.getElementById('timeFrom')?.value),
@@ -1119,7 +1113,6 @@
           toast(id ? `Search created: ${id}` : 'Search created', true);
           console.log('Gateway response:', j);
 
-          /* NEW: hard reset the form after a successful submit */
           resetAll();
 
         } catch (err) {
@@ -1128,9 +1121,7 @@
         }
       }
 
-      /* NEW: Full UI reset to placeholders (runs after successful submit) */
       function resetAll(){
-        // clear text/number/date inputs
         document.querySelectorAll('input').forEach(inp=>{
           if (inp.type === 'number'){
             if (inp.id === 'timeFrom') inp.value = 7;
@@ -1146,16 +1137,13 @@
           inp.removeAttribute('aria-invalid');
         });
 
-        // reset specific placeholders
         const phone = document.getElementById('phoneRaw');
         if (phone) phone.value = '+44';
 
-        // unselect yes/no choices
         document.querySelectorAll('.yesno button.selected').forEach(b=>{
           b.classList.remove('selected'); b.setAttribute('aria-pressed','false');
         });
 
-        // reset totals, payment, submit
         const totalLine = document.getElementById('totalLine');
         if (totalLine) totalLine.textContent = 'Total: £0.00';
         const pill = document.getElementById('payStatus');
@@ -1163,23 +1151,19 @@
         const submitBtn = document.getElementById('submitBtn');
         if (submitBtn){ submitBtn.disabled = true; submitBtn.classList.remove('enabled'); }
 
-        // clear search id and hide stop button
         localStorage.removeItem('dvsa_last_search_id');
         const stopBtn = document.getElementById('stopSearchBtn'); if (stopBtn) stopBtn.remove();
 
-        // unselect booking toggles
         ['btnBook','btnSwap'].forEach(id=>{
           const el=document.getElementById(id);
           if(el){ el.classList.remove('selected'); el.setAttribute('aria-pressed','false'); }
         });
 
-        // clear multi-date pickers text
         ['unavailInput','instrInput'].forEach(id=>{
           const el = document.getElementById(id);
           if (el) el.value = '';
         });
 
-        // collapse/hide stripe panel and unmount element if present
         const panel = document.getElementById('stripePanel');
         if (panel) panel.style.display = 'none';
         if (window.__stripeUnmount) { try{ window.__stripeUnmount(); }catch(_){} }
@@ -1187,10 +1171,8 @@
         window.scrollTo({top:0,behavior:'smooth'});
       }
 
-      // expose reset for debugging if needed
       window.resetAll = resetAll;
-
-      window.ensurePreSearch = ensurePreSearch; /* expose for Stripe block */
+      window.ensurePreSearch = ensurePreSearch;
 
       window.addEventListener('DOMContentLoaded', async () => {
         await healthCheck();
@@ -1210,7 +1192,6 @@
   <!-- Stripe.js -->
   <script src="https://js.stripe.com/v3/"></script>
   <script>
-  /* Stripe Payment Element (with self-healing create-intent) */
   (function(){
     const STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || '';
     const panel   = document.getElementById('stripePanel');
@@ -1220,7 +1201,6 @@
 
     let stripe, elements, paymentElement, lastClientSecret = '';
     let currentMethodType = 'card';
-
     const redirectMethods = new Set(['klarna','revolut_pay','amazon_pay']);
 
     function amountFromTotalLine(){
@@ -1260,7 +1240,7 @@
       return await window.ensurePreSearch?.();
     }
 
-    /* ===== SELF-HEALING createIntentIfNeeded() ===== */
+    /* ===== Self-healing createIntentIfNeeded() ===== */
     async function createIntentIfNeeded(){
       const amountStr = amountFromTotalLine();
       const pounds = parseFloat(amountStr);
@@ -1269,14 +1249,9 @@
         return false;
       }
 
-      // obtain (or create) search id using your existing helper
       let searchId;
-      try {
-        searchId = await ensurePreSearch();
-      } catch (e) {
-        showMsg('Please fill Surname, Email and at least one Test Centre before paying.');
-        return false;
-      }
+      try { searchId = await ensurePreSearch(); }
+      catch { showMsg('Please fill Surname, Email and at least one Test Centre before paying.'); return false; }
 
       async function callCreateIntent(id){
         return fetch(`${API_BASE}/pay/create-intent`, {
@@ -1292,10 +1267,8 @@
         });
       }
 
-      // first attempt
       let r = await callCreateIntent(searchId);
 
-      // self-heal once on 404 (stale/missing id)
       if (r.status === 404) {
         localStorage.removeItem('dvsa_last_search_id');
         searchId = await ensurePreSearch();
@@ -1311,18 +1284,18 @@
       lastClientSecret = j.clientSecret || j.client_secret;
       return true;
     }
-    /* ===== end self-heal ===== */
 
+    // Return true/false so callers can auto-init when needed
     async function openStripePanel(){
       panel.style.display = 'block';
       if (!STRIPE_PUBLISHABLE_KEY){
         showMsg('Stripe publishable key is missing on this page. Add window.STRIPE_PUBLISHABLE_KEY in <head>.');
-        return;
+        return false;
       }
-      if (!requireBookingTypeOrReject()) return;
+      if (!requireBookingTypeOrReject()) return false;
 
       const ok = await createIntentIfNeeded();
-      if (!ok) return;
+      if (!ok) return false;
 
       try{
         stripe = Stripe(STRIPE_PUBLISHABLE_KEY);
@@ -1331,16 +1304,13 @@
         paymentElement = elements.create('payment');
         paymentElement.mount('#payment-element');
 
-        // allow unmount by resetAll()
         window.__stripeUnmount = () => { try{ paymentElement.unmount(); }catch(_){} };
 
         paymentElement.on('change', async (ev) => {
           currentMethodType = (ev?.value && ev.value.type) ? ev.value.type : 'card';
           if (redirectMethods.has(currentMethodType)) {
             showMsg('You will be redirected to complete payment…');
-            if (ev.complete) {
-              await confirmRedirectMethod();
-            }
+            if (ev.complete) await confirmRedirectMethod();
           } else {
             showMsg('', true);
           }
@@ -1348,9 +1318,11 @@
 
         showMsg('', true);
         document.getElementById('stripePanel').scrollIntoView({behavior:'smooth', block:'center'});
+        return true;
       }catch(err){
         console.error(err);
         showMsg('Stripe initialisation failed.');
+        return false;
       }
     }
 
@@ -1371,10 +1343,13 @@
         showMsg('For Klarna, Revolut Pay or Amazon Pay, select the option above and you will be redirected automatically.');
         return;
       }
-      if (!stripe || !elements){
-        showMsg('Payment form is not ready yet.');
-        return;
+
+      // Auto-initialize the payment form if not yet mounted
+      if (!elements) {
+        const inited = await openStripePanel();
+        if (!inited) { showMsg('Payment form is not ready yet.'); return; }
       }
+
       confBtn.disabled = true;
 
       const returnUrl = window.location.origin + window.location.pathname;
@@ -1440,5 +1415,83 @@
       }
     })();
   </script>
+  <!-- ===== Fix: Payment toggles + Payment options wiring ===== -->
+<script>
+(function () {
+  // YES/NO toggles recalc
+  var groups = document.querySelectorAll('.yesno');
+  var totalLine = document.getElementById('totalLine');
+  var BUSY = new Set([
+    'barking','chertsey','chingford','farnborough','goodmayes','greenford',
+    'high wycombe','hornchurch','hounslow','leighton buzzard','letchworth','luton','morden',
+    'oxford','pinner','reading','slough','southall','tolworth','uxbridge','wanstead',
+    'west didsbury'
+  ]);
+
+  function money(n) { return '£' + n.toFixed(2); }
+  function isSelected(id) {
+    var el = document.getElementById(id);
+    return !!(el && el.classList.contains('selected'));
+  }
+  function bookingFee() { return isSelected('btnBook') ? 150 : (isSelected('btnSwap') ? 70 : 0); }
+  function yesNoSum() {
+    var s = 0;
+    document.querySelectorAll('.yesno button.selected')
+      .forEach(function (b) { s += +(b.getAttribute('data-price') || 0); });
+    return s;
+  }
+  function busySurcharge() {
+    var c = 0;
+    document.querySelectorAll('.centre-input').forEach(function (i) {
+      var v = (i.value || '')
+        .toLowerCase()
+        .replace(/\s*\([^)]*\)/g, '')
+        .replace(/^london\s+/, '')
+        .trim();
+      if (v && BUSY.has(v)) c++;
+    });
+    return c * 30;
+  }
+  function recalc() {
+    var total = yesNoSum() + bookingFee() + busySurcharge();
+    if (isSelected('btnBook')) total = Math.max(150, total);
+    if (isSelected('btnSwap')) total = Math.max(70, total);
+    if (totalLine) totalLine.textContent = 'Total: ' + money(total);
+  }
+  // keep other scripts able to trigger a recalc
+  window._recalcTotal = recalc;
+
+  // Wire the yes/no buttons
+  groups.forEach(function (g) {
+    g.addEventListener('click', function (e) {
+      var btn = e.target.closest('button');
+      if (!btn) return;
+      g.querySelectorAll('button').forEach(function (b) {
+        b.classList.remove('selected');
+        b.setAttribute('aria-pressed', 'false');
+      });
+      btn.classList.add('selected');
+      btn.setAttribute('aria-pressed', 'true');
+      recalc();
+    });
+  });
+
+  recalc();
+
+  // Payment options button: always open the panel; Stripe init is handled by the main Stripe block
+  var payBtn = document.getElementById('stripePayBtn');
+  var panel  = document.getElementById('stripePanel');
+  var msgBox = document.getElementById('stripeMsg');
+  if (payBtn && panel) {
+    payBtn.addEventListener('click', function (e) {
+      e.preventDefault();
+      panel.style.display = 'block';
+      if (msgBox) { msgBox.textContent = ''; msgBox.style.display = 'none'; }
+      panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }
+})();
+</script>
+
 </body>
 </html>
