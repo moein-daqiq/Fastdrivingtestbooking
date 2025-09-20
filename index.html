@@ -567,7 +567,7 @@
   </script>
 
 <script>
-  /* Centres: build list, collapse "London X" -> "X", split & de-dupe, then populate datalist */
+  /* Centres: full list + normalisation + datalist build */
   (function(){
     const BASE_CENTRES = [
       "Aberdeen","Armagh","Ashford","Barking (Tanner Street)","Barnet","Basingstoke","Belfast","Birmingham",
@@ -579,7 +579,57 @@
       "West Didsbury (Manchester)"
     ];
 
-    const EXTRA_RAW = [/* … (unchanged long list) … */"York"];
+    /* Restored/expanded centres — includes Elgin, Borehamwood and many more */
+    const ALL_CENTRES = [
+      "Aberaeron","Aberdare","Aberfeldy","Aberfoyle","Abergavenny","Abergele","Abergwyngregyn","Aberystwyth",
+      "Abingdon","Airdrie","Aldershot","Alness","Alnwick","Ammanford","Andover","Antrim","Arbroath","Armagh",
+      "Ashfield","Ashford (Kent)","Atherton","Aylesbury","Ayr","Banbury","Bangor","Barnet","Barnsley","Barrow",
+      "Basildon","Basingstoke","Bath","Battersea","Bedford","Belfast","Bellshill","Belvedere","Beverley",
+      "Bexhill","Birmingham (Garretts Green)","Birmingham (Kings Heath)","Bishopbriggs","Blackburn","Blackpool",
+      "Blandford Forum","Bletchley","Bognor Regis","Bolton (Moses Gate)","Borehamwood","Boston","Bournemouth",
+      "Bournville","Bracknell","Bradford (Heaton)","Bradford (Thornbury)","Braehead","Brecon","Brentwood",
+      "Bridgend","Bridgwater","Bridlington","Bridlington (Crab Lane)","Brierley Hill","Brighton","Bristol (Avonmouth)",
+      "Bristol (Brislington)","Bristol (Southmead)","Bromsgrove","Brooklands (Weybridge)","Buckingham","Burton on Trent",
+      "Bury (Manchester)","Caernarfon","Caerphilly","Cambridge (Brookmount Court)","Cannock","Canterbury",
+      "Cardiff (Llanishen)","Cardigan","Carlisle","Carmarthen","Castleford","Chadderton","Chapel-en-le-Frith",
+      "Chelmsford","Cheltenham","Chertsey","Chester","Chesterfield","Chichester","Chingford","Chippenham","Chorley",
+      "Clacton-on-Sea","Clydebank","Colchester","Coleraine","Consett","Cookstown","Corby","Coventry","Cowdenbeath",
+      "Crewe","Crawley","Cromer","Croydon","Cumbernauld","Darlington","Darwen","Dartford","Derby","Derby (Alvaston)",
+      "Dewsbury","Didcot","Doncaster","Dorchester","Droitwich","Dudley","Dumfries","Dundee","Dunfermline",
+      "Dunoon","Durham","East Kilbride","Eastbourne","Edinburgh (Currie)","Edinburgh (Musselburgh)","Elgin",
+      "Ellesmere Port","Eltham (London)","Enfield","Enniskillen","Erith (London)","Exeter","Falkirk","Falmouth",
+      "Fareham","Farnborough","Farnham","Faversham","Folkestone","Forfar","Forest Hills (London)","Fort William",
+      "Fraserburgh","Galashiels","Gateshead","Gillingham","Glasgow (Anniesland)","Glasgow (Baillieston)",
+      "Glasgow (Shieldhall)","Glenrothes","Gloucester","Goole","Goodmayes","Grantham","Gravesend","Great Yarmouth",
+      "Greenford","Grimsby","Guildford","Hamiliton","Harlow","Harlesden (London)","Harrogate","Hartlepool",
+      "Hastings","Hatfield","Havant","Hayes (London)","Heckmondwike","Hemel Hempstead","Hendon","Hereford",
+      "Herne Bay","High Wycombe","Hinckley","Hither Green (London)","Holloway (London)","Hornchurch","Horwich",
+      "Horsforth (Leeds)","Horsham","Houghton-le-Spring","Hove","Huddersfield","Hull","Huntingdon","Huyton",
+      "Hyde","Ilford","Inveraray","Inverness","Ipswich","Isleworth (London)","Isle of Skye (Portree)","Isle of Wight",
+      "Keighley","Kelso","Kendal","Kettering","Kidderminster","Kidlington (Oxford)","Kingston (Tolworth)","Kings Lynn",
+      "Kirkcaldy","Kirkintilloch","Knaresborough","Lancing","Launceston","Leamington Spa","Leeds","Leeds (Harehills)",
+      "Leicester (Cannock Street)","Leicester (Wigston)","Leighton Buzzard","Lerwick (Shetland)","Letchworth",
+      "Lincoln","Livingston","Llandrindod Wells","Llanelli","Llantrisant","Loanhead","Lochgilphead","London City",
+      "Longbenton","Loughborough","Lowestoft","Ludlow","Lurgan","Luton","Macclesfield","Maesteg","Maidstone",
+      "Maldon","Malton","Malvern","Manchester (West Didsbury)","Manchester (Cheetham Hill)","Mansfield","Margate",
+      "Market Harborough","Melton Mowbray","Merthyr Tydfil","Middlesbrough","Mill Hill","Milton Keynes","Montrose",
+      "Morley (Leeds)","Morden","Motherwell","Neath","Nelson","Newbury","Newcastle upon Tyne (Elswick)",
+      "Newcastle-under-Lyme","Newport (Gwent)","Newport (IOW)","Newport Pagnell","Newtown","Newton Abbot",
+      "Northallerton","Northampton","Northwich","Norwich","Nottingham (Beeston)","Nottingham (Chilwell)",
+      "Nuneaton","Oban","Oldham","Orkney (Kirkwall)","Oxford","Paisley","Penzance","Perth","Peterborough",
+      "Peterhead","Pinner","Plymouth","Poole","Port Glasgow","Portadown","Portsmouth","Preston","Pwllheli",
+      "Reading","Redditch","Redhill (London)","Rhyl","Rochdale","Rotherham","Rugby","Ruislip","Salisbury",
+      "Scarborough","Scunthorpe","Sevenoaks","Sheffield (Handsworth)","Sheffield (Middlewood Road)","Shrewsbury",
+      "Skegness","Skipton","Slough","South Shields","Southall","Southampton (Forest Hills)","Southampton (Maybush)",
+      "Southend-on-Sea","Southport","Southwark (London)","Spalding","Speke (Liverpool)","St Albans","St Helens",
+      "Stirling","Stevenage","Stoke-on-Trent (Cobridge)","Stockport (Bredbury)","Stockton-on-Tees","Stornoway",
+      "Stranraer","Sunderland","Sutton Coldfield","Swansea","Swindon","Taunton","Tavistock","Telford","Thurso",
+      "Tilbury","Tonbridge","Torquay","Tottenham (London)","Truro","Tunbridge Wells","Uxbridge","Wakefield",
+      "Walton","Warrington","Warwick","Watford","Wellingborough","Welling (London)","Wembley","West Bromwich",
+      "West Didsbury (Manchester)","Weston-super-Mare","Wetherby","Wick","Widnes","Wigan","Wimbledon","Winchester",
+      "Wisbech","Woking","Wolverhampton","Worcester","Workington","Worksop","Worthing","Wrexham","Yeading (London)",
+      "Yeovil","York","Borehamwood (London)","Borehamwood","Barnet (London)","Elgin (Moray)","Borehamwood (Manor Way)"
+    ];
 
     const IGNORE = new Set([
       "spare","discover more","driving test routes","vehicle electronics","best smartphone",
@@ -609,8 +659,9 @@
     }
 
     BASE_CENTRES.forEach(addName);
-    EXTRA_RAW.forEach(addName);
+    ALL_CENTRES.forEach(addName);
 
+    /* a few common typos -> fixes */
     const fixes = {
       "aberystwyh": "Aberystwyth",
       "derby alverston": "Derby Alvaston",
