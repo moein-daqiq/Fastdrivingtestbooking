@@ -1006,10 +1006,11 @@
         }
       }
 
+      /* FIXED: robust centresArray with () and null-safety */
       function centresArray(){
         return Array.from(document.querySelectorAll('.centre-input'))
-          .map(i => i.value.trim())
-          .filter(Boolean);
+          .map((i) => (i && i.value ? i.value : '').trim())
+          .filter((v) => v);
       }
 
       function collectPayload() {
@@ -1215,8 +1216,8 @@
     const STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || '';
     const panel   = document.getElementById('stripePanel');
     const msgBox  = document.getElementById('stripeMsg');
-    const payBtn  = document.getElementById('stripePayBtn');
-    const confBtn = document.getElementById('stripeConfirmBtn');
+    const payBtn  = document.getElementById('stripePayBtn');   /* keep single declaration */
+    const confBtn = document.getElementById('stripeConfirmBtn');/* keep single declaration */
 
     let stripe, elements, paymentElement, lastClientSecret = '';
     let currentMethodType = 'card';
@@ -1384,8 +1385,7 @@
       }
     }
 
-    const payBtn  = document.getElementById('stripePayBtn');
-    const confBtn = document.getElementById('stripeConfirmBtn');
+    /* FIXED: no duplicate const declarations — reuse these variables */
     payBtn?.addEventListener('click', (e)=>{ e.preventDefault(); openStripePanel(); });
     confBtn?.addEventListener('click', (e)=>{ e.preventDefault(); confirmStripePayment(); });
 
