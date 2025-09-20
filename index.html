@@ -1008,7 +1008,7 @@
 
       function centresArray(){
         return Array.from(document.querySelectorAll('.centre-input'))
-          .map(i => i.value.trim())
+          .map i => i.value.trim()
           .filter(Boolean);
       }
 
@@ -1422,6 +1422,129 @@
       } else {
         clearBookingToggles();
       }
+    })();
+  </script>
+
+  <!-- ============ Live Chat Bot (Option C) ============ -->
+  <style>
+    #fdtf-chat-toggle{
+      position:fixed; right:16px; bottom:16px; z-index:9999;
+      width:56px; height:56px; border-radius:50%; border:none;
+      background:#2563eb; color:#fff; font-weight:800; cursor:pointer;
+      box-shadow:0 10px 24px rgba(0,0,0,.18);
+    }
+    #fdtf-chat-box{
+      position:fixed; right:16px; bottom:84px; z-index:9999;
+      width:320px; max-width:90vw; height:420px; display:none;
+      background:#fff; border:1px solid #e5e7eb; border-radius:12px;
+      box-shadow:0 16px 36px rgba(0,0,0,.18); overflow:hidden;
+      display:flex; flex-direction:column;
+    }
+    #fdtf-chat-header{
+      background:#1e40af; color:#fff; padding:10px 12px; font-weight:700;
+      display:flex; align-items:center; justify-content:space-between;
+    }
+    #fdtf-chat-messages{
+      flex:1; padding:10px; overflow:auto; background:#f8fafc;
+    }
+    .bubble{max-width:78%; margin:6px 0; padding:8px 10px; border-radius:10px; line-height:1.35; font-size:14px;}
+    .me{background:#dbeafe; margin-left:auto;}
+    .bot{background:#e5e7eb; color:#0f172a}
+    #fdtf-chat-input{display:flex; gap:6px; padding:10px; border-top:1px solid #e5e7eb; background:#fff}
+    #fdtf-chat-input input{flex:1; height:36px; border:1px solid #e5e7eb; border-radius:8px; padding:0 10px}
+    #fdtf-chat-input button{height:36px; background:#2563eb; color:#fff; border:none; border-radius:8px; padding:0 12px; font-weight:700; cursor:pointer}
+    .suggested{display:flex; flex-wrap:wrap; gap:6px; margin-top:6px}
+    .chip{background:#eef2ff; color:#1e40af; border:1px solid #c7d2fe; border-radius:999px; padding:4px 8px; font-size:12px; cursor:pointer}
+  </style>
+  <button id="fdtf-chat-toggle" aria-label="Chat">💬</button>
+  <div id="fdtf-chat-box" role="dialog" aria-label="Chat with FastDrivingTestFinder">
+    <div id="fdtf-chat-header">
+      <span>Need help?</span>
+      <button id="fdtf-chat-close" style="background:transparent;border:0;color:#fff;font-weight:900;cursor:pointer">✕</button>
+    </div>
+    <div id="fdtf-chat-messages"></div>
+    <div id="fdtf-chat-input">
+      <input id="fdtf-chat-text" type="text" placeholder="Type a message…" />
+      <button id="fdtf-chat-send">Send</button>
+    </div>
+  </div>
+  <script>
+    (function(){
+      const toggle = document.getElementById('fdtf-chat-toggle');
+      const box    = document.getElementById('fdtf-chat-box');
+      const closeB = document.getElementById('fdtf-chat-close');
+      const msgs   = document.getElementById('fdtf-chat-messages');
+      const input  = document.getElementById('fdtf-chat-text');
+      const send   = document.getElementById('fdtf-chat-send');
+
+      function sid(){
+        let v = localStorage.getItem('chat_session_id');
+        if(!v){ v = Math.random().toString(36).slice(2); localStorage.setItem('chat_session_id', v); }
+        return v;
+      }
+      function userName(){
+        return (document.getElementById('surname')?.value || '').trim() || null;
+      }
+
+      function scrollBottom(){ msgs.scrollTop = msgs.scrollHeight; }
+      function addBubble(text, who='bot'){
+        const b = document.createElement('div');
+        b.className = 'bubble ' + (who==='me'?'me':'bot');
+        b.textContent = text;
+        msgs.appendChild(b);
+        scrollBottom();
+      }
+      function addSuggested(list){
+        if(!list || !list.length) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'suggested';
+        list.forEach(t=>{
+          const chip = document.createElement('span');
+          chip.className = 'chip'; chip.textContent = t;
+          chip.onclick = ()=>{ sendText(t); };
+          wrap.appendChild(chip);
+        });
+        msgs.appendChild(wrap);
+        scrollBottom();
+      }
+
+      async function askBot(message){
+        try{
+          const r = await fetch(`${API_BASE}/chat/message`, {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ session_id: sid(), message, user_name: userName() })
+          });
+          const j = await r.json();
+          if(!r.ok) throw new Error(j?.detail || 'Chat error');
+          addBubble(j.reply || 'Okay.');
+          if (j.follow_up){ addBubble(j.follow_up); }
+          if (Array.isArray(j.suggested)) addSuggested(j.suggested);
+        }catch(e){
+          addBubble('Sorry, something went wrong. Please try again.');
+        }
+      }
+
+      function sendText(t){
+        const m = (t ?? input.value || '').trim();
+        if(!m) return;
+        addBubble(m, 'me');
+        input.value = '';
+        askBot(m);
+      }
+
+      toggle.onclick = ()=>{
+        const visible = box.style.display === 'flex';
+        box.style.display = visible ? 'none' : 'flex';
+        if(!visible && msgs.childElementCount===0){
+          addBubble('Hi! I can help with swaps, new bookings, and booking status. Ask me anything or try a suggestion below.');
+          addSuggested(['Can you swap my test for me?', 'Can you book a new test?', 'What’s the status of booking 1234?']);
+        }
+        if(!visible) setTimeout(()=>input.focus(), 120);
+      };
+      closeB.onclick = ()=>{ box.style.display = 'none'; };
+      send.onclick = ()=> sendText();
+      input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') sendText(); });
     })();
   </script>
 </body>
