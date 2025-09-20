@@ -1267,35 +1267,92 @@
         showMsg('Total is not valid.');
         return false;
       }
+<script>
+  // ====== SELF-HEALING CREATE-INTENT (drop-in replacement) ======
 
-      let searchId;
-      try { searchId = await ensurePreSearch(); }
-      catch (e) { console.error(e); return false; }
-
-      try{
-        const r = await fetch(`${API_BASE}/pay/create-intent`, {
-          method:'POST',
-          headers:{ 'Content-Type':'application/json' },
-          body: JSON.stringify({
-            search_id: Number(searchId),
-            amount: Math.round(pounds * 100),
-            currency: 'gbp',
-            description: `Search #${searchId}`,
-            metadata: { search_id: String(searchId) } // <-- include metadata.search_id
-          })
-        });
-        const j = await r.json();
-        if(!r.ok || !j?.clientSecret){
-          throw new Error(j?.detail || j?.error || 'Failed to create payment intent');
-        }
-        lastClientSecret = j.clientSecret;
-        return true;
-      }catch(err){
-        console.error(err);
-        showMsg('Stripe error: ' + (err?.message || err));
-        return false;
-      }
+  // If your file already has "ensurePreSearch()", keep using it:
+  async function ensureSearchId(){
+    // reuse your existing helper (preferred)
+    if (typeof window.ensurePreSearch === 'function') {
+      return await window.ensurePreSearch();
     }
+
+    // ---- Minimal fallback if ensurePreSearch() is missing ----
+    // It creates a search using a tiny payload (email + first centre).
+    // If you already have ensurePreSearch() above in your file, delete this fallback.
+    /*
+    async function ensurePreSearchFallback(){
+      const email = (document.getElementById('email')?.value||'').trim();
+      const centre = (document.querySelector('.centre-input')?.value||'').trim();
+      if (!email || !centre) throw new Error('Enter email and at least one test centre first.');
+      const r = await fetch(`${API_BASE}/search`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ email, centres:[centre], booking_type:'new' })
+      });
+      const j = await r.json();
+      if (!r.ok || !(j?.search_id)) throw new Error(j?.detail || 'Failed to create search');
+      localStorage.setItem('dvsa_last_search_id', String(j.search_id));
+      return j.search_id;
+    }
+    return await ensurePreSearchFallback();
+    */
+  }
+
+  // Replace your old createIntent / createIntentIfNeeded with this:
+  async function createIntent(){
+    // 1) read amount (£xx.yy) from your total line
+    const totalTxt = (document.getElementById('totalLine')?.textContent || '');
+    const m = totalTxt.match(/£([\d.]+)/);
+    const pounds = m ? parseFloat(m[1]) : 0;
+    if (!Number.isFinite(pounds) || pounds <= 0){
+      toast('Total is invalid.', false);
+      return false;
+    }
+
+    // 2) get (or create) a valid search_id — first try whatever is stored,
+    //    and if the server says “not found”, we’ll auto-recreate below.
+    let searchId = await ensureSearchId();
+
+    // helper to call /pay/create-intent
+    async function callCreateIntent(id){
+      return await fetch(`${API_BASE}/pay/create-intent`, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({
+          search_id: Number(id),
+          amount: Math.round(pounds * 100),
+          currency: 'gbp',
+          description: `Search #${id}`,
+          metadata: { search_id: String(id) }
+        })
+      });
+    }
+
+    // 3) first attempt with the current id
+    let r = await callCreateIntent(searchId);
+
+    // 4) if server says the id no longer exists, clear & recreate ONCE (self-heal)
+    if (r.status === 404) {
+      localStorage.removeItem('dvsa_last_search_id');
+      searchId = await ensureSearchId();
+      r = await callCreateIntent(searchId);
+    }
+
+    // 5) handle result
+    const j = await r.json().catch(()=>null);
+    if (!r.ok || !j?.clientSecret){
+      toast(j?.detail || j?.error || 'Stripe: failed to create payment intent', false);
+      return false;
+    }
+
+    // save client secret for Stripe elements
+    window.lastClientSecret = j.clientSecret;
+    return true;
+  }
+
+  // ====== end of self-healing block ======
+</script>
+
 
     async function openStripePanel(){
       panel.style.display = 'block';
