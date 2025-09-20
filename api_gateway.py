@@ -547,6 +547,31 @@ def _derive_flags(row: sqlite3.Row):
 
     return reached, last_centre, captcha
 
+# NEW: protected read-one endpoint for admin (JSON details for the {} link)
+@app.get("/api/admin/search/{search_id}")
+async def admin_get_search(search_id: int, request: Request):
+    require_admin(request)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM searches WHERE id = ?", (search_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="search not found")
+    return dict(row)
+
+# NEW: protected clear endpoint (wipes admin data)
+@app.post("/api/admin/clear")
+async def admin_clear(request: Request):
+    require_admin(request)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM searches")
+    cur.execute("DELETE FROM stripe_events")
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
 @app.get("/api/admin", response_class=HTMLResponse)
 async def admin(request: Request, status: Optional[str] = Query(None)):
     require_admin(request)
@@ -565,10 +590,28 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
     def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
 
     statuses = ["new","queued","searching","found","booked","failed"]
-    # GOOD
     pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
 
-    clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
+    # Clear button uses fetch -> POST /api/admin/clear, then reloads
+    clear = """
+      <button id="btnClear" style="margin-left:8px;padding:4px 8px;border:1px solid #ddd;border-radius:6px;background:#fff;cursor:pointer">
+        Clear
+      </button>
+      <script>
+        (function(){
+          var b = document.getElementById('btnClear');
+          if(!b) return;
+          b.addEventListener('click', async function(){
+            if(!confirm('This will permanently delete all admin data. Continue?')) return;
+            try{
+              const r = await fetch('/api/admin/clear', {method:'POST'});
+              if(!r.ok){ alert('Clear failed'); return; }
+              location.href = '/api/admin';
+            }catch(e){ alert('Clear failed'); }
+          });
+        })();
+      </script>
+    """
 
     rows_html = []
     for r in rows:
@@ -591,16 +634,14 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             td(r["phone"] or "") +
             td(r["email"] or "") +
             td(centres) +
-            td(f'<code style="font-size:12px">{opts}</code>') +
+            # clickable {} that opens JSON for this row
+            td(f'<a href="/api/admin/search/{r["id"]}" target="_blank" rel="noopener">{{}}</a> <code style="font-size:12px">{opts}</code>') +
             td(r["last_event"] or "") +
             td(r["paid"]) +
             td(r["payment_intent_id"] or "") +
-
-            # NEW derived columns
             td(reached_html) +
             td(last_centre or "—") +
             td(captcha_html) +
-
             td(r["created_at"] or "") +
             td(r["updated_at"] or "") +
             "</tr>"
