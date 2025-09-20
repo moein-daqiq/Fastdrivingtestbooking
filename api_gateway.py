@@ -1,11 +1,13 @@
 import os
 import json
 import sqlite3
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 import stripe
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -17,6 +19,15 @@ DB_FILE = os.environ.get("SEARCHES_DB", "searches.db")
 ADMIN_USER = os.environ.get("ADMIN_BASIC_AUTH_USER")
 ADMIN_PASS = os.environ.get("ADMIN_BASIC_AUTH_PASS")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
+
+# SMTP (for order confirmation email)
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))     # 587 STARTTLS, 465 SSL
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER or "")
+SMTP_TLS  = os.environ.get("SMTP_TLS", "true").lower() == "true"
+SMTP_REPLY_TO = os.environ.get("SMTP_REPLY_TO", "")
 
 stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
@@ -180,6 +191,74 @@ def _verify_worker(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=403, detail="Invalid token")
     return True
 
+# ---------- EMAIL ----------
+def _send_order_email(search_id: int, to_email: str):
+    """
+    Sends a simple order confirmation email.
+    Uses env: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM, SMTP_TLS, SMTP_REPLY_TO
+    Writes success/failure into searches.last_event (no schema change).
+    """
+    if not (SMTP_HOST and SMTP_FROM and to_email):
+        # Not configured — don't mark this as an error; just skip silently.
+        return
+
+    subject = f"Order #{search_id} received — FastDrivingTestFinder"
+    plain = (
+        f"Dear customer,\n\n"
+        f"Thank you very much for your order #{search_id}.\n"
+        f"We're now searching for an earlier test date in your chosen centres.\n"
+        f"We'll notify you by WhatsApp and email as soon as we find a suitable slot.\n\n"
+        f"Kind regards,\nFastDrivingTestFinder"
+    )
+    html = f"""
+      <div style="font-family:Segoe UI,Helvetica,Arial,sans-serif;font-size:15px;color:#0f172a">
+        <p>Dear customer,</p>
+        <p>Thank you very much for your order <strong>#{search_id}</strong>.</p>
+        <p>We’re now searching for an earlier test date in your chosen centres. We’ll notify you by WhatsApp and email as soon as we find a suitable slot.</p>
+        <p>Stay tuned!</p>
+        <p>Kind regards,<br/>FastDrivingTestFinder</p>
+      </div>
+    """.strip()
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email
+    if SMTP_REPLY_TO:
+        msg["Reply-To"] = SMTP_REPLY_TO
+    msg.set_content(plain)
+    msg.add_alternative(html, subtype="html")
+
+    try:
+        if SMTP_TLS and SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as s:
+                if SMTP_USER and SMTP_PASS:
+                    s.login(SMTP_USER, SMTP_PASS)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as s:
+                if SMTP_TLS:
+                    s.starttls()
+                if SMTP_USER and SMTP_PASS:
+                    s.login(SMTP_USER, SMTP_PASS)
+                s.send_message(msg)
+
+        # mark success
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE searches SET last_event=?, updated_at=? WHERE id=?",
+                    ("email_confirmation_sent", now_iso(), search_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        # mark failure in last_event (non-fatal)
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE searches SET last_event=?, updated_at=? WHERE id=?",
+                    (f"email_send_failed: {e}", now_iso(), search_id))
+        conn.commit()
+        conn.close()
+
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
@@ -187,7 +266,7 @@ def health():
 
 # ---------- ROUTES ----------
 @app.post("/api/search")
-async def create_search(payload: SearchIn):
+async def create_search(payload: SearchIn, background: BackgroundTasks):
     centres_list = _parse_centres(payload.centres)
 
     conn = get_conn()
@@ -213,6 +292,11 @@ async def create_search(payload: SearchIn):
     search_id = cur.lastrowid
     conn.commit()
     conn.close()
+
+    # send email in background if we have an email
+    if payload.email:
+        background.add_task(_send_order_email, search_id, payload.email)
+
     return {"ok": True, "search_id": search_id, "status": "new"}
 
 # Explicit OPTIONS route (some proxies require it even with CORSMiddleware)
