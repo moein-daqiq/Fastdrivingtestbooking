@@ -1008,7 +1008,7 @@
 
       function centresArray(){
         return Array.from(document.querySelectorAll('.centre-input'))
-          .map i => i.value.trim()
+          .map(i => i.value.trim())
           .filter(Boolean);
       }
 
@@ -1359,6 +1359,7 @@
         showMsg('Payment form is not ready yet.');
         return;
       }
+      const confBtn = document.getElementById('stripeConfirmBtn');
       confBtn.disabled = true;
 
       const returnUrl = window.location.origin + window.location.pathname;
@@ -1383,6 +1384,8 @@
       }
     }
 
+    const payBtn  = document.getElementById('stripePayBtn');
+    const confBtn = document.getElementById('stripeConfirmBtn');
     payBtn?.addEventListener('click', (e)=>{ e.preventDefault(); openStripePanel(); });
     confBtn?.addEventListener('click', (e)=>{ e.preventDefault(); confirmStripePayment(); });
 
@@ -1391,8 +1394,8 @@
       const clientSecret = params.get('payment_intent_client_secret');
       if (clientSecret && STRIPE_PUBLISHABLE_KEY){
         try{
-          stripe = stripe || Stripe(STRIPE_PUBLISHABLE_KEY);
-          stripe.retrievePaymentIntent(clientSecret).then(({paymentIntent})=>{
+          const stripeInstance = Stripe(STRIPE_PUBLISHABLE_KEY);
+          stripeInstance.retrievePaymentIntent(clientSecret).then(({paymentIntent})=>{
             if (!paymentIntent) return;
             if (paymentIntent.status === 'succeeded'){
               showMsg('Payment successful.', true);
