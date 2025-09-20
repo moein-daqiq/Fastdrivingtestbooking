@@ -524,7 +524,7 @@
       function markValidity(input, isValid, message){
         const label = findLabelFor(input);
         const hasVal = (input.value || '').trim() !== '';
-        input.classList.toggle('error,', !isValid && hasVal);
+        input.classList.toggle('error', !isValid && hasVal);
         input.setAttribute('aria-invalid', (!isValid && hasVal) ? 'true' : 'false');
         if(label){
           if(!isValid && hasVal){
@@ -579,7 +579,50 @@
       "West Didsbury (Manchester)"
     ];
 
-    const EXTRA_RAW = [/* … (unchanged long list) … */"York"];
+    const EXTRA_RAW = [
+      "Aberdeen Cove","Aberdeen North","Aberfeldy","Abergavenny","Aberystwyh","Airdrie","Alness","Alnwick","Arbroath",
+      "Ashfield","Ashford Kent","Ashford Middlesex","Atherton Manchester","Aylesbury","Ayr","Bala","Ballachulish","Ballater",
+      "Banbury","Banff","Bangor","Barking","Barnet","Barnsley","Barnstaple","Barrow In Furness","Barry","Basildon","Basingstoke",
+      "Bedford","Berwick Upon Tweed","Birmingham Garretts Green","Birmingham Kings Heath","Birmingham Kingstanding",
+      "Birmingham Shirley","Birmingham South Yardley","Birmingham Sutton Coldfield","Bishop Stortford","Blackburn and Darwen",
+      "Blackpool","Bletchley","Blyth","Bodmin","Bolton Manchester","Borehamwood","Boston","Bournemouth/Poole","Bradford Thornbury",
+      "Bradford Heaton","Brecon","Bredbury Stockport","Brentwood","Bridgend","Bridlington","Bristol Avonmouth","Bristol Brislington",
+      "Bristol Kingswood","Bristol Southmead","Buckie","Burgess Hill","Burton on Trent","Bury","Bury St Edmunds","Buxton",
+      "Callander","Camborne","Cambridge","Canterbury","Cardiff Lianishen","Cardigan","Cardington (See Bedford)","Carlisle",
+      "Carmarthen","Castle Douglas","Cheadle Hulme","Chelmsford","Cheltenham","Chertsey","Chester","Chesterfield","Chichester",
+      "Chingford","Chippenham","Chorley","Clacton on Sea","Colchester","Coventry","Crawley","Crewe","Crieff","Croydon (See Mitcham)",
+      "Cumnock","Darlington","Derby Alverston","Doncaster","Dorchester","Dudley","Dumfries","Dumbarton","Dundee","Dunfermline",
+      "Dunoon","Duns","Durham","Eastbourne","Edinburgh Currie","Edinburgh Musselburgh","Elgin","Elswick (See Gateshead)",
+      "Exeter","Farnborough","Featherstone","Folkestone","Forfar","Fort William","Fraserburgh","Gairloch","Galashiels","Gateshead",
+      "Gillingham","Girvan","Glasgow Anniesland","Glasgow Baillieston","Glasgow Bishopbriggs","Glasgow Shieldhall","Gloucester",
+      "Golspie","Gosforth","Grangemouth","Grantham Somerby","Greenock","Grimsby","Guildford","Haddington","Halifax","Hamilton",
+      "Hartlepool","Hastings Ore","Hawick Burnfoot","Heckmondwike","Hemel Hempstead","Hereford","Herne Bay","Hexham","Heysham",
+      "High Wycombe","Hinckley","Huddersfield","Hull","Huntly","Inverness","Inverurie","Ipswich","Irvine","Islay Island",
+      "Isle of Arran Brodick","Isle of Mull","Isle of Skye Broadford","Isle of Skye Portree","Isle of Wight Newport","Kelso",
+      "Kendal","Kettering","Kings Lynn","Kingussie","Kirkcaldy","Knaresborough","Kyle of Lochalsh","Lairg","Lampeter","Lanark",
+      "Lancing / Worthing","Launceston","Lee on the Solent","Leeds Harehills","Leeds Horsforth","Leicester Cannock St",
+      "Leicester Wigston","Leighton Buzzard","Lerwick","Letchworth","Lichfield","Lincoln","Liverpool Garston Speke",
+      "Liverpool Norris Green","Liverpool St Helens","Livingston","Llandrindod Wells","Llanelli","Llantrisant","London Bromley",
+      "London Belvedere","London Enfield","London Erith","London Goodmayes","London Greenford","London Hayes/Yeading",
+      "London Hendon","London Hither Green","London Hornchurch","London Isleworth","London Loughton","London Mill Hill",
+      "London Morden","London Pinner","London Sidcup","London Southall","London Sutton","London Tolworth","London Tottenham",
+      "London Uxbridge","London Wanstead","London West Wickham","London Wood Green","London Yeading","Loughborough","Louth",
+      "Lower Gornal (Dudley)","Lowestoft","Ludlow","Luton","Macclesfield","Maidstone","Malton","Manchester Cheetham",
+      "Manchester Failsworth","Manchester Hyde","Manchester/Oldham Chadderton","Manchester Sale","Manchester Salford",
+      "Manchester West Didsbury","Melton Mowbray","Merthyr Tydfil","Middlesbrough","Mitcham","Monmouth","Montrose","Nelson",
+      "Newbury / Greenham","Newcastle under Lyme","Newport Gwent","Newton Abbot","Newton Stewart","Newtown","Northallerton",
+      "Northampton","Northwich","Norwich Peachman Way","Norwich Jupiter Rd","Nottingham Chilwell","Nottingham Clifton",
+      "Nottingham Colwick","Nottingham Watnall","Nuneaton","Oban","Oldham Chadderton","Orkney","Oswestry","Oxford Cowley",
+      "Paisley","Peebles","Pembroke Dock","Penzance","Perth","Peterborough","Peterhead","Pitlochry","Plymouth","Pontefract",
+      "Pontypridd","Poole","Portsmouth","Preston","Pwllheli","Reading","Redditch","Reigate/Redhill","Rhyl","Rochdale",
+      "Rotherham","Rothesay","Rugby","Salisbury","Scarborough","Scunthorpe","Sevenoaks","Sheffield Hansworth",
+      "Sheffield Middlewood","Shrewsbury","Skegness","Skipton","Slough","South Shields","Southampton Forest Hills",
+      "Southampton Maybush","Southend on Sea","Southport","St Albans","Stafford","Steeton Keighley","Stevenage","Stirling",
+      "Stoke on Trent Cobridge","Stornoway","Stranraer","Sunderland","Swansea","Swindon","Taunton","Telford","Thurso",
+      "Tilbury","Trowbridge","Tunbridge Wells","Upton","Wakefield","Wallasey","Warrington","Warwick","Watford","Wednesbury",
+      "Wellingborough","Westbury","Weston Super Mare","Whitby","Whitchurch","Wick","Widnes","Winchester","Wolverhampton",
+      "Worcester","Workington","Worksop","Worthing / Lancing","Wrexham","Yeovil","York"
+    ];
 
     const IGNORE = new Set([
       "spare","discover more","driving test routes","vehicle electronics","best smartphone",
@@ -587,7 +630,9 @@
     ]);
 
     function stripParens(s){ return s.replace(/\((?:.|\n)*?\)/g, '').trim(); }
-    function stripLondonPrefix(s){ return s.replace(/^london\s+/i,'').trim(); }
+    function stripLondonPrefix(s){
+      return s.replace(/^london\s+/i,'').trim();
+    }
     function expandSlash(name){
       if (!name) return [];
       return name.split(/\s*\/\s*/).map(s=>s.trim()).filter(Boolean);
@@ -601,6 +646,7 @@
       (parts.length?parts:[noParens]).forEach(p=>{
         let canon = p.replace(/\s+/g,' ').trim();
         if (!canon) return;
+        // collapse "London X" -> "X" for duplicates (e.g., London Pinner/Hendon)
         const collapsed = stripLondonPrefix(canon);
         const key = collapsed.toLowerCase();
         if (IGNORE.has(key)) return;
@@ -611,13 +657,14 @@
     BASE_CENTRES.forEach(addName);
     EXTRA_RAW.forEach(addName);
 
+    // tiny typo fixes
     const fixes = {
       "aberystwyh": "Aberystwyth",
       "derby alverston": "Derby Alvaston",
       "sheffield hansworth": "Sheffield Handsworth",
       "cardiff lianishen": "Cardiff Llanishen"
     };
-    for (const [k] of Array.from(map.entries())){
+    for (const [k,v] of Array.from(map.entries())){
       const fk = fixes[k];
       if (fk){ map.set(fk.toLowerCase(), fk); map.delete(k); }
     }
@@ -780,8 +827,8 @@
     function normalizeCentreName(v){
       return (v||'')
         .toLowerCase()
-        .replace(/\s*\([^)]*\)/g,'')
-        .replace(/^london\s+/,'')
+        .replace(/\s*\([^)]*\)/g,'')  // remove parentheticals
+        .replace(/^london\s+/,'')     // strip leading "london "
         .replace(/\s+/g,' ')
         .trim();
     }
@@ -959,11 +1006,10 @@
         }
       }
 
-      /* FIXED: robust centresArray with () and null-safety */
       function centresArray(){
         return Array.from(document.querySelectorAll('.centre-input'))
-          .map((i) => (i && i.value ? i.value : '').trim())
-          .filter((v) => v);
+          .map(i => i.value.trim())
+          .filter(Boolean);
       }
 
       function collectPayload() {
@@ -1082,7 +1128,9 @@
         }
       }
 
+      /* NEW: Full UI reset to placeholders (runs after successful submit) */
       function resetAll(){
+        // clear text/number/date inputs
         document.querySelectorAll('input').forEach(inp=>{
           if (inp.type === 'number'){
             if (inp.id === 'timeFrom') inp.value = 7;
@@ -1098,13 +1146,16 @@
           inp.removeAttribute('aria-invalid');
         });
 
+        // reset specific placeholders
         const phone = document.getElementById('phoneRaw');
         if (phone) phone.value = '+44';
 
+        // unselect yes/no choices
         document.querySelectorAll('.yesno button.selected').forEach(b=>{
           b.classList.remove('selected'); b.setAttribute('aria-pressed','false');
         });
 
+        // reset totals, payment, submit
         const totalLine = document.getElementById('totalLine');
         if (totalLine) totalLine.textContent = 'Total: £0.00';
         const pill = document.getElementById('payStatus');
@@ -1112,19 +1163,23 @@
         const submitBtn = document.getElementById('submitBtn');
         if (submitBtn){ submitBtn.disabled = true; submitBtn.classList.remove('enabled'); }
 
+        // clear search id and hide stop button
         localStorage.removeItem('dvsa_last_search_id');
         const stopBtn = document.getElementById('stopSearchBtn'); if (stopBtn) stopBtn.remove();
 
+        // unselect booking toggles
         ['btnBook','btnSwap'].forEach(id=>{
           const el=document.getElementById(id);
           if(el){ el.classList.remove('selected'); el.setAttribute('aria-pressed','false'); }
         });
 
+        // clear multi-date pickers text
         ['unavailInput','instrInput'].forEach(id=>{
           const el = document.getElementById(id);
           if (el) el.value = '';
         });
 
+        // collapse/hide stripe panel and unmount element if present
         const panel = document.getElementById('stripePanel');
         if (panel) panel.style.display = 'none';
         if (window.__stripeUnmount) { try{ window.__stripeUnmount(); }catch(_){} }
@@ -1132,8 +1187,10 @@
         window.scrollTo({top:0,behavior:'smooth'});
       }
 
+      // expose reset for debugging if needed
       window.resetAll = resetAll;
-      window.ensurePreSearch = ensurePreSearch;
+
+      window.ensurePreSearch = ensurePreSearch; /* expose for Stripe block */
 
       window.addEventListener('DOMContentLoaded', async () => {
         await healthCheck();
@@ -1158,8 +1215,8 @@
     const STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || '';
     const panel   = document.getElementById('stripePanel');
     const msgBox  = document.getElementById('stripeMsg');
-    const payBtn  = document.getElementById('stripePayBtn');   /* single declaration */
-    const confBtn = document.getElementById('stripeConfirmBtn');/* single declaration */
+    const payBtn  = document.getElementById('stripePayBtn');
+    const confBtn = document.getElementById('stripeConfirmBtn');
 
     let stripe, elements, paymentElement, lastClientSecret = '';
     let currentMethodType = 'card';
@@ -1224,7 +1281,7 @@
             amount: Math.round(pounds * 100),
             currency: 'gbp',
             description: `Search #${searchId}`,
-            metadata: { search_id: String(searchId) }
+            metadata: { search_id: String(searchId) } // <-- include metadata.search_id
           })
         });
         const j = await r.json();
@@ -1258,6 +1315,7 @@
         paymentElement = elements.create('payment');
         paymentElement.mount('#payment-element');
 
+        // allow unmount by resetAll()
         window.__stripeUnmount = () => { try{ paymentElement.unmount(); }catch(_){} };
 
         paymentElement.on('change', async (ev) => {
@@ -1301,7 +1359,6 @@
         showMsg('Payment form is not ready yet.');
         return;
       }
-      const confBtn = document.getElementById('stripeConfirmBtn');
       confBtn.disabled = true;
 
       const returnUrl = window.location.origin + window.location.pathname;
@@ -1326,7 +1383,6 @@
       }
     }
 
-    /* FIXED: no duplicate const declarations — reuse these variables */
     payBtn?.addEventListener('click', (e)=>{ e.preventDefault(); openStripePanel(); });
     confBtn?.addEventListener('click', (e)=>{ e.preventDefault(); confirmStripePayment(); });
 
@@ -1335,8 +1391,8 @@
       const clientSecret = params.get('payment_intent_client_secret');
       if (clientSecret && STRIPE_PUBLISHABLE_KEY){
         try{
-          const stripeInstance = Stripe(STRIPE_PUBLISHABLE_KEY);
-          stripeInstance.retrievePaymentIntent(clientSecret).then(({paymentIntent})=>{
+          stripe = stripe || Stripe(STRIPE_PUBLISHABLE_KEY);
+          stripe.retrievePaymentIntent(clientSecret).then(({paymentIntent})=>{
             if (!paymentIntent) return;
             if (paymentIntent.status === 'succeeded'){
               showMsg('Payment successful.', true);
@@ -1366,129 +1422,6 @@
       } else {
         clearBookingToggles();
       }
-    })();
-  </script>
-
-  <!-- ============ Live Chat Bot (Option C) ============ -->
-  <style>
-    #fdtf-chat-toggle{
-      position:fixed; right:16px; bottom:16px; z-index:9999;
-      width:56px; height:56px; border-radius:50%; border:none;
-      background:#2563eb; color:#fff; font-weight:800; cursor:pointer;
-      box-shadow:0 10px 24px rgba(0,0,0,.18);
-    }
-    #fdtf-chat-box{
-      position:fixed; right:16px; bottom:84px; z-index:9999;
-      width:320px; max-width:90vw; height:420px; display:none;
-      background:#fff; border:1px solid #e5e7eb; border-radius:12px;
-      box-shadow:0 16px 36px rgba(0,0,0,.18); overflow:hidden;
-      flex-direction:column;
-    }
-    #fdtf-chat-header{
-      background:#1e40af; color:#fff; padding:10px 12px; font-weight:700;
-      display:flex; align-items:center; justify-content:space-between;
-    }
-    #fdtf-chat-messages{
-      flex:1; padding:10px; overflow:auto; background:#f8fafc;
-    }
-    .bubble{max-width:78%; margin:6px 0; padding:8px 10px; border-radius:10px; line-height:1.35; font-size:14px;}
-    .me{background:#dbeafe; margin-left:auto;}
-    .bot{background:#e5e7eb; color:#0f172a}
-    #fdtf-chat-input{display:flex; gap:6px; padding:10px; border-top:1px solid #e5e7eb; background:#fff}
-    #fdtf-chat-input input{flex:1; height:36px; border:1px solid #e5e7eb; border-radius:8px; padding:0 10px}
-    #fdtf-chat-input button{height:36px; background:#2563eb; color:#fff; border:none; border-radius:8px; padding:0 12px; font-weight:700; cursor:pointer}
-    .suggested{display:flex; flex-wrap:wrap; gap:6px; margin-top:6px}
-    .chip{background:#eef2ff; color:#1e40af; border:1px solid #c7d2fe; border-radius:999px; padding:4px 8px; font-size:12px; cursor:pointer}
-  </style>
-  <button id="fdtf-chat-toggle" aria-label="Chat">💬</button>
-  <div id="fdtf-chat-box" role="dialog" aria-label="Chat with FastDrivingTestFinder">
-    <div id="fdtf-chat-header">
-      <span>Need help?</span>
-      <button id="fdtf-chat-close" style="background:transparent;border:0;color:#fff;font-weight:900;cursor:pointer">✕</button>
-    </div>
-    <div id="fdtf-chat-messages"></div>
-    <div id="fdtf-chat-input">
-      <input id="fdtf-chat-text" type="text" placeholder="Type a message…" />
-      <button id="fdtf-chat-send">Send</button>
-    </div>
-  </div>
-  <script>
-    (function(){
-      const toggle = document.getElementById('fdtf-chat-toggle');
-      const box    = document.getElementById('fdtf-chat-box');
-      const closeB = document.getElementById('fdtf-chat-close');
-      const msgs   = document.getElementById('fdtf-chat-messages');
-      const input  = document.getElementById('fdtf-chat-text');
-      const send   = document.getElementById('fdtf-chat-send');
-
-      function sid(){
-        let v = localStorage.getItem('chat_session_id');
-        if(!v){ v = Math.random().toString(36).slice(2); localStorage.setItem('chat_session_id', v); }
-        return v;
-      }
-      function userName(){
-        return (document.getElementById('surname')?.value || '').trim() || null;
-      }
-
-      function scrollBottom(){ msgs.scrollTop = msgs.scrollHeight; }
-      function addBubble(text, who='bot'){
-        const b = document.createElement('div');
-        b.className = 'bubble ' + (who==='me'?'me':'bot');
-        b.textContent = text;
-        msgs.appendChild(b);
-        scrollBottom();
-      }
-      function addSuggested(list){
-        if(!list || !list.length) return;
-        const wrap = document.createElement('div');
-        wrap.className = 'suggested';
-        list.forEach(t=>{
-          const chip = document.createElement('span');
-          chip.className = 'chip'; chip.textContent = t;
-          chip.onclick = ()=>{ sendText(t); };
-          wrap.appendChild(chip);
-        });
-        msgs.appendChild(wrap);
-        scrollBottom();
-      }
-
-      async function askBot(message){
-        try{
-          const r = await fetch(`${API_BASE}/chat/message`, {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ session_id: sid(), message, user_name: userName() })
-          });
-          const j = await r.json();
-          if(!r.ok) throw new Error(j?.detail || 'Chat error');
-          addBubble(j.reply || 'Okay.');
-          if (j.follow_up){ addBubble(j.follow_up); }
-          if (Array.isArray(j.suggested)) addSuggested(j.suggested);
-        }catch(e){
-          addBubble('Sorry, something went wrong. Please try again.');
-        }
-      }
-
-      function sendText(t){
-        const m = (t ?? input.value || '').trim();
-        if(!m) return;
-        addBubble(m, 'me');
-        input.value = '';
-        askBot(m);
-      }
-
-      toggle.onclick = ()=>{
-        const visible = box.style.display === 'flex';
-        box.style.display = visible ? 'none' : 'flex';
-        if(!visible && msgs.childElementCount===0){
-          addBubble('Hi! I can help with swaps, new bookings, and booking status. Ask me anything or try a suggestion below.');
-          addSuggested(['Can you swap my test for me?', 'Can you book a new test?', 'What’s the status of booking 1234?']);
-        }
-        if(!visible) setTimeout(()=>input.focus(), 120);
-      };
-      closeB.onclick = ()=>{ box.style.display = 'none'; };
-      send.onclick = ()=> sendText();
-      input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') sendText(); });
     })();
   </script>
 </body>
