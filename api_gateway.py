@@ -1,13 +1,11 @@
 import os
 import json
 import sqlite3
-import smtplib
-from email.message import EmailMessage
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 import stripe
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, BackgroundTasks
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -20,33 +18,19 @@ ADMIN_USER = os.environ.get("ADMIN_BASIC_AUTH_USER")
 ADMIN_PASS = os.environ.get("ADMIN_BASIC_AUTH_PASS")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 
-# SMTP (for order confirmation email)
-SMTP_HOST = os.environ.get("SMTP_HOST", "")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))     # 587 STARTTLS, 465 SSL
-SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASS = os.environ.get("SMTP_PASS", "")
-SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER or "")
-SMTP_TLS  = os.environ.get("SMTP_TLS", "true").lower() == "true"
-SMTP_REPLY_TO = os.environ.get("SMTP_REPLY_TO", "")
-
 stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
 app = FastAPI(title="FastDrivingTestFinder API", version="1.3.1")
 
-# === FIXED CORS: explicit origins (works reliably behind proxies/CDNs) ===
+# CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://fastdrivingtestfinder.co.uk",
-        "https://www.fastdrivingtestfinder.co.uk",
-    ],
+    allow_origin_regex=r"^https://([a-z0-9-]+\.)?fastdrivingtestfinder\.co\.uk$",
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
-    max_age=3600,
 )
 
 # ---------- DB ----------
@@ -196,155 +180,6 @@ def _verify_worker(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=403, detail="Invalid token")
     return True
 
-# ---------- EMAIL ----------
-def _send_order_email(search_id: int, to_email: str):
-    if not (SMTP_HOST and SMTP_FROM and to_email):
-        return
-
-    subject = f"Order #{search_id} received — FastDrivingTestFinder"
-    plain = (
-        f"Dear customer,\n\n"
-        f"Thank you very much for your order #{search_id}.\n"
-        f"We're now searching for an earlier test date in your chosen centres.\n"
-        f"We'll notify you by WhatsApp and email as soon as we find a suitable slot.\n\n"
-        f"Kind regards,\nFastDrivingTestFinder"
-    )
-    html = f"""
-      <div style="font-family:Segoe UI,Helvetica,Arial,sans-serif;font-size:15px;color:#0f172a">
-        <p>Dear customer,</p>
-        <p>Thank you very much for your order <strong>#{search_id}</strong>.</p>
-        <p>We’re now searching for an earlier test date in your chosen centres. We’ll notify you by WhatsApp and email as soon as we find a suitable slot.</p>
-        <p>Stay tuned!</p>
-        <p>Kind regards,<br/>FastDrivingTestFinder</p>
-      </div>
-    """.strip()
-
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = SMTP_FROM
-    msg["To"] = to_email
-    if SMTP_REPLY_TO:
-        msg["Reply-To"] = SMTP_REPLY_TO
-    msg.set_content(plain)
-    msg.add_alternative(html, subtype="html")
-
-    try:
-        if SMTP_TLS and SMTP_PORT == 465:
-            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15) as s:
-                if SMTP_USER and SMTP_PASS:
-                    s.login(SMTP_USER, SMTP_PASS)
-                s.send_message(msg)
-        else:
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as s:
-                if SMTP_TLS:
-                    s.starttls()
-                if SMTP_USER and SMTP_PASS:
-                    s.login(SMTP_USER, SMTP_PASS)
-                s.send_message(msg)
-
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("UPDATE searches SET last_event=?, updated_at=? WHERE id=?",
-                    ("email_confirmation_sent", now_iso(), search_id))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("UPDATE searches SET last_event=?, updated_at=? WHERE id=?",
-                    (f"email_send_failed: {e}", now_iso(), search_id))
-        conn.commit()
-        conn.close()
-
-# ---------- CHAT BOT ----------
-class ChatMessageIn(BaseModel):
-    session_id: str
-    message: str
-    user_name: Optional[str] = None
-
-class ChatMessageOut(BaseModel):
-    reply: str
-    follow_up: Optional[str] = None
-    suggested: Optional[List[str]] = None
-
-def _norm(s: str) -> str:
-    return (s or "").strip().lower()
-
-def _search_status_text(row: sqlite3.Row) -> str:
-    sid = row["id"]
-    status = row["status"]
-    last_event = row["last_event"] or "-"
-    when = row["updated_at"] or row["created_at"] or ""
-    return (
-        f"Booking #{sid} status: {status}\n"
-        f"Last event: {last_event}\n"
-        f"Updated: {when}"
-    )
-
-def _find_search_by_id(conn: sqlite3.Connection, sid: int) -> Optional[sqlite3.Row]:
-    c = conn.cursor()
-    c.execute("SELECT * FROM searches WHERE id = ?", (sid,))
-    return c.fetchone()
-
-def _intent_router(text: str) -> str:
-    t = _norm(text)
-    if any(k in t for k in ["swap my test", "swap test", "can you swap", "change my test"]):
-        return "swap"
-    if any(k in t for k in ["book for me", "book a test", "new booking"]):
-        return "book"
-    if any(k in t for k in ["status", "update", "how is my order", "booking id", "test id", "check id", "progress"]):
-        return "status"
-    if any(k in t for k in ["hello", "hi", "hey"]):
-        return "greeting"
-    return "fallback"
-
-@app.post("/api/chat/message", response_model=ChatMessageOut)
-def chat_message(body: ChatMessageIn):
-    import re
-    text = body.message or ""
-    intent = _intent_router(text)
-    m = re.search(r"\b(\d{1,6})\b", text)
-    possible_id = int(m.group(1)) if m else None
-
-    if intent == "swap":
-        return ChatMessageOut(
-            reply="Sure, we can do that — it’s our everyday job. If you already have a booking and want us to swap it, just place a ‘Swap’ order on our site. We’ll start checking for earlier slots at your preferred centres.",
-            suggested=["How do I start a swap?", "What info do you need for a swap?"]
-        )
-    if intent == "book":
-        return ChatMessageOut(
-            reply="Yes, we can book a new test for you. Place a ‘New’ booking on our site, choose your centres, and we’ll search for the earliest suitable slots. We’ll notify you via WhatsApp/email.",
-            suggested=["What centres can you check?", "How quickly can you find a slot?"]
-        )
-    if intent == "status":
-        if possible_id is None:
-            return ChatMessageOut(
-                reply="Please send your Test Booking ID (the number in your confirmation, e.g. 1234).",
-                follow_up="What’s your Test Booking ID?",
-                suggested=["My ID is 1234"]
-            )
-        conn = get_conn()
-        row = _find_search_by_id(conn, possible_id)
-        conn.close()
-        if not row:
-            return ChatMessageOut(
-                reply=f"I couldn’t find booking #{possible_id}. Please check the number or send it again.",
-                suggested=["My ID is 1234", "Talk to a human"]
-            )
-        return ChatMessageOut(
-            reply=_search_status_text(row),
-            suggested=["What does ‘searching’ mean?", "How will I be notified?"]
-        )
-    if intent == "greeting":
-        return ChatMessageOut(
-            reply=f"Hi{(' ' + body.user_name) if body.user_name else ''}! How can I help today?",
-            suggested=["Can you swap my test for me?", "How is my booking going?"]
-        )
-    return ChatMessageOut(
-        reply="I can help with swaps, new bookings, and booking status updates. You can ask things like ‘Can you swap my test?’ or ‘What’s the status of booking 1234?’",
-        suggested=["Can you swap my test for me?", "What’s the status of booking 1234?"]
-    )
-
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
@@ -352,7 +187,7 @@ def health():
 
 # ---------- ROUTES ----------
 @app.post("/api/search")
-async def create_search(payload: SearchIn, background: BackgroundTasks):
+async def create_search(payload: SearchIn):
     centres_list = _parse_centres(payload.centres)
 
     conn = get_conn()
@@ -378,10 +213,6 @@ async def create_search(payload: SearchIn, background: BackgroundTasks):
     search_id = cur.lastrowid
     conn.commit()
     conn.close()
-
-    if payload.email:
-        background.add_task(_send_order_email, search_id, payload.email)
-
     return {"ok": True, "search_id": search_id, "status": "new"}
 
 # Explicit OPTIONS route (some proxies require it even with CORSMiddleware)
@@ -511,6 +342,12 @@ def _badge(s: str) -> str:
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
 
 def _derive_flags(row: sqlite3.Row):
+    """
+    Derive:
+      - reached: True if we've interacted with a centre or found/booked/failed a slot
+      - last_centre: centre-like token parsed from event payload if present
+      - captcha: True if last_event indicates a captcha cooldown
+    """
     ev = (row["last_event"] or "").strip()
     reached = False
     last_centre = ""
@@ -549,7 +386,9 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
     def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
 
     statuses = ["new","queued","searching","found","booked","failed"]
+    # GOOD
     pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
+
     clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
 
     rows_html = []
@@ -577,9 +416,12 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             td(r["last_event"] or "") +
             td(r["paid"]) +
             td(r["payment_intent_id"] or "") +
+
+            # NEW derived columns
             td(reached_html) +
             td(last_centre or "—") +
             td(captcha_html) +
+
             td(r["created_at"] or "") +
             td(r["updated_at"] or "") +
             "</tr>"
