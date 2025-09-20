@@ -259,6 +259,101 @@ def _send_order_email(search_id: int, to_email: str):
         conn.commit()
         conn.close()
 
+# ---------- CHAT BOT ----------
+class ChatMessageIn(BaseModel):
+    session_id: str
+    message: str
+    user_name: Optional[str] = None
+
+class ChatMessageOut(BaseModel):
+    reply: str
+    follow_up: Optional[str] = None
+    suggested: Optional[List[str]] = None
+
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
+
+def _search_status_text(row: sqlite3.Row) -> str:
+    sid = row["id"]
+    status = row["status"]
+    last_event = row["last_event"] or "-"
+    when = row["updated_at"] or row["created_at"] or ""
+    return (
+        f"Booking #{sid} status: {status}\n"
+        f"Last event: {last_event}\n"
+        f"Updated: {when}"
+    )
+
+def _find_search_by_id(conn: sqlite3.Connection, sid: int) -> Optional[sqlite3.Row]:
+    c = conn.cursor()
+    c.execute("SELECT * FROM searches WHERE id = ?", (sid,))
+    return c.fetchone()
+
+def _intent_router(text: str) -> str:
+    t = _norm(text)
+    if any(k in t for k in ["swap my test", "swap test", "can you swap", "change my test"]):
+        return "swap"
+    if any(k in t for k in ["book for me", "book a test", "new booking"]):
+        return "book"
+    if any(k in t for k in ["status", "update", "how is my order", "booking id", "test id", "check id", "progress"]):
+        return "status"
+    if any(k in t for k in ["hello", "hi", "hey"]):
+        return "greeting"
+    return "fallback"
+
+@app.post("/api/chat/message", response_model=ChatMessageOut)
+def chat_message(body: ChatMessageIn):
+    import re
+    text = body.message or ""
+    intent = _intent_router(text)
+
+    # try to extract a number as booking ID if present
+    m = re.search(r"\b(\d{1,6})\b", text)
+    possible_id = int(m.group(1)) if m else None
+
+    if intent == "swap":
+        return ChatMessageOut(
+            reply="Sure, we can do that — it’s our everyday job. "
+                  "If you already have a booking and want us to swap it, just place a ‘Swap’ order on our site. "
+                  "We’ll start checking for earlier slots at your preferred centres.",
+            suggested=["How do I start a swap?", "What info do you need for a swap?"]
+        )
+    if intent == "book":
+        return ChatMessageOut(
+            reply="Yes, we can book a new test for you. Place a ‘New’ booking on our site, choose your centres, "
+                  "and we’ll search for the earliest suitable slots. We’ll notify you via WhatsApp/email.",
+            suggested=["What centres can you check?", "How quickly can you find a slot?"]
+        )
+    if intent == "status":
+        if possible_id is None:
+            return ChatMessageOut(
+                reply="Please send your Test Booking ID (the number in your confirmation, e.g. 1234).",
+                follow_up="What’s your Test Booking ID?",
+                suggested=["My ID is 1234"]
+            )
+        conn = get_conn()
+        row = _find_search_by_id(conn, possible_id)
+        conn.close()
+        if not row:
+            return ChatMessageOut(
+                reply=f"I couldn’t find booking #{possible_id}. Please check the number or send it again.",
+                suggested=["My ID is 1234", "Talk to a human"]
+            )
+        return ChatMessageOut(
+            reply=_search_status_text(row),
+            suggested=["What does ‘searching’ mean?", "How will I be notified?"]
+        )
+    if intent == "greeting":
+        return ChatMessageOut(
+            reply=f"Hi{(' ' + body.user_name) if body.user_name else ''}! How can I help today?",
+            suggested=["Can you swap my test for me?", "How is my booking going?"]
+        )
+    return ChatMessageOut(
+        reply="I can help with swaps, new bookings, and booking status updates. "
+              "You can ask things like ‘Can you swap my test?’ or ‘What’s the status of booking 1234?’",
+        suggested=["Can you swap my test for me?", "What’s the status of booking 1234?"]
+    )
+
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
