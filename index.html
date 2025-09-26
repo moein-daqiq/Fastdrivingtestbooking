@@ -187,7 +187,6 @@
     <section id="applicant-details" class="panel">
       <div class="row heading"><label class="small">Applicant Details:</label></div>
 
-      <!-- EXACT two-column label/input grid to match screenshot -->
       <div class="fields-grid">
         <label class="req" for="surname">Surname(s):</label>
         <input type="text" id="surname" placeholder="Exactly as shown on your driving licence (field 1)"/>
@@ -213,7 +212,6 @@
         <label class="req" for="phoneRaw">UK WhatsApp Phone No:</label>
         <div class="phone-mask">
           <input type="tel" id="phoneRaw" autocomplete="off" placeholder="+44"/>
-          <!-- .mask-text removed (was never shown) -->
         </div>
 
         <div class="small-note" style="grid-column:2/3">If you do not have a WhatsApp number, the system will not send a confirmation.</div>
@@ -394,12 +392,10 @@
           <input type="text" id="promoCode" placeholder="Enter promo code (optional)"/>
         </div>
 
-        <!-- Stripe pay button -->
         <div class="pp-row">
           <button id="stripePayBtn" class="submit-btn enabled">Payment options</button>
         </div>
 
-        <!-- Stripe on-page panel (hidden until clicked) -->
         <div id="stripePanel">
           <div id="stripeMsg" class="indicator" style="display:none"></div>
           <div id="payment-element" style="margin-top:8px"></div>
@@ -712,169 +708,89 @@
   })();
   </script>
 
+  <!-- ===== Search ID Manager: create on Book/Swap (or when fields ready), auto-expire if unpaid ===== -->
   <script>
-    (() => {
-      const API_TOKEN = 'YOUR_REAL_API_TOKEN'; // do NOT ship real secrets client-side
+  (function(){
+    const KEY_ID   = 'dvsa_last_search_id';
+    const KEY_META = 'dvsa_last_search_meta'; // {createdAt:number, ttlMs:number, paid:boolean}
+    const DEFAULT_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
-      const $  = (sel) => document.querySelector(sel);
-      const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+    const $  = sel => document.querySelector(sel);
 
-      const pad = (n) => String(n).padStart(2,'0');
-      const toHH    = (n) => `${pad((+n||0) === 12 ? 0 : (+n||0))}:00`;
-      const toHHpm  = (n) => `${pad((+n||0) === 12 ? 12 : (+n||0)+12)}:00`;
+    function centresCSV(){
+      return Array.from(document.querySelectorAll('.centre-input'))
+        .map(i=>i.value.trim()).filter(Boolean).join(',');
+    }
 
-      const ymd = (el) => {
-        const v = (el && el.value ? el.value.trim() : '');
-        if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
-        const m = v.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-        return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
-      };
+    function save(id, meta={}){
+      try {
+        localStorage.setItem(KEY_ID, id);
+        const prev = JSON.parse(localStorage.getItem(KEY_META) || '{}');
+        localStorage.setItem(KEY_META, JSON.stringify({
+          createdAt: Date.now(),
+          ttlMs: DEFAULT_TTL_MS,
+          paid: prev.paid || false,
+          ...meta
+        }));
+      } catch(_) {}
+    }
 
-      const normalizePhone = (v) => {
-        let d = (v||'').replace(/\D/g,'');
-        if (d.startsWith('44')) d = d.slice(2);
-        if (d.startsWith('0'))  d = d.slice(1);
-        d = d.slice(0,10);
-        return d ? ('0' + d) : '';
-      };
+    function getId(){ return (localStorage.getItem(KEY_ID) || '').trim(); }
+    function markPaid(){ try{ const m=JSON.parse(localStorage.getItem(KEY_META)||'{}'); m.paid=true; localStorage.setItem(KEY_META, JSON.stringify(m)); }catch(_){} }
+    window.__dvsa_markPaid = markPaid;
 
-      const toast = (msg, ok=true) => {
-        let t = document.getElementById('apiToast');
-        if (!t) {
-          t = document.createElement('div'); t.id = 'apiToast';
-          t.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.15);transition:opacity .3s';
-          document.body.appendChild(t);
-        }
-        t.style.background = ok ? '#ecfdf5' : '#fef2f2';
-        t.style.color      = ok ? '#065f46' : '#991b1b';
-        t.textContent = msg; t.style.opacity = '1';
-        setTimeout(()=>{ t.style.opacity='0' }, 3500);
-      };
+    function clear(reason=''){ try{ localStorage.removeItem(KEY_ID); localStorage.removeItem(KEY_META); if(reason) console.debug('[search-id] cleared:', reason);}catch(_){} }
+    function expired(){
+      try{
+        const m = JSON.parse(localStorage.getItem(KEY_META)||'null');
+        if (!m) return false;
+        if (m.paid) return false;
+        return (Date.now() - (m.createdAt||0)) > (m.ttlMs||DEFAULT_TTL_MS);
+      }catch(_){ return false; }
+    }
+    setInterval(()=>{ if (expired()) clear('ttl expired'); }, 60*1000);
 
-      async function healthCheck() {
-        try {
-          const r = await fetch(`${API_BASE}/health`);
-          const j = await r.json();
-          if (j && j.ok) {
-            const sub = document.querySelector('.strip.subtitle');
-            if (sub && !document.getElementById('apiHealthBadge')) {
-              const s = document.createElement('span'); s.id = 'apiHealthBadge'; s.textContent = ' API ✓';
-              s.style.cssText = 'margin-left:8px;font-weight:700;color:#064e3b;background:#d1fae5;padding:2px 6px;border-radius:999px';
-              sub.appendChild(s);
-            }
-            return true;
-          }
-        } catch (_) {}
-        return false;
-      }
+    async function createIfReady(){
+      const surname = ($('#surname')?.value||'').trim();
+      const email   = ($('#email')?.value||'').trim();
+      const centres = centresCSV();
+      if (!surname || !email || !centres) return null;
 
-      function ensureStopButton() {
-        if (document.getElementById('stopSearchBtn')) return;
-        const btn = document.createElement('button');
-        btn.id = 'stopSearchBtn'; btn.type = 'button'; btn.textContent = 'Stop searching';
-        btn.title = 'Disable this search so the bot stops scanning/swapping';
-        btn.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:8px;border:0;background:#fee2e2;color:#991b1b;font-weight:700;box-shadow:0 6px 18px rgba(0,0,0,.15);cursor:pointer';
-        btn.addEventListener('click', disableCurrentSearch);
-        document.body.appendChild(btn);
-      }
+      const existing = getId();
+      if (existing && !expired()) return existing;
 
-      function currentSearchId() { return localStorage.getItem('dvsa_last_search_id') || ''; }
-
-      async function disableCurrentSearch() {
-        const id = currentSearchId();
-        if (!id) { toast('No active search id found on this device.', false); return; }
-        try {
-          const r = await fetch(`${API_BASE}/search/${encodeURIComponent(id)}/disable`, {
-            method: 'POST', headers: { 'Authorization': `Bearer ${API_TOKEN}` }
-          });
-          const t = await r.text();
-          if (r.status === 501) { toast('Disable not available in this build (backend). I can enable it if you want.', false); return; }
-          if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
-          toast('Search disabled. The bot will stop scanning.', true);
-          const b = document.getElementById('stopSearchBtn'); if (b) { b.disabled = true; b.style.opacity = '0.6'; b.textContent = 'Stopped'; }
-        } catch (e) { toast('Failed to disable: ' + (e?.message || e), false); }
-      }
-
-      /* === NEW: getters for paid-id and payment intent id === */
-      const getPaidId = () => (document.getElementById('submitBtn')?.dataset?.paidId) || localStorage.getItem('dvsa_paid_id') || '';
-      const getPaymentIntentId = () => localStorage.getItem('dvsa_payment_intent_id') || '';
-
-      function collectPayload() {
-        const centres = $$('.centre-input').map(i => i.value.trim()).filter(Boolean);
-        const swapSelected  = document.getElementById('btnSwap')?.classList.contains('selected');
-        const bookSelected  = document.getElementById('btnBook')?.classList.contains('selected');
-        const swapRef       = document.getElementById('swapRef')?.value.trim() || '';
-        const theoryPass    = document.getElementById('theoryPass')?.value.trim() || '';
-
-        const payload = {
-          email:  document.getElementById('email')?.value.trim() || null,
-          phone:  normalizePhone(document.getElementById('phoneRaw')?.value),
-          centres: centres.join(','),
-          from_date: ymd(document.getElementById('earliestDate')),
-          to_date:   ymd(document.getElementById('latestDate')),
-          time_from: toHH(document.getElementById('timeFrom')?.value),
-          time_to:   toHHpm(document.getElementById('timeTo')?.value),
-          notice_days: parseInt(document.getElementById('noticeDays')?.value || '0', 10) || 0,
-          surname:         document.getElementById('surname')?.value.trim() || null,
-          licence_number:  document.getElementById('drivingLicence')?.value.trim() || null,
-          booking_reference: swapSelected ? swapRef : undefined,
-          theory_pass:       bookSelected ? theoryPass : undefined,
-          mode: 'auto',
-          auth_method: 3,
-          /* NEW: attach paid-id + stripe payment intent id */
-          paid_id:           getPaidId(),
-          payment_intent_id: getPaymentIntentId(),
-        };
-        Object.keys(payload).forEach(k => { if (payload[k] === undefined || payload[k] === null || payload[k] === '') delete payload[k]; });
-        return payload;
-      }
-
-      async function submitToApi() {
-        const btn = document.getElementById('submitBtn');
-        if (!btn || btn.disabled) return;
-
-        /* NEW: enforce paid-id presence before submit */
-        const paidId = getPaidId();
-        if (!paidId) return toast('Click “Payment options” and proceed to payment first.', false);
-
-        const p = collectPayload();
-        if (!p.centres)                      return toast('Select at least one test centre.', false);
-        if (!p.from_date || !p.to_date)      return toast('Choose earliest/latest dates.', false);
-        if (!p.surname || !p.licence_number) return toast('Enter surname and licence number.', false);
-        if (!p.email)                        return toast('Enter your email.', false);
-        if (!p.phone)                        return toast('Enter your WhatsApp phone.', false);
-        if (document.getElementById('btnSwap')?.classList.contains('selected') && !/^\d{8}$/.test(document.getElementById('swapRef')?.value||'')) {
-          return toast('Swap selected: add the 8-digit DVSA booking reference.', false);
-        }
-
-        try {
-          btn.disabled = true; btn.classList.remove('enabled');
-          toast('Submitting your search…');
-
-          const r = await fetch(`${API_BASE}/search`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_TOKEN}` },
-            body: JSON.stringify(p)
-          });
-          const text = await r.text();
-          let j; try { j = JSON.parse(text) } catch { j = null; }
-          if (!r.ok) throw new Error(j?.error || text || `HTTP ${r.status}`);
-
-          const id = j?.id || j?.search_id || '';
-          if (id) { localStorage.setItem('dvsa_last_search_id', id); ensureStopButton(); }
-          toast(id ? `Search created: ${id}` : 'Search created', true);
-          console.log('Gateway response:', j);
-        } catch (err) {
-          console.error(err); toast(`API error: ${err.message || err}`, false);
-        } finally { /* submit re-enabled only after successful Stripe payment */ }
-      }
-
-      window.addEventListener('DOMContentLoaded', async () => {
-        await healthCheck();
-        if (currentSearchId()) ensureStopButton();
-        const btn = document.getElementById('submitBtn');
-        if (btn) btn.addEventListener('click', (e) => { e.preventDefault(); submitToApi(); });
+      const r = await fetch(`${API_BASE}/search`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ surname, email, centres })
       });
-    })();
+      const text = await r.text(); let j; try{ j=JSON.parse(text) }catch{ j=null }
+      if (!r.ok) throw new Error(j?.error || text || `HTTP ${r.status}`);
+
+      const id = (j?.id || j?.search_id || '').toString();
+      if (id) save(id);
+      return id;
+    }
+
+    window.__dvsa_getSearchIdOrCreate = async function(){
+      const sid = getId();
+      if (sid && !expired()) return sid;
+      try{ return await createIfReady(); }catch(e){ console.error('[search-id] create failed', e); return ''; }
+    };
+
+    function onBookingChosen(){ createIfReady().catch(()=>{}); }
+    document.getElementById('btnBook')?.addEventListener('click', onBookingChosen);
+    document.getElementById('btnSwap')?.addEventListener('click', onBookingChosen);
+
+    ['surname','email'].forEach(id=>{
+      document.getElementById(id)?.addEventListener('blur', ()=>createIfReady().catch(()=>{}));
+      document.getElementById(id)?.addEventListener('change', ()=>createIfReady().catch(()=>{}));
+    });
+    document.querySelectorAll('.centre-input').forEach(inp=>{
+      ['change','blur'].forEach(ev=>inp.addEventListener(ev, ()=>createIfReady().catch(()=>{})));
+    });
+
+    window.addEventListener('beforeunload', ()=>{ if (expired()) clear('ttl expired on unload'); });
+  })();
   </script>
 
   <script>
@@ -890,23 +806,6 @@
     let currentMethodType = 'card';
     const redirectMethods = new Set(['klarna','revolut_pay','amazon_pay']);
 
-    /* NEW: paid-id helpers (created when user opens Payment options) */
-    let paidId = localStorage.getItem('dvsa_paid_id') || '';
-    function setSubmitPaidId(id) {
-      const submitBtn = document.getElementById('submitBtn');
-      if (submitBtn) submitBtn.dataset.paidId = String(id || '');
-    }
-    function createPaidIdIfNeeded() {
-      try {
-        if (!paidId) {
-          paidId = (crypto && crypto.randomUUID) ? crypto.randomUUID()
-                  : 'paid_' + Math.random().toString(36).slice(2) + Date.now();
-          localStorage.setItem('dvsa_paid_id', paidId);
-        }
-        setSubmitPaidId(paidId);
-      } catch (_) {}
-    }
-
     function amountFromTotalLine(){
       const txt = (document.getElementById('totalLine')?.textContent || '');
       const m   = txt.match(/£([\d.]+)/);
@@ -914,19 +813,15 @@
       return v.toFixed(2);
     }
     function markPaid(paymentIntentId){
-      if (paymentIntentId) {
-        try { localStorage.setItem('dvsa_payment_intent_id', paymentIntentId); } catch (_) {}
-      }
       const pill = document.getElementById('payStatus');
       if (pill){
         const pidShort = (paymentIntentId || '').slice(0,12) || 'OK';
-        const paidTag  = (paidId || localStorage.getItem('dvsa_paid_id') || '').slice(0,12);
-        pill.textContent = `Payment: Paid (${pidShort}${paidTag ? ' • ' + paidTag : ''})`;
+        pill.textContent = `Payment: Paid${pidShort ? ' ('+pidShort+')' : ''}`;
         pill.classList.add('paid');
       }
-      createPaidIdIfNeeded(); // ensure submit button has data-paid-id
       const submitBtn = document.getElementById('submitBtn');
       if (submitBtn){ submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
+      window.__dvsa_markPaid?.(); // stop auto-expire of search_id
     }
     function showMsg(text, ok=false){
       panel.style.display = 'block';
@@ -942,30 +837,18 @@
       if (!isBook && !isSwap){ showMsg('Please select Book (£150) or Swap (£70) first.'); return false; }
       return true;
     }
-    function centresCSV(){
-      return Array.from(document.querySelectorAll('.centre-input')).map(i=>i.value.trim()).filter(Boolean).join(',');
-    }
-    async function ensurePreSearch(){
-      let sid = localStorage.getItem('dvsa_last_search_id');
-      if (sid) return sid;
-      const surname = (document.getElementById('surname')?.value||'').trim();
-      const email   = (document.getElementById('email')?.value||'').trim();
-      const centres = centresCSV();
-      if (!surname || !email || !centres){ showMsg('Enter Surname, Email and at least one Test Centre before paying.'); throw new Error('missing fields'); }
-      const r = await fetch(`${API_BASE}/search`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ surname, email, centres }) });
-      const text = await r.text(); let j; try { j = JSON.parse(text) } catch { j = null; }
-      if (!r.ok) throw new Error(j?.error || text || `HTTP ${r.status}`);
-      sid = j?.id || j?.search_id; if (sid) localStorage.setItem('dvsa_last_search_id', String(sid));
-      return sid;
-    }
+
     async function createIntentIfNeeded(){
       const amount = amountFromTotalLine();
       if (!amount || isNaN(+amount) || +amount <= 0){ showMsg('Total is not valid.'); return false; }
-      let searchId; try { searchId = await ensurePreSearch(); } catch (e) { console.error(e); return false; }
+
+      const searchId = await window.__dvsa_getSearchIdOrCreate();
+      if (!searchId){ showMsg('Enter Surname, Email and at least one Test Centre before paying.'); return false; }
+
       try{
         const r = await fetch(`${API_BASE}/pay/create-intent`, {
           method:'POST', headers:{ 'Content-Type':'application/json' },
-          body: JSON.stringify({ amount_cents: Math.round(parseFloat(amount)*100), currency: 'gbp', search_id: Number(searchId) })
+          body: JSON.stringify({ amount_cents: Math.round(parseFloat(amount)*100), currency: 'gbp', search_id: String(searchId) })
         });
         const j = await r.json();
         if(!r.ok || !j?.client_secret){ throw new Error(j?.detail || j?.error || 'Failed to create payment intent'); }
@@ -977,9 +860,6 @@
       if (!STRIPE_PUBLISHABLE_KEY){ showMsg('Stripe publishable key is missing on this page. Add window.STRIPE_PUBLISHABLE_KEY in <head>.'); return; }
       if (!requireBookingTypeOrReject()) return;
       const ok = await createIntentIfNeeded(); if (!ok) return;
-
-      /* NEW: create and attach a paid-id as soon as payment flow starts */
-      createPaidIdIfNeeded();
 
       try{
         stripe = Stripe(STRIPE_PUBLISHABLE_KEY);
