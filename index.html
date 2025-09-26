@@ -708,95 +708,12 @@
   })();
   </script>
 
-  <!-- ===== Search ID Manager: create on Book/Swap (or when fields ready), auto-expire if unpaid ===== -->
+  <!-- ===== Stripe & robust search_id handling ===== -->
   <script>
-  (function(){
-    const KEY_ID   = 'dvsa_last_search_id';
-    const KEY_META = 'dvsa_last_search_meta'; // {createdAt:number, ttlMs:number, paid:boolean}
-    const DEFAULT_TTL_MS = 30 * 60 * 1000; // 30 minutes
-
-    const $  = sel => document.querySelector(sel);
-
-    function centresCSV(){
-      return Array.from(document.querySelectorAll('.centre-input'))
-        .map(i=>i.value.trim()).filter(Boolean).join(',');
-    }
-
-    function save(id, meta={}){
-      try {
-        localStorage.setItem(KEY_ID, id);
-        const prev = JSON.parse(localStorage.getItem(KEY_META) || '{}');
-        localStorage.setItem(KEY_META, JSON.stringify({
-          createdAt: Date.now(),
-          ttlMs: DEFAULT_TTL_MS,
-          paid: prev.paid || false,
-          ...meta
-        }));
-      } catch(_) {}
-    }
-
-    function getId(){ return (localStorage.getItem(KEY_ID) || '').trim(); }
-    function markPaid(){ try{ const m=JSON.parse(localStorage.getItem(KEY_META)||'{}'); m.paid=true; localStorage.setItem(KEY_META, JSON.stringify(m)); }catch(_){} }
-    window.__dvsa_markPaid = markPaid;
-
-    function clear(reason=''){ try{ localStorage.removeItem(KEY_ID); localStorage.removeItem(KEY_META); if(reason) console.debug('[search-id] cleared:', reason);}catch(_){} }
-    function expired(){
-      try{
-        const m = JSON.parse(localStorage.getItem(KEY_META)||'null');
-        if (!m) return false;
-        if (m.paid) return false;
-        return (Date.now() - (m.createdAt||0)) > (m.ttlMs||DEFAULT_TTL_MS);
-      }catch(_){ return false; }
-    }
-    setInterval(()=>{ if (expired()) clear('ttl expired'); }, 60*1000);
-
-    async function createIfReady(){
-      const surname = ($('#surname')?.value||'').trim();
-      const email   = ($('#email')?.value||'').trim();
-      const centres = centresCSV();
-      if (!surname || !email || !centres) return null;
-
-      const existing = getId();
-      if (existing && !expired()) return existing;
-
-      const r = await fetch(`${API_BASE}/search`, {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ surname, email, centres })
-      });
-      const text = await r.text(); let j; try{ j=JSON.parse(text) }catch{ j=null }
-      if (!r.ok) throw new Error(j?.error || text || `HTTP ${r.status}`);
-
-      const id = (j?.id || j?.search_id || '').toString();
-      if (id) save(id);
-      return id;
-    }
-
-    window.__dvsa_getSearchIdOrCreate = async function(){
-      const sid = getId();
-      if (sid && !expired()) return sid;
-      try{ return await createIfReady(); }catch(e){ console.error('[search-id] create failed', e); return ''; }
-    };
-
-    function onBookingChosen(){ createIfReady().catch(()=>{}); }
-    document.getElementById('btnBook')?.addEventListener('click', onBookingChosen);
-    document.getElementById('btnSwap')?.addEventListener('click', onBookingChosen);
-
-    ['surname','email'].forEach(id=>{
-      document.getElementById(id)?.addEventListener('blur', ()=>createIfReady().catch(()=>{}));
-      document.getElementById(id)?.addEventListener('change', ()=>createIfReady().catch(()=>{}));
-    });
-    document.querySelectorAll('.centre-input').forEach(inp=>{
-      ['change','blur'].forEach(ev=>inp.addEventListener(ev, ()=>createIfReady().catch(()=>{})));
-    });
-
-    window.addEventListener('beforeunload', ()=>{ if (expired()) clear('ttl expired on unload'); });
-  })();
-  </script>
-
-  <script>
-  /* Stripe Payment Element */
   (function(){
     const STRIPE_PUBLISHABLE_KEY = window.STRIPE_PUBLISHABLE_KEY || '';
+    const API_BASE = window.API_BASE;
+
     const panel   = document.getElementById('stripePanel');
     const msgBox  = document.getElementById('stripeMsg');
     const payBtn  = document.getElementById('stripePayBtn');
@@ -806,22 +723,12 @@
     let currentMethodType = 'card';
     const redirectMethods = new Set(['klarna','revolut_pay','amazon_pay']);
 
+    // --- helpers ----
     function amountFromTotalLine(){
       const txt = (document.getElementById('totalLine')?.textContent || '');
       const m   = txt.match(/£([\d.]+)/);
       const v   = m ? parseFloat(m[1]) : 0;
       return v.toFixed(2);
-    }
-    function markPaid(paymentIntentId){
-      const pill = document.getElementById('payStatus');
-      if (pill){
-        const pidShort = (paymentIntentId || '').slice(0,12) || 'OK';
-        pill.textContent = `Payment: Paid${pidShort ? ' ('+pidShort+')' : ''}`;
-        pill.classList.add('paid');
-      }
-      const submitBtn = document.getElementById('submitBtn');
-      if (submitBtn){ submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
-      window.__dvsa_markPaid?.(); // stop auto-expire of search_id
     }
     function showMsg(text, ok=false){
       panel.style.display = 'block';
@@ -837,27 +744,95 @@
       if (!isBook && !isSwap){ showMsg('Please select Book (£150) or Swap (£70) first.'); return false; }
       return true;
     }
+    function centresCSV(){
+      return Array.from(document.querySelectorAll('.centre-input'))
+        .map(i=>i.value.trim()).filter(Boolean).join(',');
+    }
+    function markPaid(paymentIntentId){
+      const pill = document.getElementById('payStatus');
+      if (pill){
+        const pidShort = (paymentIntentId || '').slice(0,12) || 'OK';
+        pill.textContent = `Payment: Paid${pidShort ? ' ('+pidShort+')' : ''}`;
+        pill.classList.add('paid');
+      }
+      const submitBtn = document.getElementById('submitBtn');
+      if (submitBtn){ submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
+    }
+
+    // --- robust search id handling ---
+    async function verifySearchId(sid){
+      try{
+        const r = await fetch(`${API_BASE}/search/${encodeURIComponent(sid)}`);
+        return r.ok;
+      }catch(_){ return false; }
+    }
+
+    async function ensurePreSearch(){
+      // 1) verify cached id if any
+      let sid = (localStorage.getItem('dvsa_last_search_id') || '').trim();
+      if (sid){
+        const ok = await verifySearchId(sid);
+        if (ok) return sid;
+        try { localStorage.removeItem('dvsa_last_search_id'); } catch(_) {}
+      }
+
+      // 2) create a minimal pre-search
+      const surname = (document.getElementById('surname')?.value||'').trim();
+      const email   = (document.getElementById('email')?.value||'').trim();
+      const centres = centresCSV();
+      if (!surname || !email || !centres){ showMsg('Enter Surname, Email and at least one Test Centre before paying.'); throw new Error('missing fields'); }
+
+      const r = await fetch(`${API_BASE}/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, centres, notes: `prepay·${surname}` })
+      });
+      const text = await r.text(); let j; try { j = JSON.parse(text) } catch { j = null; }
+      if (!r.ok) throw new Error(j?.error || text || `HTTP ${r.status}`);
+      sid = j?.id || j?.search_id; if (sid) localStorage.setItem('dvsa_last_search_id', String(sid));
+      return sid;
+    }
 
     async function createIntentIfNeeded(){
       const amount = amountFromTotalLine();
       if (!amount || isNaN(+amount) || +amount <= 0){ showMsg('Total is not valid.'); return false; }
 
-      const searchId = await window.__dvsa_getSearchIdOrCreate();
-      if (!searchId){ showMsg('Enter Surname, Email and at least one Test Centre before paying.'); return false; }
+      // inner function so we can retry once
+      const doCreate = async () => {
+        const searchId = await ensurePreSearch();
+        const r = await fetch(`${API_BASE}/pay/create-intent`, {
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({ amount_cents: Math.round(parseFloat(amount)*100), currency: 'gbp', search_id: Number(searchId) })
+        });
+        const body = await r.json().catch(()=> ({}));
+        return { ok: r.ok, status: r.status, body };
+      };
 
       try{
-        const r = await fetch(`${API_BASE}/pay/create-intent`, {
-          method:'POST', headers:{ 'Content-Type':'application/json' },
-          body: JSON.stringify({ amount_cents: Math.round(parseFloat(amount)*100), currency: 'gbp', search_id: String(searchId) })
-        });
-        const j = await r.json();
-        if(!r.ok || !j?.client_secret){ throw new Error(j?.detail || j?.error || 'Failed to create payment intent'); }
-        lastClientSecret = j.client_secret; return true;
-      }catch(err){ console.error(err); showMsg('Stripe error: ' + (err?.message || err)); return false; }
+        let { ok, status, body } = await doCreate();
+
+        // Auto-recover if backend says cached id is gone
+        if (!ok && status === 404 && String(body?.detail || '').toLowerCase().includes('search_id')) {
+          try { localStorage.removeItem('dvsa_last_search_id'); } catch(_) {}
+          ({ ok, status, body } = await doCreate());
+        }
+
+        if (!ok || !body?.client_secret) {
+          throw new Error(body?.detail || body?.error || 'Failed to create payment intent');
+        }
+        lastClientSecret = body.client_secret;
+        return true;
+      }catch(err){
+        console.error(err);
+        showMsg('Stripe error: ' + (err?.message || err));
+        return false;
+      }
     }
+
     async function openStripePanel(){
       panel.style.display = 'block';
-      if (!STRIPE_PUBLISHABLE_KEY){ showMsg('Stripe publishable key is missing on this page. Add window.STRIPE_PUBLISHABLE_KEY in <head>.'); return; }
+      if (!STRIPE_PUBLISHABLE_KEY){ showMsg('Stripe publishable key is missing on this page.'); return; }
       if (!requireBookingTypeOrReject()) return;
       const ok = await createIntentIfNeeded(); if (!ok) return;
 
@@ -869,19 +844,29 @@
         paymentElement.mount('#payment-element');
         paymentElement.on('change', async (ev) => {
           currentMethodType = (ev?.value && ev.value.type) ? ev.value.type : 'card';
-          if (redirectMethods.has(currentMethodType)) { showMsg('You will be redirected to complete payment…'); if (ev.complete) { await confirmRedirectMethod(); } }
-          else { showMsg('', true); }
+          if (redirectMethods.has(currentMethodType)) {
+            showMsg('You will be redirected to complete payment…');
+            if (ev.complete) { await confirmRedirectMethod(); }
+          } else {
+            showMsg('', true);
+          }
         });
-        showMsg('', true); document.getElementById('stripePanel').scrollIntoView({behavior:'smooth', block:'center'});
+        showMsg('', true);
+        document.getElementById('stripePanel').scrollIntoView({behavior:'smooth', block:'center'});
       }catch(err){ console.error(err); showMsg('Stripe initialisation failed.'); }
     }
+
     async function confirmRedirectMethod(){
       const returnUrl = window.location.origin + window.location.pathname;
       const {error} = await stripe.confirmPayment({ elements, confirmParams: { return_url: returnUrl }, redirect: 'always' });
       if (error){ showMsg(error.message || 'Payment failed.'); }
     }
+
     async function confirmStripePayment(){
-      if (redirectMethods.has(currentMethodType)) { showMsg('For Klarna, Revolut Pay or Amazon Pay, select the option above and you will be redirected automatically.'); return; }
+      if (redirectMethods.has(currentMethodType)) {
+        showMsg('For Klarna, Revolut Pay or Amazon Pay, select the option above and you will be redirected automatically.');
+        return;
+      }
       if (!stripe || !elements){ showMsg('Payment form is not ready yet.'); return; }
       confBtn.disabled = true;
       const returnUrl = window.location.origin + window.location.pathname;
@@ -894,6 +879,7 @@
     payBtn?.addEventListener('click', (e)=>{ e.preventDefault(); openStripePanel(); });
     confBtn?.addEventListener('click', (e)=>{ e.preventDefault(); confirmStripePayment(); });
 
+    // Handle Stripe returning to the page
     (function handleStripeReturn(){
       const params = new URLSearchParams(window.location.search);
       const clientSecret = params.get('payment_intent_client_secret');
