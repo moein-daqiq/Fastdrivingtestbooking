@@ -1,7 +1,7 @@
 import os
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 import stripe
@@ -22,7 +22,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.3.1")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.4.0")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -48,7 +48,7 @@ def migrate():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT,
             updated_at TEXT,
-            status TEXT DEFAULT 'new',
+            status TEXT DEFAULT 'pending_payment',
             last_event TEXT,
             paid INTEGER DEFAULT 0,
             payment_intent_id TEXT,
@@ -66,7 +66,8 @@ def migrate():
             email TEXT,
             centres_json TEXT,
             options_json TEXT,
-            notes TEXT
+            notes TEXT,
+            expires_at TEXT
         )
     """)
     expected_cols = {
@@ -74,7 +75,7 @@ def migrate():
         "payment_intent_id","amount",
         "booking_type","licence_number","booking_reference","theory_pass",
         "date_window_from","date_window_to","time_window_from","time_window_to",
-        "phone","whatsapp","email","centres_json","options_json","notes"
+        "phone","whatsapp","email","centres_json","options_json","notes","expires_at"
     }
     cur.execute("PRAGMA table_info(searches)")
     have = {row["name"] for row in cur.fetchall()}
@@ -93,6 +94,7 @@ def migrate():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_status ON searches(status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_paid ON searches(paid)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_expires ON searches(expires_at)")
     conn.commit()
     conn.close()
 
@@ -100,6 +102,7 @@ migrate()
 
 # ---------- MODELS ----------
 class SearchIn(BaseModel):
+    # Works for both "lite" and full payloads
     booking_type: Literal["new", "swap"] = "new"
     licence_number: Optional[str] = None
     booking_reference: Optional[str] = None
@@ -113,6 +116,7 @@ class SearchIn(BaseModel):
     phone: Optional[str] = None
     whatsapp: Optional[str] = None
     email: Optional[str] = None
+    surname: Optional[str] = None  # added to align with front-end lite create
 
     centres: Any = Field(default_factory=list)   # list[str] or CSV
     options: Dict[str, Any] = Field(default_factory=dict)
@@ -120,7 +124,7 @@ class SearchIn(BaseModel):
 
 class PayCreateIntentIn(BaseModel):
     search_id: int
-    amount_cents: Optional[int] = None  # preferred
+    amount_cents: Optional[int] = None  # prefer cents
     amount:      Optional[int] = None   # legacy
     currency: str = "gbp"
     description: Optional[str] = None
@@ -137,8 +141,11 @@ class WorkerStatus(BaseModel):
     event: str
 
 # ---------- HELPERS ----------
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 def now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return utcnow().replace(microsecond=0).isoformat()
 
 def json_dumps(v) -> str:
     try:
@@ -180,10 +187,38 @@ def _verify_worker(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=403, detail="Invalid token")
     return True
 
+def _expire_unpaid(conn: sqlite3.Connection):
+    """Mark unpaid searches past expires_at as expired."""
+    cur = conn.cursor()
+    ts = now_iso()
+    cur.execute("""
+        UPDATE searches
+           SET status='expired', last_event='auto_expired', updated_at=?
+         WHERE paid=0 AND expires_at IS NOT NULL AND expires_at < ?
+           AND status IN ('pending_payment','new')
+    """, (ts, ts))
+    conn.commit()
+
+def _price_is_plausible(booking_type: Optional[str], amount_cents: int) -> bool:
+    """
+    Simple band validation:
+      - book: >= 15000
+      - swap: >=  7000
+      - extras in steps of 3000
+    """
+    if amount_cents <= 0 or amount_cents % 100 != 0:  # expect whole pounds
+        return False
+    base = 15000 if (booking_type or "new") == "new" else 7000
+    if amount_cents < base:
+        return False
+    # Anything above base must be base + n*3000 (for £30 options / surcharges)
+    delta = amount_cents - base
+    return delta % 3000 == 0
+
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.3.1"}
+    return {"ok": True, "ts": now_iso(), "version": "1.4.0"}
 
 # ---------- ROUTES ----------
 @app.post("/api/search")
@@ -191,29 +226,50 @@ async def create_search(payload: SearchIn):
     centres_list = _parse_centres(payload.centres)
 
     conn = get_conn()
+    _expire_unpaid(conn)  # tidy before creating
+
     cur = conn.cursor()
     ts = now_iso()
+    expires = (utcnow() + timedelta(minutes=30)).replace(microsecond=0).isoformat()
+
+    # Initial status is pending_payment; webhook will flip to queued
     cur.execute("""
         INSERT INTO searches (
             created_at, updated_at, status, last_event, paid,
             booking_type, licence_number, booking_reference, theory_pass,
             date_window_from, date_window_to, time_window_from, time_window_to,
-            phone, whatsapp, email, centres_json, options_json, notes
+            phone, whatsapp, email, centres_json, options_json, notes, expires_at
         ) VALUES (?,?,?,?,?,
                   ?,?,?,?,
                   ?,?,?,?,
-                  ?,?,?,?, ?,?)
+                  ?,?,?,?, ?,?,?)
     """, (
-        ts, ts, "new", "created", 0,
+        ts, ts, "pending_payment", "created", 0,
         payload.booking_type, payload.licence_number, payload.booking_reference, payload.theory_pass,
         payload.date_window_from, payload.date_window_to, payload.time_window_from, payload.time_window_to,
         payload.phone, payload.whatsapp, payload.email,
-        json_dumps(centres_list), json_dumps(payload.options), payload.notes
+        json_dumps(centres_list), json_dumps(payload.options), payload.notes, expires
     ))
     search_id = cur.lastrowid
     conn.commit()
     conn.close()
-    return {"ok": True, "search_id": search_id, "status": "new"}
+    return {"ok": True, "search_id": search_id, "status": "pending_payment", "expires_at": expires}
+
+# Disable (for the floating “Stop searching” button)
+@app.post("/api/search/{sid}/disable")
+def disable_search(sid: int, _: bool = Depends(_verify_worker)):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE searches
+           SET status='disabled', last_event='manually_disabled', updated_at=?
+         WHERE id=? AND status NOT IN ('booked','failed')
+    """, (now_iso(), sid))
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Not found or cannot disable")
+    return {"ok": True, "id": sid, "status": "disabled"}
 
 # Explicit OPTIONS route (some proxies require it even with CORSMiddleware)
 @app.options("/api/pay/create-intent")
@@ -221,20 +277,35 @@ async def options_pay_create_intent():
     return Response(status_code=204)
 
 @app.post("/api/pay/create-intent")
-async def pay_create_intent(body: PayCreateIntentIn):
+async def pay_create_intent(body: PayCreateIntentIn, request: Request):
     amount = body.amount_cents if body.amount_cents is not None else body.amount
     if amount is None or amount <= 0:
         raise HTTPException(status_code=400, detail="amount_cents (or amount) must be > 0")
 
     conn = get_conn()
+    _expire_unpaid(conn)
+
     cur = conn.cursor()
-    cur.execute("SELECT id FROM searches WHERE id = ?", (body.search_id,))
+    cur.execute("SELECT id, email, booking_type, status, paid FROM searches WHERE id = ?", (body.search_id,))
     row = cur.fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="search_id not found")
 
-    md = {"search_id": str(body.search_id)}
+    if row["paid"]:
+        conn.close()
+        raise HTTPException(status_code=409, detail="already paid")
+
+    if row["status"] in ("disabled", "expired", "failed", "booked"):
+        conn.close()
+        raise HTTPException(status_code=409, detail=f"invalid status: {row['status']}")
+
+    # Guardrails: validate amount roughly on server (optional, but safer)
+    if not _price_is_plausible(row["booking_type"], int(amount)):
+        conn.close()
+        raise HTTPException(status_code=400, detail="amount not in allowed range for booking type")
+
+    md = {"search_id": str(body.search_id), "email": (row["email"] or "")}
     if body.metadata:
         try:
             for k, v in body.metadata.items():
@@ -244,12 +315,15 @@ async def pay_create_intent(body: PayCreateIntentIn):
             pass
 
     try:
+        # One PaymentIntent per search idempotently
+        idempotency_key = f"pi_search_{body.search_id}"
         intent = stripe.PaymentIntent.create(
             amount=int(amount),
             currency=body.currency,
             description=body.description or f"Search #{body.search_id}",
             metadata=md,
             automatic_payment_methods={"enabled": True},
+            idempotency_key=idempotency_key,  # client can safely retry
         )
     except Exception as e:
         conn.close()
@@ -302,11 +376,11 @@ async def stripe_webhook(request: Request):
         amount_received = int(data.get("amount_received") or data.get("amount") or 0)
         if sid:
             _mark_paid_and_queue(int(sid), pi_id, "payment_intent.succeeded", amount_received)
-    elif etype == "payment_intent.payment_failed":
+    elif etype in ("payment_intent.canceled", "payment_intent.payment_failed"):
         pi_id = data.get("id")
         sid = (data.get("metadata") or {}).get("search_id")
         if sid:
-            _fail(int(sid), f"payment_failed ({pi_id})")
+            _fail(int(sid), f"{etype} ({pi_id})")
 
     conn.close()
     return JSONResponse({"received": True})
@@ -321,7 +395,8 @@ def _mark_paid_and_queue(search_id: int, payment_intent_id: str, event_label: st
                last_event = ?,
                payment_intent_id = ?,
                amount = COALESCE(NULLIF(?,0), amount),
-               updated_at = ?
+               updated_at = ?,
+               expires_at = NULL
          WHERE id = ?
     """, (event_label, payment_intent_id, amount_received, now_iso(), search_id))
     conn.commit()
@@ -337,17 +412,15 @@ def _fail(search_id: int, reason: str):
 
 # ---------- ADMIN ----------
 def _badge(s: str) -> str:
-    colors = {"new":"#64748b","queued":"#2563eb","searching":"#a855f7","found":"#10b981","booked":"#16a34a","failed":"#ef4444"}
+    colors = {
+        "pending_payment":"#64748b","new":"#64748b","queued":"#2563eb",
+        "searching":"#a855f7","found":"#10b981","booked":"#16a34a",
+        "failed":"#ef4444","expired":"#334155","disabled":"#6b7280"
+    }
     c = colors.get(s, "#334155")
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
 
 def _derive_flags(row: sqlite3.Row):
-    """
-    Derive:
-      - reached: True if we've interacted with a centre or found/booked/failed a slot
-      - last_centre: centre-like token parsed from event payload if present
-      - captcha: True if last_event indicates a captcha cooldown
-    """
     ev = (row["last_event"] or "").strip()
     reached = False
     last_centre = ""
@@ -372,6 +445,8 @@ def _derive_flags(row: sqlite3.Row):
 async def admin(request: Request, status: Optional[str] = Query(None)):
     require_admin(request)
     conn = get_conn()
+    _expire_unpaid(conn)
+
     cur = conn.cursor()
     cur.execute("SELECT status, COUNT(*) as c FROM searches GROUP BY status")
     counts = {r["status"]: r["c"] for r in cur.fetchall()}
@@ -385,10 +460,8 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
 
     def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
 
-    statuses = ["new","queued","searching","found","booked","failed"]
-    # GOOD
+    statuses = ["pending_payment","new","queued","searching","found","booked","failed","expired","disabled"]
     pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
-
     clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
 
     rows_html = []
@@ -416,12 +489,9 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             td(r["last_event"] or "") +
             td(r["paid"]) +
             td(r["payment_intent_id"] or "") +
-
-            # NEW derived columns
             td(reached_html) +
             td(last_centre or "—") +
             td(captcha_html) +
-
             td(r["created_at"] or "") +
             td(r["updated_at"] or "") +
             "</tr>"
@@ -478,6 +548,8 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
 @app.post("/api/worker/claim")
 def worker_claim(body: WorkerClaimRequest, _: bool = Depends(_verify_worker)):
     conn = get_conn()
+    _expire_unpaid(conn)
+
     cur = conn.cursor()
     cur.execute("""
         SELECT * FROM searches
