@@ -435,7 +435,7 @@
       if (!input) return;
       const label = findLabelFor(input);
       const hasVal = (input.value || '').trim() !== '';
-      input.classList.toggle('error', !isValid && hasVal); /* ✅ fixed: no stray comma */
+      input.classList.toggle('error', !isValid && hasVal);
       input.setAttribute('aria-invalid', (!isValid && hasVal) ? 'true' : 'false');
       if (label){
         if (!isValid && hasVal){
@@ -905,36 +905,43 @@
       if (!isBook && !isSwap){ showMsg('Please select Book (£150) or Swap (£70) first.'); return false; }
       return true;
     }
-    function centresCSV(){
-      return Array.from(document.querySelectorAll('.centre-input')).map(i=>i.value.trim()).filter(Boolean).join(',');
-    }
-    async function ensurePreSearch(){
-      let sid = localStorage.getItem('dvsa_last_search_id');
-      if (sid) return sid;
-      const surname = (document.getElementById('surname')?.value||'').trim();
-      const email   = (document.getElementById('email')?.value||'').trim();
-      const centres = centresCSV();
-      if (!surname || !email || !centres){ showMsg('Enter Surname, Email and at least one Test Centre before paying.'); throw new Error('missing fields'); }
-      const r = await fetch(`${API_BASE}/search`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ surname, email, centres }) });
-      const text = await r.text(); let j; try { j = JSON.parse(text) } catch { j = null; }
-      if (!r.ok) throw new Error(j?.error || text || `HTTP ${r.status}`);
-      sid = j?.id || j?.search_id; if (sid) localStorage.setItem('dvsa_last_search_id', String(sid));
-      return sid;
-    }
+
+    // --------- NEW: no pre-search required; backend will create one if missing ----------
     async function createIntentIfNeeded(){
       const amount = amountFromTotalLine();
       if (!amount || isNaN(+amount) || +amount <= 0){ showMsg('Total is not valid.'); return false; }
-      let searchId; try { searchId = await ensurePreSearch(); } catch (e) { console.error(e); return false; }
+
+      const existingSid = localStorage.getItem('dvsa_last_search_id');
+      const email = (document.getElementById('email')?.value || '').trim() || null;
+
       try{
         const r = await fetch(`${API_BASE}/pay/create-intent`, {
-          method:'POST', headers:{ 'Content-Type':'application/json' },
-          body: JSON.stringify({ amount_cents: Math.round(parseFloat(amount)*100), currency: 'gbp', search_id: Number(searchId) })
+          method:'POST',
+          headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({
+            amount_cents: Math.round(parseFloat(amount)*100),
+            currency: 'gbp',
+            // pass existing id if present; backend will auto-create if null
+            search_id: existingSid ? Number(existingSid) : null,
+            email
+          })
         });
         const j = await r.json();
         if(!r.ok || !j?.client_secret){ throw new Error(j?.detail || j?.error || 'Failed to create payment intent'); }
-        lastClientSecret = j.client_secret; return true;
-      }catch(err){ console.error(err); showMsg('Stripe error: ' + (err?.message || err)); return false; }
+
+        // Save/refresh the search id returned by backend (important for submit & webhooks)
+        if (j.search_id) localStorage.setItem('dvsa_last_search_id', String(j.search_id));
+
+        lastClientSecret = j.client_secret;
+        return true;
+      }catch(err){
+        console.error(err);
+        showMsg('Stripe error: ' + (err?.message || err));
+        return false;
+      }
     }
+    // -----------------------------------------------------------------------------------
+
     async function openStripePanel(){
       panel.style.display = 'block';
       if (!STRIPE_PUBLISHABLE_KEY){ showMsg('Stripe publishable key is missing on this page. Add window.STRIPE_PUBLISHABLE_KEY in <head>.'); return; }
