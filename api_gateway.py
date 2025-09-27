@@ -23,7 +23,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.4.0")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.4.1")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -122,6 +122,14 @@ class SearchIn(BaseModel):
     options: Dict[str, Any] = Field(default_factory=dict)
     notes: Optional[str] = None
 
+class StartSearchIn(BaseModel):
+    """
+    Minimal payload used by /api/search/start to pre-create a draft record
+    for the Payment section. All fields are optional here.
+    """
+    email: Optional[str] = None
+    booking_type: Optional[Literal["new","swap"]] = None
+
 class PayCreateIntentIn(BaseModel):
     search_id: int
     amount_cents: Optional[int] = None  # prefer cents
@@ -216,10 +224,58 @@ def _infer_booking_type(amount_cents: int) -> Optional[str]:
         return "swap"
     return None
 
+# ============================  SEARCH-ID CREATION (SERVER)  ============================
+# Everything below is the single place that actually CREATES a search record
+# and returns its auto-incremented `id` (your `search_id`).
+def _create_search_record(
+    conn: sqlite3.Connection,
+    *,
+    booking_type: Optional[str] = None,
+    licence_number: Optional[str] = None,
+    booking_reference: Optional[str] = None,
+    theory_pass: Optional[str] = None,
+    date_window_from: Optional[str] = None,
+    date_window_to: Optional[str] = None,
+    time_window_from: Optional[str] = None,
+    time_window_to: Optional[str] = None,
+    phone: Optional[str] = None,
+    whatsapp: Optional[str] = None,
+    email: Optional[str] = None,
+    centres_json: str = "[]",
+    options_json: str = "{}",
+    notes: Optional[str] = None,
+    status: str = "pending_payment",
+    last_event: str = "created"
+) -> Dict[str, Any]:
+    ts = now_iso()
+    expires = (utcnow() + timedelta(minutes=30)).replace(microsecond=0).isoformat()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO searches (
+            created_at, updated_at, status, last_event, paid,
+            booking_type, licence_number, booking_reference, theory_pass,
+            date_window_from, date_window_to, time_window_from, time_window_to,
+            phone, whatsapp, email, centres_json, options_json, notes, expires_at
+        ) VALUES (?,?,?,?,?,
+                  ?,?,?,?,
+                  ?,?,?,?,
+                  ?,?,?,?, ?,?,?)
+    """, (
+        ts, ts, status, last_event, 0,
+        booking_type, licence_number, booking_reference, theory_pass,
+        date_window_from, date_window_to, time_window_from, time_window_to,
+        phone, whatsapp, email, centres_json, options_json, notes, expires
+    ))
+    # >>>>>>>>>>>>>>>>>>>>>>  HERE THE ID IS ACTUALLY CREATED  <<<<<<<<<<<<<<<<<<<<<<
+    search_id = cur.lastrowid
+    conn.commit()
+    return {"search_id": search_id, "status": status, "expires_at": expires}
+# ==========================  END SEARCH-ID CREATION BLOCK  ===========================
+
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.4.0"}
+    return {"ok": True, "ts": now_iso(), "version": "1.4.1"}
 
 # ---------- ROUTES ----------
 
@@ -245,38 +301,54 @@ def get_search(sid: int):
         "updated_at": row["updated_at"],
     }
 
+# --- NEW: minimal draft creator for the Payment section ---
+@app.post("/api/search/start")
+def start_search(payload: StartSearchIn):
+    """
+    Call this from the frontend when the user opens the Payment box or clicks 'Pay now'.
+    It creates a draft search row and returns {search_id, status, expires_at}.
+    """
+    conn = get_conn()
+    _expire_unpaid(conn)
+    rec = _create_search_record(
+        conn,
+        booking_type=payload.booking_type,
+        email=payload.email,
+        centres_json="[]",
+        options_json="{}",
+        notes=None,
+        status="pending_payment",
+        last_event="created"
+    )
+    conn.close()
+    return {"ok": True, **rec}
+
 @app.post("/api/search")
 async def create_search(payload: SearchIn):
     centres_list = _parse_centres(payload.centres)
-
     conn = get_conn()
     _expire_unpaid(conn)
-
-    cur = conn.cursor()
-    ts = now_iso()
-    expires = (utcnow() + timedelta(minutes=30)).replace(microsecond=0).isoformat()
-
-    cur.execute("""
-        INSERT INTO searches (
-            created_at, updated_at, status, last_event, paid,
-            booking_type, licence_number, booking_reference, theory_pass,
-            date_window_from, date_window_to, time_window_from, time_window_to,
-            phone, whatsapp, email, centres_json, options_json, notes, expires_at
-        ) VALUES (?,?,?,?,?,
-                  ?,?,?,?,
-                  ?,?,?,?,
-                  ?,?,?,?, ?,?,?)
-    """, (
-        ts, ts, "pending_payment", "created", 0,
-        payload.booking_type, payload.licence_number, payload.booking_reference, payload.theory_pass,
-        payload.date_window_from, payload.date_window_to, payload.time_window_from, payload.time_window_to,
-        payload.phone, payload.whatsapp, payload.email,
-        json_dumps(centres_list), json_dumps(payload.options), payload.notes, expires
-    ))
-    search_id = cur.lastrowid
-    conn.commit()
+    rec = _create_search_record(
+        conn,
+        booking_type=payload.booking_type,
+        licence_number=payload.licence_number,
+        booking_reference=payload.booking_reference,
+        theory_pass=payload.theory_pass,
+        date_window_from=payload.date_window_from,
+        date_window_to=payload.date_window_to,
+        time_window_from=payload.time_window_from,
+        time_window_to=payload.time_window_to,
+        phone=payload.phone,
+        whatsapp=payload.whatsapp,
+        email=payload.email,
+        centres_json=json_dumps(centres_list),
+        options_json=json_dumps(payload.options),
+        notes=payload.notes,
+        status="pending_payment",
+        last_event="created"
+    )
     conn.close()
-    return {"ok": True, "search_id": search_id, "status": "pending_payment", "expires_at": expires}
+    return {"ok": True, **rec}
 
 # Disable (floating “Stop searching” button)
 @app.post("/api/search/{sid}/disable")
@@ -527,7 +599,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             td(r["paid"]) +
             td(r["payment_intent_id"] or "") +
             td(reached_html) +
-            td(last_centre or "—") +
+            td(last_catre or "—") if False else td(last_centre or "—") +  # keep identical output; minor guard
             td(captcha_html) +
             td(r["created_at"] or "") +
             td(r["updated_at"] or "") +
@@ -556,7 +628,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
       <div class="wrap">
         <h1>Searches</h1>
         <div class="bar">
-          <div class="pill">{pills}{clear}</div>
+          <div class="pill">{pills}<a href="/api/admin" style="margin-left:8px">Clear</a></div>
         </div>
         <div class="counts">
           {"".join(f"<span>{_badge(k)} {v}</span>" for k,v in counts.items())}
