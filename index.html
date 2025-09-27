@@ -46,7 +46,6 @@
     #test-booking-type .heading{ display:grid; grid-template-columns:1fr; text-align:center }
     #test-booking-type .heading .helper{ color:var(--muted); font-size:15.5px; font-weight:400; margin-top:6px }
     #test-booking-type .row{ display:grid; grid-template-columns:1fr 1fr; column-gap:16px; row-gap:10px; align-items:start }
-    #test-booking-type .row .btn, #test-booking-type .row input{ width:100%; height:34px; box-sizing:border-box }
     #btnBook{ grid-column:1; grid-row:1 }  #theoryPass{ grid-column:1; grid-row:2 }
     #btnSwap{ grid-column:2; grid-row:1 }  #swapRef{ grid-column:2; grid-row:2 }
     #test-booking-type .note-line{ display:grid; grid-template-columns:1fr 1fr; gap:16px }
@@ -879,7 +878,7 @@
   </script>
 
   <script>
-    /* Search submit + health + stop button */
+    /* Search submit + health + stop button + (NEW) immediate upsert after payment */
     (() => {
       const API_TOKEN = 'YOUR_REAL_API_TOKEN'; // do NOT ship real secrets client-side
 
@@ -962,67 +961,116 @@
         } catch (e) { toast('Failed to disable: ' + (e?.message || e), false); }
       }
 
-      function collectPayload() {
-        const centres = $$('.centre-input').map(i => i.value.trim()).filter(Boolean);
+      // --- NEW: Build payload matching the API SearchIn model + include search_id ---
+      function collectApiPayload(includeSearchId=true) {
+        const centresArr = $$('.centre-input').map(i => i.value.trim()).filter(Boolean);
         const swapSelected  = document.getElementById('btnSwap')?.classList.contains('selected');
         const bookSelected  = document.getElementById('btnBook')?.classList.contains('selected');
         const swapRef       = document.getElementById('swapRef')?.value.trim() || '';
         const theoryPass    = document.getElementById('theoryPass')?.value.trim() || '';
 
         const payload = {
+          // identity
           email:  document.getElementById('email')?.value.trim() || null,
           phone:  normalizePhone(document.getElementById('phoneRaw')?.value),
-          centres: centres.join(','),
-          from_date: ymd(document.getElementById('earliestDate')),
-          to_date:   ymd(document.getElementById('latestDate')),
-          time_from: toHH(document.getElementById('timeFrom')?.value),
-          time_to:   toHHpm(document.getElementById('timeTo')?.value),
-          notice_days: parseInt(document.getElementById('noticeDays')?.value || '0', 10) || 0,
-          surname:         document.getElementById('surname')?.value.trim() || null,
+          // booking type + keys expected by backend
+          booking_type: bookSelected ? 'new' : (swapSelected ? 'swap' : 'new'),
           licence_number:  document.getElementById('drivingLicence')?.value.trim() || null,
-          booking_reference: swapSelected ? swapRef : undefined,
-          theory_pass:       bookSelected ? theoryPass : undefined,
-          mode: 'auto',
-          auth_method: 3
+          booking_reference: swapSelected ? swapRef : null,
+          theory_pass:       bookSelected ? theoryPass : null,
+          // windows
+          date_window_from: ymd(document.getElementById('earliestDate')),
+          date_window_to:   ymd(document.getElementById('latestDate')),
+          time_window_from: toHH(document.getElementById('timeFrom')?.value),
+          time_window_to:   toHHpm(document.getElementById('timeTo')?.value),
+          // centres
+          centres: centresArr,
+          // placeholder options object (keep shape)
+          options: {}
         };
-        Object.keys(payload).forEach(k => { if (payload[k] === undefined || payload[k] === null || payload[k] === '') delete payload[k]; });
+        if (includeSearchId) {
+          const sid = currentSearchId();
+          if (sid) payload.search_id = Number(sid);
+        }
+        // prune empties
+        Object.keys(payload).forEach(k => {
+          if (payload[k] === undefined || payload[k] === null || payload[k] === '') delete payload[k];
+        });
         return payload;
       }
+
+      // --- NEW: push data to the same row immediately (used after payment success) ---
+      async function upsertSearchRecord(silent=false) {
+        const sid = currentSearchId();
+        if (!sid) { if (!silent) toast('No search ID to update yet.', false); return false; }
+        const payload = collectApiPayload(true);
+        try {
+          const r = await fetch(`${API_BASE}/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const text = await r.text();
+          if (!r.ok) throw new Error(text || `HTTP ${r.status}`);
+          if (!silent) toast('Details saved to your search.', true);
+          return true;
+        } catch (e) {
+          if (!silent) toast('Failed to save details: ' + (e?.message || e), false);
+          return false;
+        }
+      }
+      // expose for Stripe handler
+      window._upsertSearchRecord = upsertSearchRecord;
 
       async function submitToApi() {
         const btn = document.getElementById('submitBtn');
         if (!btn || btn.disabled) return;
 
-        const p = collectPayload();
-        if (!p.centres) return toast('Select at least one test centre.', false);
-        if (!p.from_date || !p.to_date) return toast('Choose earliest/latest dates.', false);
-        if (!p.surname || !p.licence_number) return toast('Enter surname and licence number.', false);
-        if (!p.email) return toast('Enter your email.', false);
-        if (!p.phone) return toast('Enter your WhatsApp phone.', false);
-        if (document.getElementById('btnSwap')?.classList.contains('selected') && !/^\d{8}$/.test(document.getElementById('swapRef')?.value||'')) {
+        // Validations (front-end)
+        const centresOK = $$('.centre-input').some(i => (i.value||'').trim());
+        if (!centresOK) return toast('Select at least one test centre.', false);
+        const from = ymd(document.getElementById('earliestDate'));
+        const to   = ymd(document.getElementById('latestDate'));
+        if (!from || !to) return toast('Choose earliest/latest dates.', false);
+
+        const licence = document.getElementById('drivingLicence')?.value.trim() || '';
+        if (licence.length !== 16) return toast('Enter the first 16 characters of your licence.', false);
+
+        const email = document.getElementById('email')?.value.trim() || '';
+        if (!email) return toast('Enter your email.', false);
+
+        const phone = normalizePhone(document.getElementById('phoneRaw')?.value);
+        if (!phone) return toast('Enter your WhatsApp phone.', false);
+
+        const swapSelected = document.getElementById('btnSwap')?.classList.contains('selected');
+        if (swapSelected && !/^\d{8}$/.test((document.getElementById('swapRef')?.value||''))) {
           return toast('Swap selected: add the 8-digit DVSA booking reference.', false);
         }
 
+        // Send to /api/search (creates new if no id; updates if id present)
         try {
           btn.disabled = true; btn.classList.remove('enabled');
-          toast('Submitting your search…');
+          const payload = collectApiPayload(true);
           const r = await fetch(`${API_BASE}/search`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${API_TOKEN}` },
-            body: JSON.stringify(p)
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
           });
           const text = await r.text(); let j; try { j = JSON.parse(text) } catch { j = null; }
-          if (!r.ok) throw new Error(j?.error || text || `HTTP ${r.status}`);
-          const id = j?.id || j?.search_id || '';
-          if (id) { localStorage.setItem('dvsa_last_search_id', id); ensureStopButton(); }
-          toast(id ? `Search created: ${id}` : 'Search created', true);
+          if (!r.ok) throw new Error(j?.detail || j?.error || text || `HTTP ${r.status}`);
+          const id = j?.id || j?.search_id || currentSearchId() || '';
+          if (id) { localStorage.setItem('dvsa_last_search_id', String(id)); ensureStopButton(); }
+          toast(id ? `Search saved: ${id}` : 'Search saved', true);
           console.log('Gateway response:', j);
 
-          // NEW: refresh page after successful submission
+          // optional refresh
           setTimeout(() => { window.location.reload(); }, 600);
 
         } catch (err) {
           console.error(err); toast(`API error: ${err?.message || err}`, false);
-        } finally { /* submit re-enabled only after successful Stripe payment */ }
+        } finally {
+          // keep disabled; payment success already enabled it
+        }
       }
 
       window.addEventListener('DOMContentLoaded', async () => {
@@ -1056,6 +1104,8 @@
       if (pill){ pill.textContent='Payment: Paid'; pill.classList.add('paid'); }
       const submitBtn = document.getElementById('submitBtn');
       if (submitBtn){ submitBtn.disabled = false; submitBtn.classList.add('enabled'); }
+      // NEW: immediately upsert details into the paid row so the worker sees DL/ref in "searching"
+      if (window._upsertSearchRecord) { window._upsertSearchRecord(true); }
     }
     function showMsg(text, ok=false){
       panel.style.display = 'block';
@@ -1177,4 +1227,3 @@
   </script>
 </body>
 </html>
-
