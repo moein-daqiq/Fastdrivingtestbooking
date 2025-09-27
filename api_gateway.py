@@ -548,6 +548,12 @@ def _badge(s: str) -> str:
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
 
 def _derive_flags(row: sqlite3.Row):
+    """
+    Compute Admin flags from last_event only (no schema changes):
+    - reached: True if we saw a DVSA interaction event.
+    - last_centre: parsed from 'checked:<Centre>...' or 'slot_found:Centre · ...'.
+    - captcha: True when last_event starts with 'captcha_cooldown:'.
+    """
     ev = (row["last_event"] or "").strip()
     reached = False
     last_centre = ""
@@ -567,6 +573,16 @@ def _derive_flags(row: sqlite3.Row):
         captcha = True
 
     return reached, last_centre, captcha
+
+def _fmt_booking_ref(row: sqlite3.Row) -> str:
+    """Show 8-digit ref with a quick validity hint for swap jobs."""
+    ref = (row["booking_reference"] or "").strip()
+    if (row["booking_type"] or "") == "swap":
+        ok = len(ref) == 8 and ref.isdigit()
+        if ok:
+            return f"{ref} ✅"
+        return f"{ref or '—'} <span title='Missing or not 8 digits'>⚠</span>"
+    return ref or ""
 
 @app.get("/api/admin", response_class=HTMLResponse)
 async def admin(request: Request, status: Optional[str] = Query(None)):
@@ -605,7 +621,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             td(_badge(r["status"])) +
             td(r["booking_type"] or "") +
             td(r["licence_number"] or "") +
-            td(r["booking_reference"] or "") +
+            td(_fmt_booking_ref(r)) +  # Booking reference with validity hint for swap jobs
             td(r["theory_pass"] or "") +
             td(f'{r["date_window_from"] or ""} → {r["date_window_to"] or ""}<br>{r["time_window_from"] or ""} → {r["time_window_to"] or ""}') +
             td(r["phone"] or "") +
