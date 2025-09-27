@@ -168,6 +168,25 @@ def normalize_centres(centres: List[str]) -> List[str]:
             cleaned.append(c0)
     return cleaned
 
+# ===== NEW: required-field guard (licence for all; 8-digit ref for swap) =====
+def _missing_required_fields(row: dict) -> Optional[str]:
+    """Return a reason string if required credentials are missing, else None."""
+    booking_type = (row.get("booking_type") or "").strip()
+    licence = (row.get("licence_number") or "").strip()
+    ref = (row.get("booking_reference") or "").strip()
+
+    # Licence is required for BOTH flows (DVSA login)
+    if not licence:
+        return "missing_licence_number"
+
+    # Swap requires an 8-digit booking reference
+    if booking_type == "swap":
+        if not (len(ref) == 8 and ref.isdigit()):
+            return "missing_or_bad_booking_reference"
+
+    return None
+# ============================================================================
+
 # ==============================
 # DB (worker-only small state)
 # ==============================
@@ -486,6 +505,14 @@ async def assist_window_monitor(sid: int, slot_txt: str):
 # ==============================
 async def process_job(client: httpx.AsyncClient, row: dict):
     sid = row["id"]
+
+    # ---- NEW: enforce required credentials before spending DVSA checks ----
+    missing_reason = _missing_required_fields(row)
+    if missing_reason:
+        await set_status_api(client, row, "queued", missing_reason)
+        return
+    # ----------------------------------------------------------------------
+
     centres: List[str] = safe_json_loads(row.get("centres_json"), [])
     centres = normalize_centres(centres)
     if not centres:
@@ -494,7 +521,7 @@ async def process_job(client: httpx.AsyncClient, row: dict):
     sem = asyncio.Semaphore(JOB_MAX_PARALLEL_CHECKS)
     found_slot: Optional[str] = None
     captcha_hit = False
-    last_checked: Optional[str] = None  # <-- NEW: remember most recent centre we tried
+    last_checked: Optional[str] = None  # remember most recent centre we tried
 
     async def check_one(c: str):
         nonlocal found_slot, captcha_hit, last_checked
