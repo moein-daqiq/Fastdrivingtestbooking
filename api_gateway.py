@@ -103,6 +103,9 @@ migrate()
 
 # ---------- MODELS ----------
 class SearchIn(BaseModel):
+    # NEW: allow FE to update an existing draft/paid record
+    search_id: Optional[int] = None
+
     booking_type: Literal["new", "swap"] = "new"
     licence_number: Optional[str] = None
     booking_reference: Optional[str] = None
@@ -317,9 +320,63 @@ def start_search(payload: StartSearchIn):
 
 @app.post("/api/search")
 async def create_search(payload: SearchIn):
+    """
+    If `payload.search_id` is provided, update that existing row (typically after payment).
+    Otherwise, create a new pending draft (original behavior).
+    """
     centres_list = _parse_centres(payload.centres)
     conn = get_conn()
     _expire_unpaid(conn)
+    cur = conn.cursor()
+
+    if payload.search_id:
+        cur.execute("SELECT id FROM searches WHERE id=?", (payload.search_id,))
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="search_id not found")
+
+        cur.execute("""
+            UPDATE searches SET
+                booking_type=?,
+                licence_number=?,
+                booking_reference=?,
+                theory_pass=?,
+                date_window_from=?,
+                date_window_to=?,
+                time_window_from=?,
+                time_window_to=?,
+                phone=?,
+                whatsapp=?,
+                email=?,
+                centres_json=?,
+                options_json=?,
+                notes=?,
+                updated_at=?
+            WHERE id=?
+        """, (
+            payload.booking_type,
+            payload.licence_number,
+            payload.booking_reference,
+            payload.theory_pass,
+            payload.date_window_from,
+            payload.date_window_to,
+            payload.time_window_from,
+            payload.time_window_to,
+            payload.phone,
+            payload.whatsapp,
+            payload.email,
+            json_dumps(centres_list),
+            json_dumps(payload.options),
+            payload.notes,
+            now_iso(),
+            payload.search_id
+        ))
+        conn.commit()
+        conn.close()
+        return {"ok": True, "search_id": payload.search_id}
+
+    # Insert new (unchanged path)
     rec = _create_search_record(
         conn,
         booking_type=payload.booking_type,
