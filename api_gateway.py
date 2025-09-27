@@ -23,12 +23,12 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.4.2")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.4.3")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^https://([a-z0-9-]+\.)?fastdrivingtestfinder\.co\.uk$",
+    allow_origin_regex=r"^https?://([a-z0-9-]+\.)?fastdrivingtestfinder\.co\.uk$|^http://localhost(:\d+)?$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -123,10 +123,7 @@ class SearchIn(BaseModel):
     notes: Optional[str] = None
 
 class StartSearchIn(BaseModel):
-    """
-    Minimal payload used by /api/search/start to pre-create a draft record
-    for the Payment section. All fields are optional here.
-    """
+    """Minimal payload used by /api/search/start to pre-create a draft record."""
     email: Optional[str] = None
     booking_type: Optional[Literal["new","swap"]] = None
 
@@ -227,8 +224,6 @@ def _infer_booking_type(amount_cents: int) -> Optional[str]:
     return None
 
 # ============================  SEARCH-ID CREATION (SERVER)  ============================
-# Everything below is the single place that actually CREATES a search record
-# and returns its auto-incremented `id` (your `search_id`).
 def _create_search_record(
     conn: sqlite3.Connection,
     *,
@@ -268,7 +263,6 @@ def _create_search_record(
         date_window_from, date_window_to, time_window_from, time_window_to,
         phone, whatsapp, email, centres_json, options_json, notes, expires
     ))
-    # >>>>>>>>>>>>>>>>>>>>>>  HERE THE ID IS ACTUALLY CREATED  <<<<<<<<<<<<<<<<<<<<<<
     search_id = cur.lastrowid
     conn.commit()
     return {"search_id": search_id, "status": status, "expires_at": expires}
@@ -277,11 +271,11 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.4.2"}
+    return {"ok": True, "ts": now_iso(), "version": "1.4.3"}
 
 # ---------- ROUTES ----------
 
-# NEW: tiny lookup so the FE can verify cached IDs
+# Tiny lookup so the FE can verify cached IDs
 @app.get("/api/search/{sid}")
 def get_search(sid: int):
     conn = get_conn()
@@ -303,13 +297,9 @@ def get_search(sid: int):
         "updated_at": row["updated_at"],
     }
 
-# --- minimal draft creator for the Payment section ---
+# Minimal draft creator for the Payment section
 @app.post("/api/search/start")
 def start_search(payload: StartSearchIn):
-    """
-    Call this from the frontend when the user opens the Payment box or clicks 'Pay now'.
-    It creates a draft search row and returns {search_id, status, expires_at}.
-    """
     conn = get_conn()
     _expire_unpaid(conn)
     rec = _create_search_record(
@@ -373,7 +363,7 @@ def disable_search(sid: int, _: bool = Depends(_verify_worker)):
 async def options_pay_create_intent():
     return Response(status_code=204)
 
-# ---------- CHANGED: auto-create a draft if search_id is missing ----------
+# ---------- CHANGED: auto-create (or auto-recreate) a draft if search_id is missing/bad ----------
 @app.post("/api/pay/create-intent")
 async def pay_create_intent(body: PayCreateIntentIn, request: Request):
     amount = body.amount_cents if body.amount_cents is not None else body.amount
@@ -384,43 +374,48 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
     _expire_unpaid(conn)
     cur = conn.cursor()
 
-    # If no search_id supplied, create a minimal draft row now.
-    if body.search_id is None:
+    def _make_draft(email: Optional[str], last_event: str) -> int:
         rec = _create_search_record(
             conn,
-            email=body.email,
+            email=email,
             centres_json="[]",
             options_json="{}",
             notes=None,
             status="pending_payment",
-            last_event="created_via_create_intent"
+            last_event=last_event
         )
-        sid = rec["search_id"]
-    else:
-        sid = body.search_id
+        return rec["search_id"]
 
-    # Validate the (existing or newly created) record
+    # Resolve/repair search id (create when missing or invalid)
+    if body.search_id is None:
+        sid = _make_draft(body.email, "created_via_create_intent")
+    else:
+        cur.execute("SELECT id, email, booking_type, status, paid FROM searches WHERE id = ?", (body.search_id,))
+        row = cur.fetchone()
+        if not row:
+            sid = _make_draft(body.email, "recreated_via_create_intent_not_found")
+        elif row["paid"]:
+            sid = _make_draft(row["email"] or body.email, "recreated_via_create_intent_already_paid")
+        elif row["status"] in ("disabled", "expired", "failed", "booked"):
+            sid = _make_draft(row["email"] or body.email, f"recreated_via_create_intent_{row['status']}")
+        else:
+            sid = row["id"]
+
+    # Re-fetch canonical row
     cur.execute("SELECT id, email, booking_type, status, paid FROM searches WHERE id = ?", (sid,))
     row = cur.fetchone()
     if not row:
         conn.close()
-        raise HTTPException(status_code=404, detail="search_id not found")
-
-    if row["paid"]:
-        conn.close()
-        raise HTTPException(status_code=409, detail="already paid")
-
-    if row["status"] in ("disabled", "expired", "failed", "booked"):
-        conn.close()
-        raise HTTPException(status_code=409, detail=f"invalid status: {row['status']}")
+        raise HTTPException(status_code=500, detail="internal: draft create failed")
 
     amount = int(amount)
 
-    # Accept either band (swap or book) and infer/repair booking_type if needed
+    # Amount guardrails: accept £70/£150 base and +£30 steps
     if not (_band_ok(amount, 7000) or _band_ok(amount, 15000)):
         conn.close()
         raise HTTPException(status_code=400, detail="amount not in allowed range")
 
+    # Infer/repair booking_type if needed
     inferred = _infer_booking_type(amount)
     existing_type = (row["booking_type"] or "").strip() or None
     if inferred and inferred != existing_type:
@@ -433,6 +428,7 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
         except Exception:
             pass  # best-effort
 
+    # Build metadata
     md = {"search_id": str(sid), "email": (row["email"] or body.email or "")}
     if body.metadata:
         try:
@@ -442,8 +438,8 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
         except Exception:
             pass
 
+    # Create or reuse PaymentIntent (idempotent per search)
     try:
-        # One PaymentIntent per search idempotently
         intent = stripe.PaymentIntent.create(
             amount=amount,
             currency=body.currency,
@@ -463,7 +459,7 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
     conn.commit()
     conn.close()
     return {
-        "search_id": sid,  # <-- return so FE can store it for final submit
+        "search_id": sid,
         "client_secret": intent["client_secret"],
         "clientSecret": intent["client_secret"],
         "paymentIntentId": intent["id"]
@@ -493,8 +489,10 @@ async def stripe_webhook(request: Request):
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute("INSERT OR IGNORE INTO stripe_events (id, type, created_at) VALUES (?,?,?)",
-                    (event_id, etype, now_iso()))
+        cur.execute(
+            "INSERT OR IGNORE INTO stripe_events (id, type, created_at) VALUES (?,?,?)",
+            (event_id, etype, now_iso())
+        )
         conn.commit()
     except Exception:
         pass
@@ -591,7 +589,6 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
 
     statuses = ["pending_payment","new","queued","searching","found","booked","failed","expired","disabled"]
     pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
-    clear = '<a href="/api/admin" style="margin-left:8px">Clear</a>'
 
     rows_html = []
     for r in rows:
@@ -619,7 +616,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             td(r["paid"]) +
             td(r["payment_intent_id"] or "") +
             td(reached_html) +
-            td(last_catre or "—") if False else td(last_centre or "—") +  # keep identical output; minor guard
+            td(last_centre or "—") +
             td(captcha_html) +
             td(r["created_at"] or "") +
             td(r["updated_at"] or "") +
