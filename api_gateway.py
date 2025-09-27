@@ -23,7 +23,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.4.1")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.4.2")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -130,13 +130,15 @@ class StartSearchIn(BaseModel):
     email: Optional[str] = None
     booking_type: Optional[Literal["new","swap"]] = None
 
+# ---------- CHANGED: search_id optional, optional email for metadata ----------
 class PayCreateIntentIn(BaseModel):
-    search_id: int
+    search_id: Optional[int] = None
     amount_cents: Optional[int] = None  # prefer cents
     amount:      Optional[int] = None   # legacy
     currency: str = "gbp"
     description: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    email: Optional[str] = None
 
 class WorkerClaimRequest(BaseModel):
     limit: int = 8
@@ -275,7 +277,7 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.4.1"}
+    return {"ok": True, "ts": now_iso(), "version": "1.4.2"}
 
 # ---------- ROUTES ----------
 
@@ -301,7 +303,7 @@ def get_search(sid: int):
         "updated_at": row["updated_at"],
     }
 
-# --- NEW: minimal draft creator for the Payment section ---
+# --- minimal draft creator for the Payment section ---
 @app.post("/api/search/start")
 def start_search(payload: StartSearchIn):
     """
@@ -371,6 +373,7 @@ def disable_search(sid: int, _: bool = Depends(_verify_worker)):
 async def options_pay_create_intent():
     return Response(status_code=204)
 
+# ---------- CHANGED: auto-create a draft if search_id is missing ----------
 @app.post("/api/pay/create-intent")
 async def pay_create_intent(body: PayCreateIntentIn, request: Request):
     amount = body.amount_cents if body.amount_cents is not None else body.amount
@@ -379,9 +382,25 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
 
     conn = get_conn()
     _expire_unpaid(conn)
-
     cur = conn.cursor()
-    cur.execute("SELECT id, email, booking_type, status, paid FROM searches WHERE id = ?", (body.search_id,))
+
+    # If no search_id supplied, create a minimal draft row now.
+    if body.search_id is None:
+        rec = _create_search_record(
+            conn,
+            email=body.email,
+            centres_json="[]",
+            options_json="{}",
+            notes=None,
+            status="pending_payment",
+            last_event="created_via_create_intent"
+        )
+        sid = rec["search_id"]
+    else:
+        sid = body.search_id
+
+    # Validate the (existing or newly created) record
+    cur.execute("SELECT id, email, booking_type, status, paid FROM searches WHERE id = ?", (sid,))
     row = cur.fetchone()
     if not row:
         conn.close()
@@ -408,13 +427,13 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
         try:
             cur.execute(
                 "UPDATE searches SET booking_type=?, updated_at=? WHERE id=?",
-                (inferred, now_iso(), body.search_id),
+                (inferred, now_iso(), sid),
             )
             conn.commit()
         except Exception:
             pass  # best-effort
 
-    md = {"search_id": str(body.search_id), "email": (row["email"] or "")}
+    md = {"search_id": str(sid), "email": (row["email"] or body.email or "")}
     if body.metadata:
         try:
             for k, v in body.metadata.items():
@@ -428,10 +447,10 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
         intent = stripe.PaymentIntent.create(
             amount=amount,
             currency=body.currency,
-            description=body.description or f"Search #{body.search_id}",
+            description=body.description or f"Search #{sid}",
             metadata=md,
             automatic_payment_methods={"enabled": True},
-            idempotency_key=f"pi_search_{body.search_id}",
+            idempotency_key=f"pi_search_{sid}",
         )
     except Exception as e:
         conn.close()
@@ -439,11 +458,12 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
 
     cur.execute(
         "UPDATE searches SET payment_intent_id = ?, amount = ?, last_event = ?, updated_at = ? WHERE id = ?",
-        (intent["id"], amount, "payment_intent.created", now_iso(), body.search_id)
+        (intent["id"], amount, "payment_intent.created", now_iso(), sid)
     )
     conn.commit()
     conn.close()
     return {
+        "search_id": sid,  # <-- return so FE can store it for final submit
         "client_secret": intent["client_secret"],
         "clientSecret": intent["client_secret"],
         "paymentIntentId": intent["id"]
