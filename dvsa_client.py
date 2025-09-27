@@ -6,7 +6,19 @@ Minimal, SAFE DVSA automation for FastDTF:
 - All selectors centralized in SEL with fallbacks.
 - Optional session reuse (per licence) and optional proxy support.
 
-⚠️ Verify/tweak the selectors in SEL to match the current DVSA pages once.
+Instrumentation added:
+- Optional event/status callbacks to your API when a job id (sid) is attached.
+- Events posted:
+    checked:<centre> · no_slots|<count>
+    captcha_cooldown:<centre>
+    slot_found:<centre> · <date> · <time>        (only when swap_to() is called)
+    booked:<centre> · <date> · <time>
+    booking_failed:<centre> · <date> · <time>
+    error:<centre> · <ExceptionName>
+
+Set these env vars on the worker host (optional):
+    API_BASE=https://api.fastdrivingtestfinder.co.uk/api
+    WORKER_TOKEN=<same secret as backend>
 """
 
 from __future__ import annotations
@@ -23,6 +35,13 @@ from playwright.async_api import (
     Page,
     TimeoutError as PWTimeout,
 )
+
+# --- Try to import aiohttp for non-blocking API posts (optional). Fallback to no-op. ---
+try:
+    import aiohttp
+except Exception:  # pragma: no cover
+    aiohttp = None  # we'll no-op if unavailable
+
 
 # ---------------- Exceptions ----------------
 class DVSAError(Exception):
@@ -47,6 +66,10 @@ USER_AGENT = os.environ.get(
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 DVSA_PROXY = os.environ.get("DVSA_PROXY")  # e.g. http://user:pass@host:port
+
+# Backend instrumentation config (optional)
+API_BASE = os.environ.get("API_BASE", "https://api.fastdrivingtestfinder.co.uk/api").rstrip("/")
+WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 
 # All selectors live here; include generous fallbacks.
 SEL = {
@@ -99,6 +122,51 @@ class DVSAClient:
         self.page: Optional[Page] = None
         self._storage_path: Optional[str] = None
 
+        # instrumentation
+        self.sid: Optional[int] = None  # attach_job() sets this
+        self._http: Optional["aiohttp.ClientSession"] = None
+
+    # ------------- Instrumentation helpers (optional) -------------
+    def attach_job(self, sid: int):
+        """Attach a backend search id for event/status posting."""
+        self.sid = int(sid)
+
+    async def _ensure_http(self):
+        if self._http is None and aiohttp and WORKER_TOKEN:
+            self._http = aiohttp.ClientSession(
+                headers={"Authorization": f"Bearer {WORKER_TOKEN}", "Content-Type": "application/json"}
+            )
+
+    async def _post_json(self, url: str, payload: dict):
+        if not (self.sid and aiohttp and WORKER_TOKEN and API_BASE):
+            return  # safely no-op
+        try:
+            await self._ensure_http()
+            assert self._http is not None
+            async with self._http.post(url, json=payload, timeout=15) as _:
+                pass
+        except Exception:
+            # Instrumentation must never break core flow
+            pass
+
+    async def _event(self, text: str):
+        if not self.sid: return
+        await self._post_json(f"{API_BASE}/worker/searches/{self.sid}/event", {"event": text})
+
+    async def _status(self, status: str, event: str):
+        if not self.sid: return
+        await self._post_json(f"{API_BASE}/worker/searches/{self.sid}/status", {"status": status, "event": event})
+
+    async def _close_http(self):
+        try:
+            if self._http:
+                await self._http.close()
+        except Exception:
+            pass
+        finally:
+            self._http = None
+
+    # ------------- Context mgr -------------
     async def __aenter__(self) -> "DVSAClient":
         self.pw = await async_playwright().start()
 
@@ -152,6 +220,7 @@ class DVSAClient:
         finally:
             if self.pw:
                 await self.pw.stop()
+            await self._close_http()
 
     # ------------- Helpers -------------
     async def _goto(self, url: str, marker: Optional[str] = None):
@@ -305,48 +374,64 @@ class DVSAClient:
             "Pinner · 2025-10-02 · 08:10"
         or (if date list isn’t present):
             "Pinner · (date unknown) · 08:10"
+        Posts admin events when a sid is attached:
+            checked:<centre> · no_slots|<n>
+            captcha_cooldown:<centre>
+            error:<centre> · <ExceptionName>
         """
-        await self._captcha_guard()
-        if not await self._open_centre(centre_name):
-            return []
-
-        slots: List[str] = []
-
-        # Try dates → times
         try:
-            date_nodes = await self.page.query_selector_all(_sel("centre_dates"))
-        except PWTimeout:
-            date_nodes = []
+            await self._captcha_guard()
+            if not await self._open_centre(centre_name):
+                await self._event(f"error:{centre_name} · OpenFailed")
+                return []
 
-        if date_nodes:
-            for d in date_nodes[:5]:  # only the first few dates per poll
-                dtxt = (await d.text_content() or "").strip()
-                if not dtxt:
-                    continue
-                try:
-                    await d.click()
-                    await asyncio.sleep(0.25)  # small settle
-                except PWTimeout:
-                    continue
+            slots: List[str] = []
+
+            # Try dates → times
+            try:
+                date_nodes = await self.page.query_selector_all(_sel("centre_dates"))
+            except PWTimeout:
+                date_nodes = []
+
+            if date_nodes:
+                for d in date_nodes[:5]:  # only the first few dates per poll
+                    dtxt = (await d.text_content() or "").strip()
+                    if not dtxt:
+                        continue
+                    try:
+                        await d.click()
+                        await asyncio.sleep(0.25)  # small settle
+                    except PWTimeout:
+                        continue
+                    time_nodes = await self.page.query_selector_all(_sel("centre_times"))
+                    for t in time_nodes:
+                        ttxt = (await t.text_content() or "").strip()
+                        if ttxt:
+                            slots.append(f"{centre_name} · {dtxt} · {ttxt}")
+            else:
+                # Times only
                 time_nodes = await self.page.query_selector_all(_sel("centre_times"))
                 for t in time_nodes:
                     ttxt = (await t.text_content() or "").strip()
                     if ttxt:
-                        slots.append(f"{centre_name} · {dtxt} · {ttxt}")
-        else:
-            # Times only
-            time_nodes = await self.page.query_selector_all(_sel("centre_times"))
-            for t in time_nodes:
-                ttxt = (await t.text_content() or "").strip()
-                if ttxt:
-                    slots.append(f"{centre_name} · (date unknown) · {ttxt}")
+                        slots.append(f"{centre_name} · (date unknown) · {ttxt}")
 
-        return slots
+            # emit a compact heartbeat with count
+            await self._event(f"checked:{centre_name} · {('no_slots' if not slots else str(len(slots)))}")
+            return slots
+
+        except CaptchaDetected:
+            await self._event(f"captcha_cooldown:{centre_name}")
+            raise
+        except Exception as e:
+            await self._event(f"error:{centre_name} · {type(e).__name__}")
+            raise
 
     async def swap_to(self, slot_label: str) -> bool:
         """
         Click the slot produced by search_centre_slots(), then confirm the change.
         Accepts either "Centre · YYYY-MM-DD · HH:MM" or "Centre · (date unknown) · HH:MM".
+        Emits 'booked:' or 'booking_failed:' status when sid is attached.
         """
         await self._captcha_guard()
 
@@ -355,7 +440,11 @@ class DVSAClient:
         centre = date_txt = time_txt = None
         if m:
             centre, date_txt, time_txt = m.groups()
-            await self._open_centre(centre)
+            try:
+                await self._open_centre(centre)
+            except Exception:
+                await self._event(f"error:{centre or 'unknown'} · OpenFailed")
+                return False
 
         # Click date if present
         if date_txt and date_txt != "(date unknown)":
@@ -372,22 +461,42 @@ class DVSAClient:
         # Click matching time
         try:
             time_nodes = await self.page.query_selector_all(_sel("centre_times"))
+            clicked = False
             for t in time_nodes:
                 ttxt = (await t.text_content() or "").strip()
                 if time_txt and ttxt.startswith(time_txt):
                     await t.click()
+                    clicked = True
                     break
                 if not time_txt and slot_label in ttxt:
                     await t.click()
+                    clicked = True
                     break
+            if not clicked:
+                await self._event(f"booking_failed:{centre} · {date_txt} · {time_txt or 'unknown'}")
+                return False
         except PWTimeout:
+            await self._event(f"booking_failed:{centre} · {date_txt} · {time_txt or 'unknown'}")
             return False
 
         # Confirm
         try:
             await self._click(_sel("confirm_button"))
         except PWTimeout:
+            await self._event(f"booking_failed:{centre} · {date_txt} · {time_txt or 'unknown'}")
             return False
 
         await self._expect_ok()
+        await self._status("booked", f"booked:{centre} · {date_txt} · {time_txt or 'unknown'}")
         return True
+
+
+# ------------- Polite sleep helper for worker loops (optional import) -------------
+async def polite_sleep(base_seconds: float = 75.0, jitter: float = 0.25):
+    """
+    Sleep for base_seconds ± (base_seconds * jitter), min 5s.
+    Use between DVSA polls per job to keep requests friendly.
+    """
+    import random
+    j = base_seconds * (1 + random.uniform(-jitter, jitter))
+    await asyncio.sleep(max(5.0, j))
