@@ -19,12 +19,14 @@ DB_FILE = os.environ.get("SEARCHES_DB", "searches.db")
 ADMIN_USER = os.environ.get("ADMIN_BASIC_AUTH_USER")
 ADMIN_PASS = os.environ.get("ADMIN_BASIC_AUTH_PASS")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
+# NEW: stale searching reclaim window (minutes). Default 5.
+STALE_SEARCH_MIN = int(os.environ.get("STALE_SEARCH_MIN", "5"))
 
 stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.4.4")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.4.5")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -270,7 +272,7 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.4.4"}
+    return {"ok": True, "ts": now_iso(), "version": "1.4.5"}
 
 # ---------- ROUTES ----------
 
@@ -739,16 +741,28 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
 # ---------- WORKER ENDPOINTS ----------
 @app.post("/api/worker/claim")
 def worker_claim(body: WorkerClaimRequest, _: bool = Depends(_verify_worker)):
+    """
+    Claim up to `limit` searches:
+      - Any paid searches in 'queued' or 'new'
+      - PLUS 'searching' searches whose updated_at is older than STALE_SEARCH_MIN
+        (to reclaim stuck jobs).
+    """
     conn = get_conn()
     _expire_unpaid(conn)
+
+    cutoff_iso = (utcnow() - timedelta(minutes=max(1, STALE_SEARCH_MIN))).replace(microsecond=0).isoformat()
 
     cur = conn.cursor()
     cur.execute("""
         SELECT * FROM searches
-         WHERE paid=1 AND status IN ('queued','new')
+         WHERE paid=1
+           AND (
+                 status IN ('queued','new')
+                 OR (status='searching' AND (updated_at IS NULL OR updated_at < ?))
+               )
          ORDER BY updated_at ASC
          LIMIT ?
-    """, (body.limit,))
+    """, (cutoff_iso, body.limit))
     rows = cur.fetchall()
 
     claimed = []
@@ -756,8 +770,12 @@ def worker_claim(body: WorkerClaimRequest, _: bool = Depends(_verify_worker)):
         cur.execute("""
             UPDATE searches
                SET status='searching', last_event='worker_claimed', updated_at=?
-             WHERE id=? AND paid=1 AND status IN ('queued','new')
-        """, (now_iso(), r["id"]))
+             WHERE id=? AND paid=1
+               AND (
+                     status IN ('queued','new')
+                     OR (status='searching' AND (updated_at IS NULL OR updated_at < ?))
+                   )
+        """, (now_iso(), r["id"], cutoff_iso))
         if cur.rowcount:
             cur.execute("SELECT * FROM searches WHERE id=?", (r["id"],))
             claimed.append(cur.fetchone())
