@@ -23,7 +23,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.4.3")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.4.4")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -130,7 +130,6 @@ class StartSearchIn(BaseModel):
     email: Optional[str] = None
     booking_type: Optional[Literal["new","swap"]] = None
 
-# search_id optional, optional email for metadata
 class PayCreateIntentIn(BaseModel):
     search_id: Optional[int] = None
     amount_cents: Optional[int] = None  # prefer cents
@@ -199,7 +198,7 @@ def _verify_worker(authorization: str | None = Header(default=None)):
 
 def _expire_unpaid(conn: sqlite3.Connection):
     """Mark unpaid searches past expires_at as expired."""
-    cur = conn.cursor()  # FIXED: was `conn.cursor.` causing crash
+    cur = conn.cursor()  # fixed
     ts = now_iso()
     cur.execute("""
         UPDATE searches
@@ -274,7 +273,7 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.4.3"}
+    return {"ok": True, "ts": now_iso(), "version": "1.4.4"}
 
 # ---------- ROUTES ----------
 
@@ -420,7 +419,7 @@ def disable_search(sid: int, _: bool = Depends(_verify_worker)):
 async def options_pay_create_intent():
     return Response(status_code=204)
 
-# ---------- auto-create (or auto-recreate) a draft if search_id is missing/bad ----------
+# ---------- PAY: auto-create (or auto-recreate) a draft if search_id is missing/bad ----------
 @app.post("/api/pay/create-intent")
 async def pay_create_intent(body: PayCreateIntentIn, request: Request):
     amount = body.amount_cents if body.amount_cents is not None else body.amount
@@ -495,7 +494,7 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
         except Exception:
             pass
 
-    # Create PaymentIntent (idempotent per search via idempotency_key)
+    # Create PaymentIntent (idempotent per search)
     try:
         intent = stripe.PaymentIntent.create(
             amount=amount,
@@ -624,7 +623,7 @@ def _derive_flags(row: sqlite3.Row):
         "captcha_cooldown:",
         "no_slots_this_round:",
         "slot_unchanged:",
-        "trying:",  # heartbeat from worker
+        "trying:",  # preflight/heartbeat from worker
     )
 
     for pfx in prefixes_with_centre:
@@ -697,7 +696,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             td(r["phone"] or "") +
             td(r["email"] or "") +
             td(centres) +
-            td(f'<code style="font-size:12px">{opts}</code>') +
+            td(f'<code style="font-size:12px'>{opts}</code>') +
             td(r["last_event"] or "") +
             td(r["paid"]) +
             td(r["payment_intent_id"] or "") +
@@ -805,4 +804,4 @@ def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
                 (b.status, b.event, now_iso(), sid))
     conn.commit()
     conn.close()
-    return {"ok": True}
+    return {"ok": True"}
