@@ -199,7 +199,7 @@ def _verify_worker(authorization: str | None = Header(default=None)):
 
 def _expire_unpaid(conn: sqlite3.Connection):
     """Mark unpaid searches past expires_at as expired."""
-    cur = conn.cursor()
+    cur = conn.cursor.
     ts = now_iso()
     cur.execute("""
         UPDATE searches
@@ -604,7 +604,7 @@ def _badge(s: str) -> str:
     c = colors.get(s, "#334155")
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
 
-    def _derive_flags(row: sqlite3.Row):
+def _derive_flags(row: sqlite3.Row):
     """
     Compute Admin flags from last_event only (no schema changes):
     - reached: True if we saw a DVSA interaction event.
@@ -615,6 +615,7 @@ def _badge(s: str) -> str:
     reached = False
     last_centre = ""
     captcha = False
+
     prefixes_with_centre = (
         "checked:",
         "slot_found:",
@@ -623,7 +624,7 @@ def _badge(s: str) -> str:
         "captcha_cooldown:",
         "no_slots_this_round:",
         "slot_unchanged:",
-        "trying:",  # NEW: preflight/heartbeat from worker
+        "trying:",  # preflight/heartbeat from worker
     )
 
     for pfx in prefixes_with_centre:
@@ -635,7 +636,6 @@ def _badge(s: str) -> str:
                 last_centre = ""
             break
 
-    # Consider "reached" only for direct DVSA interaction outcomes
     if ev.startswith(("checked:", "slot_found:", "booked:", "booking_failed:")):
         reached = True
 
@@ -691,7 +691,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             td(_badge(r["status"])) +
             td(r["booking_type"] or "") +
             td(r["licence_number"] or "") +
-            td(_fmt_booking_ref(r)) +  # Booking reference with validity hint for swap jobs
+            td(_fmt_booking_ref(r)) +
             td(r["theory_pass"] or "") +
             td(f'{r["date_window_from"] or ""} → {r["date_window_to"] or ""}<br>{r["time_window_from"] or ""} → {r["time_window_to"] or ""}') +
             td(r["phone"] or "") +
@@ -806,6 +806,3 @@ def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
     conn.commit()
     conn.close()
     return {"ok": True}
-
-
-
