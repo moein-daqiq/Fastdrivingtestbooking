@@ -1,700 +1,832 @@
+# api_gateway.py
 import os
 import json
-import math
-import time
-import random
+import html
 import sqlite3
-import asyncio
-import subprocess
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-import httpx
-from dvsa_client import DVSAClient, CaptchaDetected  # <-- uses your dvsa_client.py
+import stripe
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from pydantic import BaseModel, Field
 
-# ==============================
-# Config / Environment
-# ==============================
-DB_FILE = os.environ.get("SEARCHES_DB", "/tmp/worker_state.db")
-API_BASE = os.environ.get("API_BASE", "").rstrip("/")
+# ---------- ENV ----------
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+DB_FILE = os.environ.get("SEARCHES_DB", "searches.db")
+ADMIN_USER = os.environ.get("ADMIN_BASIC_AUTH_USER")
+ADMIN_PASS = os.environ.get("ADMIN_BASIC_AUTH_PASS")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
+# NEW: stale searching reclaim window (minutes). Default 5.
+STALE_SEARCH_MIN = int(os.environ.get("STALE_SEARCH_MIN", "5"))
 
-POLL_SEC = int(os.environ.get("WORKER_POLL_SEC", "30"))
-CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "8"))
-JOB_MAX_PARALLEL_CHECKS = int(os.environ.get("JOB_MAX_PARALLEL_CHECKS", "4"))
+stripe.api_key = STRIPE_SECRET_KEY
+stripe.max_network_retries = 2
 
-MAX_CONNECTIONS = int(os.environ.get("WORKER_MAX_CONNECTIONS", "40"))
-MAX_KEEPALIVE = int(os.environ.get("WORKER_MAX_KEEPALIVE", "20"))
-REQUEST_TIMEOUT = float(os.environ.get("WORKER_TIMEOUT_SEC", "10"))
-JITTER_MS = int(os.environ.get("WORKER_JITTER_MS", "400"))
-USER_AGENT = os.environ.get("WORKER_USER_AGENT", "FastDTF/1.0 (+https://fastdrivingtestfinder.co.uk)")
+# ---------- APP ----------
+app = FastAPI(title="FastDrivingTestFinder API", version="1.4.6")
 
-NOTIFY_WEBHOOK_URL = os.environ.get("NOTIFY_WEBHOOK_URL", "")
+# CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^https?://([a-z0-9-]+\.)?fastdrivingtestfinder\.co\.uk$|^http://localhost(:\d+)?$",
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
-TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
-WHATSAPP_OWNER_TO = os.environ.get("WHATSAPP_OWNER_TO", "whatsapp:+447402597000")
-ADMIN_URL = os.environ.get("ADMIN_URL", "")
-
-ASSIST_NOTIFY_WINDOW_MIN = int(os.environ.get("ASSIST_NOTIFY_WINDOW_MIN", "15"))
-ASSIST_NOTIFY_PING_SECONDS = int(os.environ.get("ASSIST_NOTIFY_PING_SECONDS", "60"))
-ASSIST_NOTIFY_ENABLED = os.environ.get("ASSIST_NOTIFY_ENABLED", "true").lower() == "true"
-
-AUTOBOOK_ENABLED = os.environ.get("AUTOBOOK_ENABLED", "true").lower() == "true"
-AUTOBOOK_MODE = os.environ.get("AUTOBOOK_MODE", "simulate")  # simulate | real
-AUTOBOOK_SIM_SUCCESS_RATE = float(os.environ.get("AUTOBOOK_SIM_SUCCESS_RATE", "0.85"))
-
-DVSA_RPS = float(os.environ.get("DVSA_RPS", "4.0"))
-CB_FAILS_THRESHOLD = int(os.environ.get("CB_FAILS_THRESHOLD", "12"))
-CB_COOLDOWN_SEC = int(os.environ.get("CB_COOLDOWN_SEC", "120"))
-
-W_DATE_URGENCY = float(os.environ.get("W_DATE_URGENCY", "5.0"))
-W_DATE_WINDOW_WIDTH = float(os.environ.get("W_DATE_WINDOW_WIDTH", "3.0"))
-W_TIME_WINDOW_WIDTH = float(os.environ.get("W_TIME_WINDOW_WIDTH", "2.0"))
-W_AGE_BOOST = float(os.environ.get("W_AGE_BOOST", "1.5"))
-W_SWAP_BONUS = float(os.environ.get("W_SWAP_BONUS", "0.5"))
-
-CAPTCHA_COOLDOWN_MIN = int(os.environ.get("CAPTCHA_COOLDOWN_MIN", "30"))
-QUIET_HOURS = os.environ.get("QUIET_HOURS", "").strip()
-
-# ==== NEW: stale search expiry (keep at 5 minutes as requested) ====
-STALE_MINUTES = int(os.environ.get("STALE_MINUTES", "5"))
-
-os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/ms-playwright")
-os.environ.setdefault("FASTDTF_LAUNCH_ARGS", "--no-sandbox --disable-dev-shm-usage")
-
-_twilio_client = None
-def _get_twilio():
-    global _twilio_client
-    if _twilio_client is None and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
-        try:
-            from twilio.rest import Client
-            _twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        except Exception as e:
-            print(f"[whatsapp] Twilio init failed: {e}")
-            _twilio_client = False
-    return _twilio_client
-
-# ==============================
-# One-time self-heal for Playwright
-# ==============================
-def ensure_browser():
-    try:
-        subprocess.run(
-            ["python", "-m", "playwright", "install", "chromium"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        print("[worker] playwright chromium ready")
-    except Exception as e:
-        print(f"[worker] playwright install warning: {e}")
-
-ensure_browser()
-
-# ==============================
-# Utils (UTC-aware)
-# ==============================
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-def now_iso() -> str:
-    # ISO 8601 Zulu
-    return utcnow().replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-def parse_date(d: Optional[str]) -> Optional[datetime]:
-    if not d:
-        return None
-    try:
-        return datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    except Exception:
-        return None
-
-def parse_time(t: Optional[str]) -> Optional[Tuple[int,int]]:
-    if not t:
-        return None
-    try:
-        hh, mm = t.split(":")
-        return int(hh), int(mm)
-    except Exception:
-        return None
-
-def time_diff_minutes(a: Optional[Tuple[int,int]], b: Optional[Tuple[int,int]]) -> Optional[int]:
-    if not a or not b:
-        return None
-    return (b[0]*60 + b[1]) - (a[0]*60 + a[1])
-
-def safe_json_loads(s: Optional[str], default):
-    try:
-        return json.loads(s) if s else default
-    except Exception:
-        return default
-
-def _parse_quiet_hours(spec: str) -> List[Tuple[int,int]]:
-    out = []
-    for part in (spec or "").split(","):
-        part = part.strip()
-        if not part or "-" not in part:
-            continue
-        a, b = part.split("-", 1)
-        try:
-            out.append((int(a), int(b)))
-        except:
-            pass
-    return out
-
-def is_quiet_now() -> bool:
-    if not QUIET_HOURS:
-        return False
-    now_h = utcnow().hour
-    for start, end in _parse_quiet_hours(QUIET_HOURS):
-        if start == end:
-            # 24h quiet if start==end (intentionally “always quiet” window)
-            return True
-        if start < end:
-            if start <= now_h < end:
-                return True
-        else:
-            # Overnight span (e.g., 22-6)
-            if now_h >= start or now_h < end:
-                return True
-    return False
-
-def normalize_centres(centres: List[str]) -> List[str]:
-    seen = set()
-    cleaned = []
-    for c in centres:
-        c0 = (c or "").strip()
-        if not c0:
-            continue
-        parts = c0.split()
-        if len(parts) >= 2 and parts[0].lower() in {"london", "city", "borough"}:
-            c0 = " ".join(parts[1:])
-        if c0 not in seen:
-            seen.add(c0)
-            cleaned.append(c0)
-    return cleaned
-
-# ===== NEW helpers: stale check + humanize errors =====
-def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
-    if not ts:
-        return None
-    try:
-        # accept "....Z" or with offset
-        ts2 = ts.replace("Z", "+00:00")
-        return datetime.fromisoformat(ts2)
-    except Exception:
-        return None
-
-def _is_stale(created_ts: Optional[str], minutes: int = STALE_MINUTES) -> bool:
-    """
-    Robust: never raises (even if mixed aware/naive inputs sneak through).
-    Treat unparseable timestamps as NOT stale, so jobs still run.
-    """
-    try:
-        dt = _parse_iso(created_ts)
-        if not dt:
-            return False
-        # Coerce both sides to the same kind (aware UTC)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        delta = utcnow() - dt.astimezone(timezone.utc)
-        return delta > timedelta(minutes=minutes)
-    except Exception as e:
-        # Log once per occurrence class
-        print(f"[worker:stale_guard] non-fatal: {str(e)[:140]} (ts={created_ts})")
-        return False
-
-def _human(e: Exception) -> str:
-    s = str(e).strip().split("\n")[0]
-    return s[:220]
-
-# ===== NEW: required-field guard (licence for all; 8-digit ref for swap) =====
-def _missing_required_fields(row: dict) -> Optional[str]:
-    """Return a reason string if required credentials are missing, else None."""
-    booking_type = (row.get("booking_type") or "").strip()
-    licence = (row.get("licence_number") or "").strip()
-    ref = (row.get("booking_reference") or "").strip()
-
-    # Licence is required for BOTH flows (DVSA login)
-    if not licence:
-        return "missing_licence_number"
-
-    # Swap requires an 8-digit booking reference
-    if booking_type == "swap":
-        if not (len(ref) == 8 and ref.isdigit()):
-            return "missing_or_bad_booking_reference"
-
-    return None
-# ============================================================================
-
-# ==============================
-# DB (worker-only small state)
-# ==============================
+# ---------- DB ----------
 def get_conn():
     os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
-    except Exception:
-        pass
     return conn
 
-def ensure_state_tables():
+def migrate():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS search_state (
-            search_id INTEGER PRIMARY KEY,
-            last_slot_sig TEXT,
-            last_found_at TEXT
+        CREATE TABLE IF NOT EXISTS searches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT,
+            updated_at TEXT,
+            status TEXT DEFAULT 'pending_payment',
+            last_event TEXT,
+            paid INTEGER DEFAULT 0,
+            payment_intent_id TEXT,
+            amount INTEGER,
+            booking_type TEXT,
+            licence_number TEXT,
+            booking_reference TEXT,
+            theory_pass TEXT,
+            date_window_from TEXT,
+            date_window_to TEXT,
+            time_window_from TEXT,
+            time_window_to TEXT,
+            phone TEXT,
+            whatsapp TEXT,
+            email TEXT,
+            centres_json TEXT,
+            options_json TEXT,
+            notes TEXT,
+            expires_at TEXT
         )
     """)
+    expected_cols = {
+        "created_at","updated_at","status","last_event","paid",
+        "payment_intent_id","amount",
+        "booking_type","licence_number","booking_reference","theory_pass",
+        "date_window_from","date_window_to","time_window_from","time_window_to",
+        "phone","whatsapp","email","centres_json","options_json","notes","expires_at"
+    }
+    cur.execute("PRAGMA table_info(searches)")
+    have = {row["name"] for row in cur.fetchall()}
+    missing = expected_cols - have
+    for col in missing:
+        coltype = "INTEGER" if col in {"paid","amount"} else "TEXT"
+        cur.execute(f"ALTER TABLE searches ADD COLUMN {col} {coltype}")
+
+    # Idempotency table for Stripe events
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS centre_health (
-            centre TEXT PRIMARY KEY,
-            fail_count INTEGER DEFAULT 0,
-            cooldown_until TEXT
+        CREATE TABLE IF NOT EXISTS stripe_events (
+            id TEXT PRIMARY KEY,
+            type TEXT,
+            created_at TEXT
         )
     """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_status ON searches(status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_paid ON searches(paid)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_expires ON searches(expires_at)")
     conn.commit()
     conn.close()
 
-ensure_state_tables()
+migrate()
 
-def save_last_slot_sig(sid: int, sig: str):
-    conn = get_conn()
+# ---------- MODELS ----------
+class SearchIn(BaseModel):
+    search_id: Optional[int] = None
+    booking_type: Literal["new", "swap"] = "new"
+    licence_number: Optional[str] = None
+    booking_reference: Optional[str] = None
+    theory_pass: Optional[str] = None
+
+    date_window_from: Optional[str] = Field(None, description="YYYY-MM-DD")
+    date_window_to: Optional[str]   = Field(None, description="YYYY-MM-DD")
+    time_window_from: Optional[str] = Field(None, description="HH:MM (24h)")
+    time_window_to: Optional[str]   = Field(None, description="HH:MM (24h)")
+
+    phone: Optional[str] = None
+    whatsapp: Optional[str] = None
+    email: Optional[str] = None
+    surname: Optional[str] = None  # for front-end prepay create
+
+    centres: Any = Field(default_factory=list)   # list[str] or CSV
+    options: Dict[str, Any] = Field(default_factory=dict)
+    notes: Optional[str] = None
+
+class StartSearchIn(BaseModel):
+    email: Optional[str] = None
+    booking_type: Optional[Literal["new","swap"]] = None
+
+class PayCreateIntentIn(BaseModel):
+    search_id: Optional[int] = None
+    amount_cents: Optional[int] = None  # prefer cents
+    amount:      Optional[int] = None   # legacy
+    currency: str = "gbp"
+    description: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    email: Optional[str] = None
+
+class WorkerClaimRequest(BaseModel):
+    limit: int = 8
+
+class WorkerEvent(BaseModel):
+    event: str
+
+class WorkerStatus(BaseModel):
+    status: str
+    event: str
+
+# ---------- HELPERS ----------
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+def now_iso() -> str:
+    return utcnow().replace(microsecond=0).isoformat()
+
+def json_dumps(v) -> str:
+    try:
+        return json.dumps(v, ensure_ascii=False)
+    except Exception:
+        return "null"
+
+def _parse_centres(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    if isinstance(value, str):
+        return [s.strip() for s in value.split(",") if s.strip()]
+    return []
+
+def require_admin(request: Request):
+    if not ADMIN_USER or not ADMIN_PASS:
+        return
+    auth = request.headers.get("authorization") or ""
+    if not auth.lower().startswith("basic "):
+        raise HTTPException(status_code=401, detail="Auth required", headers={"WWW-Authenticate": "Basic"})
+    import base64
+    try:
+        decoded = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Bad auth", headers={"WWW-Authenticate": "Basic"})
+    user, _, pwd = decoded.partition(":")
+    if user != ADMIN_USER or pwd != ADMIN_PASS:
+        raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Basic"})
+
+def _verify_worker(authorization: str | None = Header(default=None)):
+    if not WORKER_TOKEN:
+        return True
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    token = authorization.split(" ", 1)[1]
+    if token != WORKER_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    return True
+
+def _expire_unpaid(conn: sqlite3.Connection):
+    """Mark unpaid searches past expires_at as expired."""
+    cur = conn.cursor()
+    ts = now_iso()
+    cur.execute("""
+        UPDATE searches
+           SET status='expired', last_event='auto_expired', updated_at=?
+         WHERE paid=0 AND expires_at IS NOT NULL AND expires_at < ?
+           AND status IN ('pending_payment','new')
+    """, (ts, ts))
+    conn.commit()
+
+# ---- Amount helpers ----
+def _band_ok(amount_cents: int, base_cents: int) -> bool:
+    """Accept whole-pound amounts at/above base in £30 steps."""
+    if amount_cents <= 0 or amount_cents % 100 != 0:
+        return False
+    if amount_cents < base_cents:
+        return False
+    return (amount_cents - base_cents) % 3000 == 0
+
+def _infer_booking_type(amount_cents: int) -> Optional[str]:
+    if amount_cents >= 15000:
+        return "new"
+    if amount_cents >= 7000:
+        return "swap"
+    return None
+
+# ============================  SEARCH-ID CREATION (SERVER)  ============================
+def _create_search_record(
+    conn: sqlite3.Connection,
+    *,
+    booking_type: Optional[str] = None,
+    licence_number: Optional[str] = None,
+    booking_reference: Optional[str] = None,
+    theory_pass: Optional[str] = None,
+    date_window_from: Optional[str] = None,
+    date_window_to: Optional[str] = None,
+    time_window_from: Optional[str] = None,
+    time_window_to: Optional[str] = None,
+    phone: Optional[str] = None,
+    whatsapp: Optional[str] = None,
+    email: Optional[str] = None,
+    centres_json: str = "[]",
+    options_json: str = "{}",
+    notes: Optional[str] = None,
+    status: str = "pending_payment",
+    last_event: str = "created"
+) -> Dict[str, Any]:
+    ts = now_iso()
+    expires = (utcnow() + timedelta(minutes=30)).replace(microsecond=0).isoformat()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO search_state(search_id, last_slot_sig, last_found_at)
-        VALUES (?,?,?)
-        ON CONFLICT(search_id) DO UPDATE SET last_slot_sig=excluded.last_slot_sig, last_found_at=excluded.last_found_at
-    """, (sid, sig, now_iso()))
+        INSERT INTO searches (
+            created_at, updated_at, status, last_event, paid,
+            booking_type, licence_number, booking_reference, theory_pass,
+            date_window_from, date_window_to, time_window_from, time_window_to,
+            phone, whatsapp, email, centres_json, options_json, notes, expires_at
+        ) VALUES (?,?,?,?,?,
+                  ?,?,?,?,
+                  ?,?,?,?,
+                  ?,?,?,?, ?,?,?)
+    """, (
+        ts, ts, status, last_event, 0,
+        booking_type, licence_number, booking_reference, theory_pass,
+        date_window_from, date_window_to, time_window_from, time_window_to,
+        phone, whatsapp, email, centres_json, options_json, notes, expires
+    ))
+    search_id = cur.lastrowid
     conn.commit()
-    conn.close()
+    return {"search_id": search_id, "status": status, "expires_at": expires}
+# ==========================  END SEARCH-ID CREATION BLOCK  ===========================
 
-def get_last_slot_sig(sid: int) -> Optional[str]:
+# ---------- HEALTH ----------
+@app.get("/api/health")
+def health():
+    return {"ok": True, "ts": now_iso(), "version": "1.4.6"}
+
+# ---------- ROUTES ----------
+
+@app.get("/api/search/{sid}")
+def get_search(sid: int):
     conn = get_conn()
+    _expire_unpaid(conn)
     cur = conn.cursor()
-    cur.execute("SELECT last_slot_sig FROM search_state WHERE search_id=?", (sid,))
+    cur.execute("SELECT id, status, paid, email, booking_type, created_at, updated_at FROM searches WHERE id = ?", (sid,))
     row = cur.fetchone()
     conn.close()
-    return row["last_slot_sig"] if row else None
+    if not row:
+        raise HTTPException(status_code=404, detail="not found")
+    return {
+        "ok": True,
+        "id": row["id"],
+        "status": row["status"],
+        "paid": bool(row["paid"]),
+        "booking_type": row["booking_type"],
+        "email": row["email"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
-# ==============================
-# API bridge (claim + events + status)
-# ==============================
-async def _api_post(client: httpx.AsyncClient, path: str, payload: dict):
-    if not API_BASE:
-        raise RuntimeError("API_BASE not set")
-    headers = {}
-    if WORKER_TOKEN:
-        headers["Authorization"] = f"Bearer {WORKER_TOKEN}"
-    for attempt in range(3):
-        try:
-            r = await client.post(f"{API_BASE}{path}", json=payload, headers=headers)
-            r.raise_for_status()
-            return r.json()
-        except Exception:
-            if attempt == 2:
-                raise
-            await asyncio.sleep(0.3 * (attempt + 1))
+@app.post("/api/search/start")
+def start_search(payload: StartSearchIn):
+    conn = get_conn()
+    _expire_unpaid(conn)
+    rec = _create_search_record(
+        conn,
+        booking_type=payload.booking_type,
+        email=payload.email,
+        centres_json="[]",
+        options_json="{}",
+        notes=None,
+        status="pending_payment",
+        last_event="created"
+    )
+    conn.close()
+    return {"ok": True, **rec}
 
-async def claim_candidates_api(client: httpx.AsyncClient, limit: int) -> List[dict]:
-    data = await _api_post(client, "/api/worker/claim", {"limit": limit})
-    return data.get("items", [])
+@app.post("/api/search")
+async def create_search(payload: SearchIn):
+    centres_list = _parse_centres(payload.centres)
+    conn = get_conn()
+    _expire_unpaid(conn)
+    cur = conn.cursor()
 
-async def post_event_api(client: httpx.AsyncClient, sid: int, event: str):
-    try:
-        await _api_post(client, f"/api/worker/searches/{sid}/event", {"event": event})
-    except Exception as e:
-        print(f"[worker:event] {sid}: {e}")
+    if payload.search_id:
+        cur.execute("SELECT id FROM searches WHERE id=?", (payload.search_id,))
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="search_id not found")
 
-_status_cache: dict[int, Tuple[Optional[str], Optional[str]]] = {}
+        cur.execute("""
+            UPDATE searches SET
+                booking_type=?,
+                licence_number=?,
+                booking_reference=?,
+                theory_pass=?,
+                date_window_from=?,
+                date_window_to=?,
+                time_window_from=?,
+                time_window_to=?,
+                phone=?,
+                whatsapp=?,
+                email=?,
+                centres_json=?,
+                options_json=?,
+                notes=?,
+                updated_at=?
+            WHERE id=?
+        """, (
+            payload.booking_type,
+            payload.licence_number,
+            payload.booking_reference,
+            payload.theory_pass,
+            payload.date_window_from,
+            payload.date_window_to,
+            payload.time_window_from,
+            payload.time_window_to,
+            payload.phone,
+            payload.whatsapp,
+            payload.email,
+            json_dumps(centres_list),
+            json_dumps(payload.options),
+            payload.notes,
+            now_iso(),
+            payload.search_id
+        ))
+        conn.commit()
+        conn.close()
+        return {"ok": True, "search_id": payload.search_id}
 
-async def set_status_api(client: httpx.AsyncClient, job: dict, status: str, event: str):
-    await _api_post(client, f"/api/worker/searches/{job['id']}/status", {"status": status, "event": event})
-    _status_cache[job["id"]] = (status, event)
+    rec = _create_search_record(
+        conn,
+        booking_type=payload.booking_type,
+        licence_number=payload.licence_number,
+        booking_reference=payload.booking_reference,
+        theory_pass=payload.theory_pass,
+        date_window_from=payload.date_window_from,
+        date_window_to=payload.date_window_to,
+        time_window_from=payload.time_window_from,
+        time_window_to=payload.time_window_to,
+        phone=payload.phone,
+        whatsapp=payload.whatsapp,
+        email=payload.email,
+        centres_json=json_dumps(centres_list),
+        options_json=json_dumps(payload.options),
+        notes=payload.notes,
+        status="pending_payment",
+        last_event="created"
+    )
+    conn.close()
+    return {"ok": True, **rec}
 
-    if (job.get("booking_type") or "") == "new":
-        centres = safe_json_loads(job.get("centres_json"), [])
-        if status == "found":
-            slot_txt = event.replace("slot_found:", "")
-            admin_link = f"\nAdmin: {ADMIN_URL}?status=found" if ADMIN_URL else ""
-            wa_owner(
-                f"🔔 FASTDTF: Slot FOUND (new booking)\n"
-                f"Search #{job['id']}\n"
-                f"{slot_txt}\n"
-                f"Centres: {', '.join(centres) if centres else '-'}{admin_link}\n"
-                f"Act now: open DVSA and pay to confirm."
-            )
-        elif status == "booked":
-            wa_owner(f"✅ FASTDTF: Booking CONFIRMED for search #{job['id']}\n{event.replace('booked:', '')}")
-        elif status == "failed":
-            wa_owner(f"❌ FASTDTF: Booking FAILED for search #{job['id']}\n{event.replace('booking_failed:', '')}")
-
-def get_status_tuple_from_cache(sid: int) -> Tuple[Optional[str], Optional[str]]:
-    return _status_cache.get(sid, (None, None))
-
-# ==============================
-# Notifications
-# ==============================
-def notify(event: str, payload: dict):
-    if NOTIFY_WEBHOOK_URL:
-        try:
-            with httpx.Client(timeout=5.0) as c:
-                c.post(NOTIFY_WEBHOOK_URL, json={"event": event, "data": payload})
-        except Exception as e:
-            print(f"[notify] webhook failed: {e}")
-    else:
-        print(f"[notify] {event}: {json.dumps(payload, ensure_ascii=False)}")
-
-def wa_owner(message: str):
-    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and WHATSAPP_OWNER_TO):
-        return
-    client = _get_twilio()
-    if not client:
-        return
-    try:
-        client.messages.create(
-            from_=TWILIO_WHATSAPP_FROM,
-            to=WHATSAPP_OWNER_TO,
-            body=message[:1500]
-        )
-    except Exception as e:
-        print(f"[whatsapp] send failed: {e}")
-
-# ==============================
-# Rate Limiter & Circuit Breaker
-# ==============================
-class TokenBucket:
-    def __init__(self, rate_per_sec: float, capacity: float):
-        self.rate = rate_per_sec
-        self.capacity = capacity
-        self.tokens = capacity
-        self.last = time.monotonic()
-
-    async def acquire(self):
-        while True:
-            now = time.monotonic()
-            elapsed = now - self.last
-            self.last = now
-            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-            if self.tokens >= 1.0:
-                self.tokens -= 1.0
-                return
-            await asyncio.sleep(0.01)
-
-bucket_dvsa = TokenBucket(DVSA_RPS, DVSA_RPS)
-
-def centre_fail(centre: str):
+@app.post("/api/search/{sid}/disable")
+def disable_search(sid: int, _: bool = Depends(_verify_worker)):
     conn = get_conn()
     cur = conn.cursor()
-    new_until = (utcnow() + timedelta(seconds=CB_COOLDOWN_SEC)).isoformat().replace("+00:00", "Z")
+    cur.execute("""
+        UPDATE searches
+           SET status='disabled', last_event='manually_disabled', updated_at=?
+         WHERE id=? AND status NOT IN ('booked','failed')
+    """, (now_iso(), sid))
+    conn.commit()
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Not found or cannot disable")
+    return {"ok": True, "id": sid, "status": "disabled"}
+
+@app.options("/api/pay/create-intent")
+async def options_pay_create_intent():
+    return Response(status_code=204)
+
+@app.post("/api/pay/create-intent")
+async def pay_create_intent(body: PayCreateIntentIn, request: Request):
+    amount = body.amount_cents if body.amount_cents is not None else body.amount
+    if amount is None or amount <= 0:
+        raise HTTPException(status_code=400, detail="amount_cents (or amount) must be > 0")
+
+    conn = get_conn()
+    _expire_unpaid(conn)
+    cur = conn.cursor()
+
+    def _make_draft(email: Optional[str], last_event: str) -> int:
+        rec = _create_search_record(
+            conn,
+            email=email,
+            centres_json="[]",
+            options_json="{}",
+            notes=None,
+            status="pending_payment",
+            last_event=last_event
+        )
+        return rec["search_id"]
+
+    if body.search_id is None:
+        sid = _make_draft(body.email, "created_via_create_intent")
+    else:
+        cur.execute("SELECT id, email, booking_type, status, paid FROM searches WHERE id = ?", (body.search_id,))
+        row = cur.fetchone()
+        if not row:
+            sid = _make_draft(body.email, "recreated_via_create_intent_not_found")
+        elif row["paid"]:
+            sid = _make_draft(row["email"] or body.email, "recreated_via_create_intent_already_paid")
+        elif row["status"] in ("disabled", "expired", "failed", "booked"):
+            sid = _make_draft(row["email"] or body.email, f"recreated_via_create_intent_{row['status']}")
+        else:
+            sid = row["id"]
+
+    cur.execute("SELECT id, email, booking_type, status, paid FROM searches WHERE id = ?", (sid,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=500, detail="internal: draft create failed")
+
+    amount = int(amount)
+
+    if not (_band_ok(amount, 7000) or _band_ok(amount, 15000)):
+        conn.close()
+        raise HTTPException(status_code=400, detail="amount not in allowed range")
+
+    inferred = _infer_booking_type(amount)
+    existing_type = (row["booking_type"] or "").strip() or None
+    if inferred and inferred != existing_type:
+        try:
+            cur.execute(
+                "UPDATE searches SET booking_type=?, updated_at=? WHERE id=?",
+                (inferred, now_iso(), sid),
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+    md = {"search_id": str(sid), "email": (row["email"] or body.email or "")}
+    if body.metadata:
+        try:
+            for k, v in body.metadata.items():
+                if k != "search_id":
+                    md[k] = v
+        except Exception:
+            pass
+
+    try:
+        intent = stripe.PaymentIntent.create(
+            amount=amount,
+            currency=body.currency,
+            description=body.description or f"Search #{sid}",
+            metadata=md,
+            automatic_payment_methods={"enabled": True},
+            idempotency_key=f"pi_search_{sid}",
+        )
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=400, detail=str(e))
+
     cur.execute(
-        """
-        INSERT INTO centre_health(centre, fail_count, cooldown_until)
-        VALUES (?, 1, NULL)
-        ON CONFLICT(centre) DO UPDATE SET
-          fail_count = CASE
-              WHEN COALESCE(centre_health.fail_count,0) + 1 >= ?
-                  THEN 0
-              ELSE centre_health.fail_count + 1
-          END,
-          cooldown_until = CASE
-              WHEN COALESCE(centre_health.fail_count,0) + 1 >= ?
-                  THEN ?
-              ELSE centre_health.cooldown_until
-          END
-        """,
-        (centre, CB_FAILS_THRESHOLD, CB_FAILS_THRESHOLD, new_until),
+        "UPDATE searches SET payment_intent_id = ?, amount = ?, last_event = ?, updated_at = ? WHERE id = ?",
+        (intent["id"], amount, "payment_intent.created", now_iso(), sid)
     )
     conn.commit()
     conn.close()
+    return {
+        "search_id": sid,
+        "client_secret": intent["client_secret"],
+        "clientSecret": intent["client_secret"],
+        "paymentIntentId": intent["id"]
+    }
 
-def centre_allowed(centre: str) -> bool:
+# ---------- STRIPE WEBHOOK ----------
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    if not STRIPE_WEBHOOK_SECRET:
+        try:
+            event = json.loads(payload.decode())
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid payload")
+    else:
+        try:
+            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Webhook error: {e}")
+
+    event_id = event.get("id")
+    etype = event.get("type")
+    data = event.get("data", {}).get("object", {}) or {}
+
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT cooldown_until FROM centre_health WHERE centre=?", (centre,))
-    row = cur.fetchone()
-    conn.close()
-    if not row or not row["cooldown_until"]:
-        return True
     try:
-        until = datetime.fromisoformat(row["cooldown_until"].replace("Z", "+00:00"))
-        return utcnow() >= until
+        cur.execute(
+            "INSERT OR IGNORE INTO stripe_events (id, type, created_at) VALUES (?,?,?)",
+            (event_id, etype, now_iso())
+        )
+        conn.commit()
     except Exception:
-        return True
+        pass
 
-def global_cooldown(extra_min: int):
+    if etype == "payment_intent.succeeded":
+        pi_id = data.get("id")
+        sid = (data.get("metadata") or {}).get("search_id")
+        amount_received = int(data.get("amount_received") or data.get("amount") or 0)
+        if sid:
+            _mark_paid_and_queue(int(sid), pi_id, "payment_intent.succeeded", amount_received)
+    elif etype in ("payment_intent.canceled", "payment_intent.payment_failed"):
+        pi_id = data.get("id")
+        sid = (data.get("metadata") or {}).get("search_id")
+        if sid:
+            _fail(int(sid), f"{etype} ({pi_id})")
+
+    conn.close()
+    return JSONResponse({"received": True})
+
+def _mark_paid_and_queue(search_id: int, payment_intent_id: str, event_label: str, amount_received: int = 0):
     conn = get_conn()
     cur = conn.cursor()
-    until = (utcnow() + timedelta(minutes=max(1, extra_min))).isoformat().replace("+00:00", "Z")
     cur.execute("""
-        INSERT INTO centre_health(centre, fail_count, cooldown_until)
-        VALUES ('*global*', 0, ?)
-        ON CONFLICT(centre) DO UPDATE SET cooldown_until=excluded.cooldown_until
-    """, (until,))
+        UPDATE searches
+           SET paid = 1,
+               status = 'queued',
+               last_event = ?,
+               payment_intent_id = ?,
+               amount = COALESCE(NULLIF(?,0), amount),
+               updated_at = ?,
+               expires_at = NULL
+         WHERE id = ?
+    """, (event_label, payment_intent_id, amount_received, now_iso(), search_id))
     conn.commit()
     conn.close()
 
-def global_allowed() -> bool:
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("SELECT cooldown_until FROM centre_health WHERE centre='*global*'")
-    row = cur.fetchone(); conn.close()
-    if not row or not row["cooldown_until"]:
-        return True
-    try:
-        return utcnow() >= datetime.fromisoformat(row["cooldown_until"].replace("Z", "+00:00"))
-    except Exception:
-        return True
+def _fail(search_id: int, reason: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE searches SET status='failed', last_event=?, updated_at=? WHERE id=?",
+                (reason, now_iso(), search_id))
+    conn.commit()
+    conn.close()
 
-# ==============================
-# DVSA integration
-# ==============================
-async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -> List[str]:
+# ---------- ADMIN ----------
+def _badge(s: str) -> str:
+    colors = {
+        "pending_payment":"#64748b","new":"#64748b","queued":"#2563eb",
+        "searching":"#a855f7","found":"#10b981","booked":"#16a34a",
+        "failed":"#ef4444","expired":"#334155","disabled":"#6b7280",
+        # virtual pill (not a status)
+        "active":"#0ea5e9"
+    }
+    c = colors.get(s, "#334155")
+    return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
+
+def _derive_flags(row: sqlite3.Row):
     """
-    Hardened: retries around DVSA login step with readable logs and layout-change flag.
-    Emits:
-      - trying:{centre}      (from caller)
-      - login_start:{centre}
-      - login_ok:{centre}
-      - checked:{centre}
-      - layout_issue:{centre}        (if selectors/layout likely changed)
-      - captcha_cooldown:{centre}    (on captcha wall)
+    Compute Admin flags from last_event only (no schema changes):
+    - reached: True if we saw a DVSA interaction event.
+    - last_centre: parsed from known event prefixes that include a centre.
+    - captcha: True when last_event starts with 'captcha_cooldown:'.
     """
-    if not global_allowed():
-        await asyncio.sleep(0.05)
-        return []
-    if not centre_allowed(centre):
-        await asyncio.sleep(0.05)
-        return []
+    ev = (row["last_event"] or "").strip()
+    reached = False
+    last_centre = ""
+    captcha = False
 
-    await bucket_dvsa.acquire()
-    await asyncio.sleep(random.randint(0, JITTER_MS) / 1000.0)
+    prefixes_with_centre = (
+        "checked:",
+        "slot_found:",
+        "booked:",
+        "booking_failed:",
+        "captcha_cooldown:",
+        "no_slots_this_round:",
+        "slot_unchanged:",
+        "trying:",
+        "login_start:",
+        "login_ok:",
+        "layout_issue:",
+    )
 
-    session_key = (row.get("licence_number") or f"job{row['id']}").replace(" ", "")[:20]
-
-    # ---- NEW: bounded retry for login/layout hiccups ----
-    attempts = 3
-    for attempt in range(1, attempts + 1):
-        try:
-            async with DVSAClient(headless=True, session_key=session_key) as dvsa:
-                await post_event_api(client_httpx, row["id"], f"login_start:{centre}")
-                if (row.get("booking_type") or "") == "swap":
-                    await dvsa.login_swap(
-                        licence_number=row.get("licence_number") or "",
-                        booking_reference=row.get("booking_reference") or "",
-                        email=row.get("email") or None,
-                    )
-                else:
-                    await dvsa.login_new(
-                        licence_number=row.get("licence_number") or "",
-                        theory_pass=row.get("theory_pass") or None,
-                        email=row.get("email") or None,
-                    )
-                await post_event_api(client_httpx, row["id"], f"login_ok:{centre}")
-
-                slots = await dvsa.search_centre_slots(centre)
-                await post_event_api(client_httpx, row["id"], f"checked:{centre}")
-                return slots
-
-        except CaptchaDetected:
-            centre_fail(centre)
-            global_cooldown(CAPTCHA_COOLDOWN_MIN)
-            wa_owner(f"🛑 DVSA bot wall hit for search #{row['id']} at {centre}. Cooling for {CAPTCHA_COOLDOWN_MIN}m.")
-            await post_event_api(client_httpx, row["id"], f"captcha_cooldown:{centre}")
-            # Bubble up so caller marks job queued w/ cooldown
-            raise
-
-        except Exception as e:
-            msg = _human(e).lower()
-            # Heuristics for selector/layout/timeout problems from dvsa_client
-            layout_like = any(k in msg for k in [
-                "timeout",
-                "not found",
-                "selector",
-                "locator",
-                "no node found for selector",
-                "failed to find",
-            ])
-            if layout_like:
-                await post_event_api(client_httpx, row["id"], f"layout_issue:{centre}")
-            # Do not loop forever; bounded attempts
-            if attempt >= attempts:
-                print(f"[dvsa_check_centre] {centre}: { _human(e) } (gave up after {attempts})")
-                centre_fail(centre)
-                return []
-            # small backoff
-            await asyncio.sleep(0.5 * attempt)
-
-    return []
-
-async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
-    session_key = (row.get("licence_number") or f"job{row['id']}").replace(" ", "")[:20]
-    try:
-        async with DVSAClient(headless=True, session_key=session_key) as dvsa:
-            await dvsa.login_swap(
-                licence_number=row.get("licence_number") or "",
-                booking_reference=row.get("booking_reference") or "",
-                email=row.get("email") or None,
-            )
-            return await dvsa.swap_to(slot)
-    except CaptchaDetected:
-        return False
-    except Exception as e:
-        print(f"[dvsa_swap_to_slot] {e}")
-        return False
-
-async def dvsa_book_and_pay(client_unused, row, slot: str) -> bool:
-    if AUTOBOOK_MODE == "simulate":
-        await asyncio.sleep(0.3 + random.random() * 0.4)
-        return random.random() < AUTOBOOK_SIM_SUCCESS_RATE
-    return False
-
-# ==============================
-# Assist window (15-min alert loop)
-# ==============================
-async def assist_window_monitor(sid: int, slot_txt: str):
-    if not ASSIST_NOTIFY_ENABLED:
-        return
-    end_at = utcnow() + timedelta(minutes=ASSIST_NOTIFY_WINDOW_MIN)
-    while utcnow() < end_at:
-        status, _ = get_status_tuple_from_cache(sid)
-        if status in ("booked", "failed"):
-            return
-        mins_left = int((end_at - utcnow()).total_seconds() // 60)
-        secs_left = int((end_at - utcnow()).total_seconds() % 60)
-        wa_owner(
-            f"⏳ FASTDTF: Slot still available? Search #{sid}\n"
-            f"{slot_txt}\n"
-            f"Time left (~DVSA hold): {mins_left:02d}:{secs_left:02d}\n"
-            f"If you’ve paid already, ignore this."
-        )
-        await asyncio.sleep(ASSIST_NOTIFY_PING_SECONDS)
-    status, _ = get_status_tuple_from_cache(sid)
-    if status not in ("booked", "failed"):
-        wa_owner(f"⌛ FASTDTF: Assist window ended for search #{sid}. If not booked, the slot may be gone.")
-
-# ==============================
-# Core Job Processing
-# ==============================
-async def process_job(client: httpx.AsyncClient, row: dict):
-    sid = row["id"]
-
-    # ---- NEW: stale search guard (5 minutes) ----
-    # Accepts either created_at or queued_at timestamps (ISO). If absent, skip stale check.
-    created_ts = row.get("created_at") or row.get("queued_at")
-    if _is_stale(created_ts, minutes=STALE_MINUTES):
-        await set_status_api(client, row, "queued", f"stale_skipped:>{STALE_MINUTES}m")
-        return
-
-    # ---- enforce required credentials before spending DVSA checks ----
-    missing_reason = _missing_required_fields(row)
-    if missing_reason:
-        await set_status_api(client, row, "queued", missing_reason)
-        return
-
-    centres: List[str] = safe_json_loads(row.get("centres_json"), [])
-    centres = normalize_centres(centres)
-    if not centres:
-        centres = ["(no centre provided)"]
-
-    # ---- NEW: rotate to avoid biasing the first centre on every pass ----
-    rnd = random.Random(sid)
-    rnd.shuffle(centres)
-
-    sem = asyncio.Semaphore(JOB_MAX_PARALLEL_CHECKS)
-    found_slot: Optional[str] = None
-    captcha_hit = False
-    last_checked: Optional[str] = None  # remember most recent centre we tried
-
-    async def check_one(c: str):
-        nonlocal found_slot, captcha_hit, last_checked
-        async with sem:
-            if found_slot is not None or captcha_hit:
-                return
-            last_checked = c  # mark intent to check this centre
-
-            # Heartbeat so Admin can always see the most recent centre attempted
+    for pfx in prefixes_with_centre:
+        if ev.startswith(pfx):
             try:
-                await post_event_api(client, row["id"], f"trying:{c}")
+                payload = ev.split(":", 1)[1]
+                last_centre = (payload.split("·", 1)[0] or "").strip()
             except Exception:
-                pass
+                last_centre = ""
+            break
 
-            try:
-                slots = await dvsa_check_centre(client, c, row)
-            except CaptchaDetected:
-                captcha_hit = True
-                return
-            if slots and found_slot is None:
-                found_slot = slots[0]
+    if ev.startswith(("checked:", "slot_found:", "booked:", "booking_failed:")):
+        reached = True
 
-    await asyncio.gather(*(asyncio.create_task(check_one(c)) for c in centres))
+    if ev.startswith("captcha_cooldown:"):
+        captcha = True
 
-    if captcha_hit:
-        await set_status_api(client, row, "queued", f"captcha_cooldown:{last_checked or ''}")
-        return
+    return reached, last_centre, captcha
 
-    if not found_slot:
-        await set_status_api(client, row, "queued", f"no_slots_this_round:{last_checked or ''}")
-        return
-
-    sig = f"{found_slot}"
-    prev = get_last_slot_sig(sid)
-    if prev == sig:
-        await set_status_api(client, row, "queued", f"slot_unchanged:{last_checked or ''}")
-        return
-    save_last_slot_sig(sid, sig)
-
-    options = safe_json_loads(row.get("options_json"), {})
-    if AUTOBOOK_ENABLED and options.get("auto_book", False):
-        if (row.get("booking_type") or "") == "swap":
-            ok = await dvsa_swap_to_slot(client, row, found_slot)
-        else:
-            ok = await dvsa_book_and_pay(client, row, found_slot)
+def _fmt_booking_ref(row: sqlite3.Row) -> str:
+    ref = (row["booking_reference"] or "").strip()
+    if (row["booking_type"] or "") == "swap":
+        ok = len(ref) == 8 and ref.isdigit()
         if ok:
-            await set_status_api(client, row, "booked", f"booked:{found_slot}")
+            return f"{ref} ✅"
+        return f"{ref or '—'} <span title='Missing or not 8 digits'>⚠</span>"
+    return ref or ""
+
+@app.get("/api/admin", response_class=HTMLResponse)
+async def admin(request: Request, status: Optional[str] = Query(None)):
+    require_admin(request)
+    conn = get_conn()
+    _expire_unpaid(conn)
+
+    cur = conn.cursor()
+    cur.execute("SELECT status, COUNT(*) as c FROM searches GROUP BY status")
+    counts = {r["status"]: r["c"] for r in cur.fetchall()}
+
+    # ---- filtering ----
+    statuses_param: List[str] = []
+    if status:
+        if status.lower() == "active":
+            statuses_param = ["queued", "searching"]
         else:
-            await set_status_api(client, row, "failed", f"booking_failed:{found_slot}")
+            statuses_param = [s.strip() for s in status.split(",") if s.strip()]
+
+    if statuses_param:
+        placeholders = ",".join("?" for _ in statuses_param)
+        cur.execute(
+            f"SELECT * FROM searches WHERE status IN ({placeholders}) "
+            "ORDER BY datetime(replace(updated_at,'Z','+00:00')) DESC",
+            tuple(statuses_param),
+        )
     else:
-        await set_status_api(client, row, "found", f"slot_found:{found_slot}")
-        asyncio.create_task(assist_window_monitor(sid, found_slot))
+        cur.execute(
+            "SELECT * FROM searches "
+            "ORDER BY datetime(replace(updated_at,'Z','+00:00')) DESC"
+        )
+    rows = cur.fetchall()
+    conn.close()
 
-# ==============================
-# Main loop
-# ==============================
-async def run():
-    limits = httpx.Limits(max_connections=MAX_CONNECTIONS, max_keepalive_connections=MAX_KEEPALIVE)
-    timeout = httpx.Timeout(REQUEST_TIMEOUT)
-    headers = {"User-Agent": USER_AGENT}
+    def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
 
-    async with httpx.AsyncClient(http2=False, limits=limits, timeout=timeout, headers=headers) as client:
-        print(f"[worker] up state_db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=off rps={DVSA_RPS} mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED} stale={STALE_MINUTES}m")
-        while True:
-            try:
-                if is_quiet_now():
-                    await asyncio.sleep(POLL_SEC)
-                    continue
-                if not global_allowed():
-                    await asyncio.sleep(POLL_SEC)
-                    continue
+    statuses_all = ["pending_payment","new","queued","searching","found","booked","failed","expired","disabled"]
+    pills = (
+        f'<a href="?status=active" style="text-decoration:none">{_badge("active")}</a> ' +
+        " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses_all) +
+        ' <a href="/api/admin" style="margin-left:8px">Clear</a>'
+    )
 
-                jobs = await claim_candidates_api(client, CONCURRENCY)
-                if not jobs:
-                    await asyncio.sleep(POLL_SEC)
-                    continue
-                for j in jobs:
-                    _status_cache[j["id"]] = (j.get("status") or "searching", j.get("last_event") or "")
-                await asyncio.gather(*(process_job(client, j) for j in jobs))
-            except Exception as e:
-                print(f"[worker] error: {_human(e)}")
-                await asyncio.sleep(POLL_SEC)
+    rows_html = []
+    for r in rows:
+        centres = ", ".join((json.loads(r["centres_json"] or "[]")))
+        opts_raw = r["options_json"] or ""
+        opts = html.escape(opts_raw)
 
-if __name__ == "__main__":
-    asyncio.run(run())
+        reached, last_centre, captcha = _derive_flags(r)
+        reached_html = "✅" if reached else "—"
+        captcha_html = "🚧" if captcha else "—"
+
+        rows_html.append(
+            "<tr>"
+            + td(r["id"])
+            + td(_badge(r["status"]))
+            + td(r["booking_type"] or "")
+            + td(r["licence_number"] or "")
+            + td(_fmt_booking_ref(r))
+            + td(r["theory_pass"] or "")
+            + td(f'{r["date_window_from"] or ""} → {r["date_window_to"] or ""}<br>{r["time_window_from"] or ""} → {r["time_window_to"] or ""}')
+            + td(r["phone"] or "")
+            + td(r["email"] or "")
+            + td(centres)
+            + td(f"<code style='font-size:12px'>{opts}</code>")
+            + td(r["last_event"] or "")
+            + td(r["paid"])
+            + td(r["payment_intent_id"] or "")
+            + td(reached_html)
+            + td(last_centre or "—")
+            + td(captcha_html)
+            + td(r["created_at"] or "")
+            + td(r["updated_at"] or "")
+            + "</tr>"
+        )
+
+    html_doc = f"""
+    <html>
+    <head>
+      <title>Admin · FastDrivingTestFinder</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <style>
+        body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:16px;color:#0f172a}}
+        .wrap{{max-width:1200px;margin:0 auto}}
+        h1{{margin:0 0 8px 0}}
+        table{{border-collapse:collapse;width:100%;font-size:14px}}
+        th,td{{border-bottom:1px solid #eee;padding:8px;text-align:left;vertical-align:top}}
+        th{{background:#f8fafc;position:sticky;top:0}}
+        .counts span{{margin-right:10px}}
+        .bar{{display:flex;align-items:center;gap:8px;margin-bottom:12px}}
+        .pill a{{margin-right:6px}}
+        code{{background:#f1f5f9;padding:2px 4px;border-radius:6px}}
+      </style>
+    </head>
+    <body>
+      <div class="wrap">
+        <h1>Searches</h1>
+        <div class="bar">
+          <div class="pill">{pills}</div>
+        </div>
+        <div class="counts">
+          {"".join(f"<span>{_badge(k)} {v}</span>" for k,v in counts.items())}
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>Status</th><th>Type</th><th>Licence</th><th>Booking Ref</th><th>Theory</th>
+              <th>Date/Time Window</th><th>Phone</th><th>Email</th><th>Centres</th><th>Options</th>
+              <th>Last Event</th><th>Paid</th><th>PI</th>
+              <th>Reached?</th><th>Last centre</th><th>Captcha?</th>
+              <th>Created</th><th>Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(rows_html)}
+          </tbody>
+        </table>
+      </div>
+    </body>
+    </html>
+    """
+    # Prevent browser caching so refresh always reflects current state.
+    return HTMLResponse(html_doc, headers={"Cache-Control": "no-store"})
+
+# ---------- WORKER ENDPOINTS ----------
+@app.post("/api/worker/claim")
+def worker_claim(body: WorkerClaimRequest, _: bool = Depends(_verify_worker)):
+    """
+    Claim up to `limit` searches:
+      - Any paid searches in 'queued' or 'new'
+      - PLUS 'searching' searches whose updated_at is older than STALE_SEARCH_MIN
+        (to reclaim stuck jobs).
+    """
+    conn = get_conn()
+    _expire_unpaid(conn)
+
+    cutoff_iso = (utcnow() - timedelta(minutes=max(1, STALE_SEARCH_MIN))).replace(microsecond=0).isoformat()
+
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM searches
+         WHERE paid=1
+           AND (
+                 status IN ('queued','new')
+                 OR (status='searching' AND (updated_at IS NULL OR updated_at < ?))
+               )
+         ORDER BY updated_at ASC
+         LIMIT ?
+    """, (cutoff_iso, body.limit))
+    rows = cur.fetchall()
+
+    claimed = []
+    for r in rows:
+        cur.execute("""
+            UPDATE searches
+               SET status='searching', last_event='worker_claimed', updated_at=?
+             WHERE id=? AND paid=1
+               AND (
+                     status IN ('queued','new')
+                     OR (status='searching' AND (updated_at IS NULL OR updated_at < ?))
+                   )
+        """, (now_iso(), r["id"], cutoff_iso))
+        if cur.rowcount:
+            cur.execute("SELECT * FROM searches WHERE id=?", (r["id"],))
+            claimed.append(cur.fetchone())
+    conn.commit()
+    conn.close()
+
+    items = [dict(row) for row in claimed]
+    return {"items": items}
+
+@app.post("/api/worker/searches/{sid}/event")
+def worker_event(sid: int, body: WorkerEvent, _: bool = Depends(_verify_worker)):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE searches SET last_event=?, updated_at=? WHERE id=?",
+                (body.event, now_iso(), sid))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+@app.post("/api/worker/searches/{sid}/status")
+def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE searches SET status=?, last_event=?, updated_at=? WHERE id=?",
+                (b.status, b.event, now_iso(), sid))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
