@@ -1,6 +1,7 @@
 # api_gateway.py
 import os
 import json
+import html
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
@@ -103,9 +104,7 @@ migrate()
 
 # ---------- MODELS ----------
 class SearchIn(BaseModel):
-    # allow FE to update an existing draft/paid record
     search_id: Optional[int] = None
-
     booking_type: Literal["new", "swap"] = "new"
     licence_number: Optional[str] = None
     booking_reference: Optional[str] = None
@@ -126,7 +125,6 @@ class SearchIn(BaseModel):
     notes: Optional[str] = None
 
 class StartSearchIn(BaseModel):
-    """Minimal payload used by /api/search/start to pre-create a draft record."""
     email: Optional[str] = None
     booking_type: Optional[Literal["new","swap"]] = None
 
@@ -198,7 +196,7 @@ def _verify_worker(authorization: str | None = Header(default=None)):
 
 def _expire_unpaid(conn: sqlite3.Connection):
     """Mark unpaid searches past expires_at as expired."""
-    cur = conn.cursor()  # fixed
+    cur = conn.cursor()
     ts = now_iso()
     cur.execute("""
         UPDATE searches
@@ -208,9 +206,9 @@ def _expire_unpaid(conn: sqlite3.Connection):
     """, (ts, ts))
     conn.commit()
 
-# ---- Amount band helpers ----
+# ---- Amount helpers ----
 def _band_ok(amount_cents: int, base_cents: int) -> bool:
-    """Accept whole-pound amounts at/above base in £30 (3000¢) steps."""
+    """Accept whole-pound amounts at/above base in £30 steps."""
     if amount_cents <= 0 or amount_cents % 100 != 0:
         return False
     if amount_cents < base_cents:
@@ -218,7 +216,6 @@ def _band_ok(amount_cents: int, base_cents: int) -> bool:
     return (amount_cents - base_cents) % 3000 == 0
 
 def _infer_booking_type(amount_cents: int) -> Optional[str]:
-    """Infer booking type purely from amount band."""
     if amount_cents >= 15000:
         return "new"
     if amount_cents >= 7000:
@@ -277,7 +274,6 @@ def health():
 
 # ---------- ROUTES ----------
 
-# Tiny lookup so the FE can verify cached IDs
 @app.get("/api/search/{sid}")
 def get_search(sid: int):
     conn = get_conn()
@@ -299,7 +295,6 @@ def get_search(sid: int):
         "updated_at": row["updated_at"],
     }
 
-# Minimal draft creator for the Payment section
 @app.post("/api/search/start")
 def start_search(payload: StartSearchIn):
     conn = get_conn()
@@ -319,10 +314,6 @@ def start_search(payload: StartSearchIn):
 
 @app.post("/api/search")
 async def create_search(payload: SearchIn):
-    """
-    If `payload.search_id` is provided, update that existing row (typically after payment).
-    Otherwise, create a new pending draft (original behavior).
-    """
     centres_list = _parse_centres(payload.centres)
     conn = get_conn()
     _expire_unpaid(conn)
@@ -375,7 +366,6 @@ async def create_search(payload: SearchIn):
         conn.close()
         return {"ok": True, "search_id": payload.search_id}
 
-    # Insert new (unchanged path)
     rec = _create_search_record(
         conn,
         booking_type=payload.booking_type,
@@ -398,7 +388,6 @@ async def create_search(payload: SearchIn):
     conn.close()
     return {"ok": True, **rec}
 
-# Disable (floating “Stop searching” button)
 @app.post("/api/search/{sid}/disable")
 def disable_search(sid: int, _: bool = Depends(_verify_worker)):
     conn = get_conn()
@@ -414,12 +403,10 @@ def disable_search(sid: int, _: bool = Depends(_verify_worker)):
         raise HTTPException(status_code=404, detail="Not found or cannot disable")
     return {"ok": True, "id": sid, "status": "disabled"}
 
-# Explicit OPTIONS (some proxies like it)
 @app.options("/api/pay/create-intent")
 async def options_pay_create_intent():
     return Response(status_code=204)
 
-# ---------- PAY: auto-create (or auto-recreate) a draft if search_id is missing/bad ----------
 @app.post("/api/pay/create-intent")
 async def pay_create_intent(body: PayCreateIntentIn, request: Request):
     amount = body.amount_cents if body.amount_cents is not None else body.amount
@@ -442,7 +429,6 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
         )
         return rec["search_id"]
 
-    # Resolve/repair search id (create when missing or invalid)
     if body.search_id is None:
         sid = _make_draft(body.email, "created_via_create_intent")
     else:
@@ -457,7 +443,6 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
         else:
             sid = row["id"]
 
-    # Re-fetch canonical row
     cur.execute("SELECT id, email, booking_type, status, paid FROM searches WHERE id = ?", (sid,))
     row = cur.fetchone()
     if not row:
@@ -466,12 +451,10 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
 
     amount = int(amount)
 
-    # Amount guardrails: accept £70/£150 base and +£30 steps
     if not (_band_ok(amount, 7000) or _band_ok(amount, 15000)):
         conn.close()
         raise HTTPException(status_code=400, detail="amount not in allowed range")
 
-    # Infer/repair booking_type if needed
     inferred = _infer_booking_type(amount)
     existing_type = (row["booking_type"] or "").strip() or None
     if inferred and inferred != existing_type:
@@ -482,9 +465,8 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
             )
             conn.commit()
         except Exception:
-            pass  # best-effort
+            pass
 
-    # Build metadata
     md = {"search_id": str(sid), "email": (row["email"] or body.email or "")}
     if body.metadata:
         try:
@@ -494,7 +476,6 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
         except Exception:
             pass
 
-    # Create PaymentIntent (idempotent per search)
     try:
         intent = stripe.PaymentIntent.create(
             amount=amount,
@@ -623,7 +604,7 @@ def _derive_flags(row: sqlite3.Row):
         "captcha_cooldown:",
         "no_slots_this_round:",
         "slot_unchanged:",
-        "trying:",  # preflight/heartbeat from worker
+        "trying:",
     )
 
     for pfx in prefixes_with_centre:
@@ -644,7 +625,6 @@ def _derive_flags(row: sqlite3.Row):
     return reached, last_centre, captcha
 
 def _fmt_booking_ref(row: sqlite3.Row) -> str:
-    """Show 8-digit ref with a quick validity hint for swap jobs."""
     ref = (row["booking_reference"] or "").strip()
     if (row["booking_type"] or "") == "swap":
         ok = len(ref) == 8 and ref.isdigit()
@@ -678,37 +658,38 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
     rows_html = []
     for r in rows:
         centres = ", ".join((json.loads(r["centres_json"] or "[]")))
-        opts = r["options_json"] or ""
+        opts_raw = r["options_json"] or ""
+        opts = html.escape(opts_raw)
 
         reached, last_centre, captcha = _derive_flags(r)
         reached_html = "✅" if reached else "—"
         captcha_html = "🚧" if captcha else "—"
 
         rows_html.append(
-            "<tr>" +
-            td(r["id"]) +
-            td(_badge(r["status"])) +
-            td(r["booking_type"] or "") +
-            td(r["licence_number"] or "") +
-            td(_fmt_booking_ref(r)) +
-            td(r["theory_pass"] or "") +
-            td(f'{r["date_window_from"] or ""} → {r["date_window_to"] or ""}<br>{r["time_window_from"] or ""} → {r["time_window_to"] or ""}') +
-            td(r["phone"] or "") +
-            td(r["email"] or "") +
-            td(centres) +
-            td(f'<code style="font-size:12px'>{opts}</code>') +
-            td(r["last_event"] or "") +
-            td(r["paid"]) +
-            td(r["payment_intent_id"] or "") +
-            td(reached_html) +
-            td(last_centre or "—") +
-            td(captcha_html) +
-            td(r["created_at"] or "") +
-            td(r["updated_at"] or "") +
-            "</tr>"
+            "<tr>"
+            + td(r["id"])
+            + td(_badge(r["status"]))
+            + td(r["booking_type"] or "")
+            + td(r["licence_number"] or "")
+            + td(_fmt_booking_ref(r))
+            + td(r["theory_pass"] or "")
+            + td(f'{r["date_window_from"] or ""} → {r["date_window_to"] or ""}<br>{r["time_window_from"] or ""} → {r["time_window_to"] or ""}')
+            + td(r["phone"] or "")
+            + td(r["email"] or "")
+            + td(centres)
+            + td(f"<code style='font-size:12px'>{opts}</code>")
+            + td(r["last_event"] or "")
+            + td(r["paid"])
+            + td(r["payment_intent_id"] or "")
+            + td(reached_html)
+            + td(last_centre or "—")
+            + td(captcha_html)
+            + td(r["created_at"] or "")
+            + td(r["updated_at"] or "")
+            + "</tr>"
         )
 
-    html = f"""
+    html_doc = f"""
     <html>
     <head>
       <title>Admin · FastDrivingTestFinder</title>
@@ -753,7 +734,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
     </body>
     </html>
     """
-    return HTMLResponse(html)
+    return HTMLResponse(html_doc)
 
 # ---------- WORKER ENDPOINTS ----------
 @app.post("/api/worker/claim")
@@ -804,4 +785,4 @@ def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
                 (b.status, b.event, now_iso(), sid))
     conn.commit()
     conn.close()
-    return {"ok": True"}
+    return {"ok": True}
