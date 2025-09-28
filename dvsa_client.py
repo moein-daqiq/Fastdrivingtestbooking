@@ -71,6 +71,7 @@ DVSA_PROXY = os.environ.get("DVSA_PROXY")  # e.g. http://user:pass@host:port
 API_BASE = os.environ.get("API_BASE", "https://api.fastdrivingtestfinder.co.uk/api").rstrip("/")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 
+# ---------------- Robust selectors ----------------
 # All selectors live here; include generous fallbacks.
 SEL = {
     # GOV.UK landing “Start now”
@@ -79,13 +80,13 @@ SEL = {
     # NEW booking – category page (pick Car)
     "car_button": "button:has-text('Car'), a:has-text('Car (manual'), .app-button:has-text('Car'), [role='button']:has-text('Car')",
 
-    # Existing booking (swap) login
+    # Existing booking (swap) login (CSS fallbacks)
     "swap_licence":  "input[name='driving-licence-number'], input[name*='licence'], input[id*='licence'], input[name='driverLicenceNumber']",
     "swap_ref":      "input[name='booking-reference'], input[name*='reference'], input[id*='reference'], input[name='bookingReference']",
     "swap_email":    "input[name='email'], input[id*='email'], input[name='candidateEmail']",
     "swap_continue": "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
 
-    # New booking login (licence details page)
+    # New booking login (CSS fallbacks)
     "new_licence":   "input[name='driving-licence-number'], input[name*='licence'], input[id*='licence'], input[name='driverLicenceNumber']",
     "new_theory":    "input[name='theory-pass-number'], input[name*='candidate'], input[id*='theory'], input[name='theoryPassNumber']",
     "new_email":     "input[name='email'], input[id*='email'], input[name='candidateEmail']",
@@ -102,6 +103,29 @@ SEL = {
 
     # Errors
     "error_summary": ".govuk-error-summary, [role='alert']",
+}
+
+# Label/role variants (more resilient than CSS)
+LABELS = {
+    "licence": [
+        "Driving licence number",
+        "Driver number",
+        "Licence number",
+        "Driving licence number (as it appears on your licence)",
+    ],
+    "swap_ref": [
+        "Application reference number",
+        "Booking reference",
+        "Reference number",
+    ],
+    "email": [
+        "Email",
+        "Email address",
+        "Candidate email",
+    ],
+}
+ROLE_BUTTONS = {
+    "continue": ["Continue", "Sign in", "Next", "Find appointments", "Search"],
 }
 
 def _sel(key: str) -> str:
@@ -222,20 +246,49 @@ class DVSAClient:
                 await self.pw.stop()
             await self._close_http()
 
-    # ------------- Helpers -------------
+    # ------------- Low-level helpers -------------
     async def _goto(self, url: str, marker: Optional[str] = None):
         await self.page.goto(url, wait_until="domcontentloaded")
         await self._captcha_guard()
         if marker:
-            await self.page.wait_for_selector(f"text={marker}")
+            await self.page.get_by_text(marker, exact=False).first.wait_for()
 
-    async def _fill(self, sel: str, value: str):
+    async def _fill_css(self, sel: str, value: str):
         await self.page.wait_for_selector(sel)
         await self.page.fill(sel, value)
 
-    async def _click(self, sel: str):
+    async def _click_css(self, sel: str):
         await self.page.wait_for_selector(sel)
         await self.page.click(sel)
+
+    async def _click_continue_role_fallback(self) -> bool:
+        # Prefer accessible role/name to resist copy changes
+        for name in ROLE_BUTTONS["continue"]:
+            try:
+                await self.page.get_by_role("button", name=name).click(timeout=4000)
+                return True
+            except Exception:
+                continue
+        # CSS fallback
+        try:
+            await self._click_css(_sel("new_continue"))
+            return True
+        except Exception:
+            try:
+                await self._click_css(_sel("swap_continue"))
+                return True
+            except Exception:
+                return False
+
+    async def _fill_by_label_variants(self, names: list[str], value: str) -> bool:
+        # Try label-based lookup first
+        for n in names:
+            try:
+                await self.page.get_by_label(n, exact=False).fill(value, timeout=5000)
+                return True
+            except Exception:
+                continue
+        return False
 
     async def _captcha_guard(self):
         html = (await self.page.content()).lower()
@@ -286,14 +339,12 @@ class DVSAClient:
         We answer No/No when those controls exist.
         """
         try:
-            # Use accessible labels where possible (Playwright will find the matching radio).
             no_radios = self.page.get_by_label("No", exact=True)
-            # Click first two "No" radios if present.
-            await no_radios.nth(0).check()
+            await no_radios.nth(0).check(timeout=2000)
             await asyncio.sleep(0.05)
-            await no_radios.nth(1).check()
+            await no_radios.nth(1).check(timeout=2000)
         except Exception:
-            # Fall back: click any radios with value/no.
+            # Fall back: click any radios with value=no.
             try:
                 radios = await self.page.query_selector_all("input[type='radio'][value='no'], input[type='radio'][aria-label='No']")
                 for r in radios[:2]:
@@ -306,39 +357,83 @@ class DVSAClient:
 
     # ------------- Public API used by worker -------------
     async def login_swap(self, licence_number: str, booking_reference: str, email: Optional[str] = None):
+        # Navigate + guard
         await self._goto(URL_CHANGE_TEST)
         await self._maybe_click_start_now()
 
-        await self._fill(_sel("swap_licence"), licence_number)
-        await self._fill(_sel("swap_ref"), booking_reference)
+        # Fill licence via label-first, then CSS fallback
+        ok_lic = await self._fill_by_label_variants(LABELS["licence"], licence_number)
+        if not ok_lic:
+            try:
+                await self._fill_css(_sel("swap_licence"), licence_number)
+            except Exception:
+                raise DVSAError("layout_change: licence field not found")
+
+        # Fill booking reference
+        ok_ref = await self._fill_by_label_variants(LABELS["swap_ref"], booking_reference)
+        if not ok_ref:
+            try:
+                await self._fill_css(_sel("swap_ref"), booking_reference)
+            except Exception:
+                raise DVSAError("layout_change: booking reference field not found")
+
+        # Optional email
         if email:
-            await self._fill(_sel("swap_email"), email)
-        await self._click(_sel("swap_continue"))
+            ok_email = await self._fill_by_label_variants(LABELS["email"], email)
+            if not ok_email:
+                try:
+                    await self._fill_css(_sel("swap_email"), email)
+                except Exception:
+                    pass  # not fatal
+
+        # Continue button (role-first)
+        if not await self._click_continue_role_fallback():
+            raise DVSAError("layout_change: continue button not found")
+
+        # Page-level checks
         await self._expect_ok()
 
     async def login_new(self, licence_number: str, theory_pass: Optional[str] = None, email: Optional[str] = None):
+        # Navigate + guard
         await self._goto(URL_BOOK_TEST)
         await self._maybe_click_start_now()
 
         # If the category picker is visible, choose Car.
         await self._select_car_category_if_present()
 
-        # Now licence details page: fill licence, optional theory/email, answer No/No, continue.
-        await self._fill(_sel("new_licence"), licence_number)
+        # Licence (label-first)
+        ok_lic = await self._fill_by_label_variants(LABELS["licence"], licence_number)
+        if not ok_lic:
+            try:
+                await self._fill_css(_sel("new_licence"), licence_number)
+            except Exception:
+                raise DVSAError("layout_change: licence field not found")
+
+        # Optional theory pass
         if theory_pass:
-            try:
-                await self._fill(_sel("new_theory"), theory_pass)
-            except Exception:
-                # not always present / required
-                pass
+            # Try label-ish first; then CSS
+            filled = await self._fill_by_label_variants(["Theory pass number", "Theory test pass number", "Theory pass certificate number"], theory_pass)
+            if not filled:
+                try:
+                    await self._fill_css(_sel("new_theory"), theory_pass)
+                except Exception:
+                    pass
+
+        # Optional email
         if email:
-            try:
-                await self._fill(_sel("new_email"), email)
-            except Exception:
-                pass
+            ok_email = await self._fill_by_label_variants(LABELS["email"], email)
+            if not ok_email:
+                try:
+                    await self._fill_css(_sel("new_email"), email)
+                except Exception:
+                    pass
 
         await self._answer_no_no_if_present()
-        await self._click(_sel("new_continue"))
+
+        # Continue
+        if not await self._click_continue_role_fallback():
+            raise DVSAError("layout_change: continue button not found")
+
         await self._expect_ok()
 
     async def _open_centre(self, centre_name: str) -> bool:
@@ -481,7 +576,7 @@ class DVSAClient:
 
         # Confirm
         try:
-            await self._click(_sel("confirm_button"))
+            await self._click_css(_sel("confirm_button"))
         except PWTimeout:
             await self._event(f"booking_failed:{centre} · {date_txt} · {time_txt or 'unknown'}")
             return False
