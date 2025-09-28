@@ -608,7 +608,7 @@ def _derive_flags(row: sqlite3.Row):
     """
     Compute Admin flags from last_event only (no schema changes):
     - reached: True if we saw a DVSA interaction event.
-    - last_centre: parsed from 'checked:<Centre>...' or 'slot_found:Centre · ...'.
+    - last_centre: parsed from known event prefixes that include a centre.
     - captcha: True when last_event starts with 'captcha_cooldown:'.
     """
     ev = (row["last_event"] or "").strip()
@@ -616,13 +616,28 @@ def _derive_flags(row: sqlite3.Row):
     last_centre = ""
     captcha = False
 
-    if ev.startswith(("checked:", "slot_found:", "booked:", "booking_failed:", "captcha_cooldown:")):
-        try:
-            payload = ev.split(":", 1)[1]
-            last_centre = (payload.split("·", 1)[0] or "").strip()
-        except Exception:
-            last_centre = ""
+    # Include every worker event that carries a centre after the colon
+    prefixes_with_centre = (
+        "checked:",
+        "slot_found:",
+        "booked:",
+        "booking_failed:",
+        "captcha_cooldown:",
+        # Newer "no change / no slots" events also include the centre
+        "no_slots_this_round:",
+        "slot_unchanged:",
+    )
 
+    for pfx in prefixes_with_centre:
+        if ev.startswith(pfx):
+            try:
+                payload = ev.split(":", 1)[1]
+                last_centre = (payload.split("·", 1)[0] or "").strip()
+            except Exception:
+                last_centre = ""
+            break
+
+    # Consider "reached" only for direct DVSA interaction outcomes
     if ev.startswith(("checked:", "slot_found:", "booked:", "booking_failed:")):
         reached = True
 
@@ -793,3 +808,4 @@ def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
     conn.commit()
     conn.close()
     return {"ok": True}
+
