@@ -144,12 +144,13 @@ def is_quiet_now() -> bool:
     now_h = datetime.utcnow().hour
     for start, end in _parse_quiet_hours(QUIET_HOURS):
         if start == end:
+            # 24h quiet if start==end (intentionally “always quiet” window)
             return True
         if start < end:
             if start <= now_h < end:
-                True
                 return True
         else:
+            # Overnight span (e.g., 22-6)
             if now_h >= start or now_h < end:
                 return True
     return False
@@ -507,12 +508,11 @@ async def assist_window_monitor(sid: int, slot_txt: str):
 async def process_job(client: httpx.AsyncClient, row: dict):
     sid = row["id"]
 
-    # ---- NEW: enforce required credentials before spending DVSA checks ----
+    # ---- enforce required credentials before spending DVSA checks ----
     missing_reason = _missing_required_fields(row)
     if missing_reason:
         await set_status_api(client, row, "queued", missing_reason)
         return
-    # ----------------------------------------------------------------------
 
     centres: List[str] = safe_json_loads(row.get("centres_json"), [])
     centres = normalize_centres(centres)
