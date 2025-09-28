@@ -26,7 +26,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.4.5")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.4.6")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -52,6 +52,7 @@ def migrate():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT,
             updated_at TEXT,
+            queued_at TEXT,
             status TEXT DEFAULT 'pending_payment',
             last_event TEXT,
             paid INTEGER DEFAULT 0,
@@ -75,7 +76,7 @@ def migrate():
         )
     """)
     expected_cols = {
-        "created_at","updated_at","status","last_event","paid",
+        "created_at","updated_at","queued_at","status","last_event","paid",
         "payment_intent_id","amount",
         "booking_type","licence_number","booking_reference","theory_pass",
         "date_window_from","date_window_to","time_window_from","time_window_to",
@@ -87,6 +88,16 @@ def migrate():
     for col in missing:
         coltype = "INTEGER" if col in {"paid","amount"} else "TEXT"
         cur.execute(f"ALTER TABLE searches ADD COLUMN {col} {coltype}")
+
+    # One-off backfill so fresh paid jobs don't look stale to worker
+    try:
+        cur.execute("""
+            UPDATE searches
+               SET queued_at = COALESCE(queued_at, updated_at, created_at)
+             WHERE paid = 1 AND queued_at IS NULL
+        """)
+    except Exception:
+        pass
 
     # Idempotency table for Stripe events
     cur.execute("""
@@ -272,7 +283,7 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.4.5"}
+    return {"ok": True, "ts": now_iso(), "version": "1.4.6"}
 
 # ---------- ROUTES ----------
 
@@ -554,6 +565,7 @@ async def stripe_webhook(request: Request):
 def _mark_paid_and_queue(search_id: int, payment_intent_id: str, event_label: str, amount_received: int = 0):
     conn = get_conn()
     cur = conn.cursor()
+    now = now_iso()
     cur.execute("""
         UPDATE searches
            SET paid = 1,
@@ -562,9 +574,10 @@ def _mark_paid_and_queue(search_id: int, payment_intent_id: str, event_label: st
                payment_intent_id = ?,
                amount = COALESCE(NULLIF(?,0), amount),
                updated_at = ?,
+               queued_at = ?,                -- ensure freshness for worker
                expires_at = NULL
          WHERE id = ?
-    """, (event_label, payment_intent_id, amount_received, now_iso(), search_id))
+    """, (event_label, payment_intent_id, amount_received, now, now, search_id))
     conn.commit()
     conn.close()
 
