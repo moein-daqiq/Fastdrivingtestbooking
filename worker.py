@@ -189,13 +189,23 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
         return None
 
 def _is_stale(created_ts: Optional[str], minutes: int = STALE_MINUTES) -> bool:
-    dt = _parse_iso(created_ts)
-    if not dt:
+    """
+    Robust: never raises (even if mixed aware/naive inputs sneak through).
+    Treat unparseable timestamps as NOT stale, so jobs still run.
+    """
+    try:
+        dt = _parse_iso(created_ts)
+        if not dt:
+            return False
+        # Coerce both sides to the same kind (aware UTC)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = utcnow() - dt.astimezone(timezone.utc)
+        return delta > timedelta(minutes=minutes)
+    except Exception as e:
+        # Log once per occurrence class
+        print(f"[worker:stale_guard] non-fatal: {str(e)[:140]} (ts={created_ts})")
         return False
-    # normalise to aware UTC
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return (utcnow() - dt) > timedelta(minutes=minutes)
 
 def _human(e: Exception) -> str:
     s = str(e).strip().split("\n")[0]
@@ -596,7 +606,6 @@ async def process_job(client: httpx.AsyncClient, row: dict):
         centres = ["(no centre provided)"]
 
     # ---- NEW: rotate to avoid biasing the first centre on every pass ----
-    # preserves determinism per job cycle by seeding with job id
     rnd = random.Random(sid)
     rnd.shuffle(centres)
 
