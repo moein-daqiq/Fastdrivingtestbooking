@@ -147,6 +147,7 @@ def is_quiet_now() -> bool:
             return True
         if start < end:
             if start <= now_h < end:
+                True
                 return True
         else:
             if now_h >= start or now_h < end:
@@ -523,15 +524,14 @@ async def process_job(client: httpx.AsyncClient, row: dict):
     captcha_hit = False
     last_checked: Optional[str] = None  # remember most recent centre we tried
 
-        async def check_one(c: str):
+    async def check_one(c: str):
         nonlocal found_slot, captcha_hit, last_checked
         async with sem:
             if found_slot is not None or captcha_hit:
                 return
             last_checked = c  # mark intent to check this centre
 
-            # NEW: heartbeat so Admin can always see the most recent centre attempted,
-            # even if DVSA check is skipped (cooldown/quiet hours) or fails early.
+            # Heartbeat so Admin can always see the most recent centre attempted
             try:
                 await post_event_api(client, row["id"], f"trying:{c}")
             except Exception:
@@ -539,7 +539,6 @@ async def process_job(client: httpx.AsyncClient, row: dict):
 
             try:
                 slots = await dvsa_check_centre(client, c, row)
-
             except CaptchaDetected:
                 captcha_hit = True
                 return
