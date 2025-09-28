@@ -575,11 +575,13 @@ async def assist_window_monitor(sid: int, slot_txt: str):
 async def process_job(client: httpx.AsyncClient, row: dict):
     sid = row["id"]
 
-    # ---- stale search guard (5 minutes) ----
-    created_ts = row.get("created_at") or row.get("queued_at")
-    if _is_stale(created_ts, minutes=STALE_MINUTES):
-        await set_status_api(client, row, "queued", f"stale_skipped:>{STALE_MINUTES}m")
-        return
+    # ---- FIXED: only apply stale guard to jobs already in 'searching' ----
+    status_now = (row.get("status") or "").strip()
+    if status_now == "searching":
+        updated_ts = row.get("updated_at") or row.get("created_at")
+        if _is_stale(updated_ts, minutes=STALE_MINUTES):
+            await set_status_api(client, row, "queued", f"stale_skipped:>{STALE_MINUTES}m")
+            return
 
     # ---- enforce required credentials before spending DVSA checks ----
     missing_reason = _missing_required_fields(row)
