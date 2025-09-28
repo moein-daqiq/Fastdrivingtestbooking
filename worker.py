@@ -523,14 +523,23 @@ async def process_job(client: httpx.AsyncClient, row: dict):
     captcha_hit = False
     last_checked: Optional[str] = None  # remember most recent centre we tried
 
-    async def check_one(c: str):
+        async def check_one(c: str):
         nonlocal found_slot, captcha_hit, last_checked
         async with sem:
             if found_slot is not None or captcha_hit:
                 return
             last_checked = c  # mark intent to check this centre
+
+            # NEW: heartbeat so Admin can always see the most recent centre attempted,
+            # even if DVSA check is skipped (cooldown/quiet hours) or fails early.
+            try:
+                await post_event_api(client, row["id"], f"trying:{c}")
+            except Exception:
+                pass
+
             try:
                 slots = await dvsa_check_centre(client, c, row)
+
             except CaptchaDetected:
                 captcha_hit = True
                 return
