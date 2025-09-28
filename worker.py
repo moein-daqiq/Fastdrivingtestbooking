@@ -58,6 +58,9 @@ W_SWAP_BONUS = float(os.environ.get("W_SWAP_BONUS", "0.5"))
 CAPTCHA_COOLDOWN_MIN = int(os.environ.get("CAPTCHA_COOLDOWN_MIN", "30"))
 QUIET_HOURS = os.environ.get("QUIET_HOURS", "").strip()
 
+# ==== NEW: stale search expiry (keep at 5 minutes as requested) ====
+STALE_MINUTES = int(os.environ.get("STALE_MINUTES", "5"))
+
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/ms-playwright")
 os.environ.setdefault("FASTDTF_LAUNCH_ARGS", "--no-sandbox --disable-dev-shm-usage")
 
@@ -170,6 +173,27 @@ def normalize_centres(centres: List[str]) -> List[str]:
             cleaned.append(c0)
     return cleaned
 
+# ===== NEW helpers: stale check + humanize errors =====
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        # accept "2025-09-27T19:55:43Z" or with offset
+        ts2 = ts.replace("Z", "+00:00")
+        return datetime.fromisoformat(ts2)
+    except Exception:
+        return None
+
+def _is_stale(created_ts: Optional[str], minutes: int = STALE_MINUTES) -> bool:
+    dt = _parse_iso(created_ts)
+    if not dt:
+        return False
+    return (datetime.utcnow() - dt) > timedelta(minutes=minutes)
+
+def _human(e: Exception) -> str:
+    s = str(e).strip().split("\n")[0]
+    return s[:220]
+
 # ===== NEW: required-field guard (licence for all; 8-digit ref for swap) =====
 def _missing_required_fields(row: dict) -> Optional[str]:
     """Return a reason string if required credentials are missing, else None."""
@@ -259,7 +283,7 @@ async def _api_post(client: httpx.AsyncClient, path: str, payload: dict):
             r = await client.post(f"{API_BASE}{path}", json=payload, headers=headers)
             r.raise_for_status()
             return r.json()
-        except Exception as e:
+        except Exception:
             if attempt == 2:
                 raise
             await asyncio.sleep(0.3 * (attempt + 1))
@@ -417,6 +441,16 @@ def global_allowed() -> bool:
 # DVSA integration
 # ==============================
 async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -> List[str]:
+    """
+    Hardened: retries around DVSA login step with readable logs and layout-change flag.
+    Emits:
+      - trying:{centre}      (from caller)
+      - login_start:{centre}
+      - login_ok:{centre}
+      - checked:{centre}
+      - layout_issue:{centre}        (if selectors/layout likely changed)
+      - captcha_cooldown:{centre}    (on captcha wall)
+    """
     if not global_allowed():
         await asyncio.sleep(0.05)
         return []
@@ -429,32 +463,60 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
 
     session_key = (row.get("licence_number") or f"job{row['id']}").replace(" ", "")[:20]
 
-    try:
-        async with DVSAClient(headless=True, session_key=session_key) as dvsa:
-            if (row.get("booking_type") or "") == "swap":
-                await dvsa.login_swap(
-                    licence_number=row.get("licence_number") or "",
-                    booking_reference=row.get("booking_reference") or "",
-                    email=row.get("email") or None,
-                )
-            else:
-                await dvsa.login_new(
-                    licence_number=row.get("licence_number") or "",
-                    theory_pass=row.get("theory_pass") or None,
-                    email=row.get("email") or None,
-                )
-            await post_event_api(client_httpx, row["id"], f"checked:{centre}")
-            return await dvsa.search_centre_slots(centre)
-    except CaptchaDetected:
-        centre_fail(centre)
-        global_cooldown(CAPTCHA_COOLDOWN_MIN)
-        wa_owner(f"🛑 DVSA bot wall hit for search #{row['id']} at {centre}. Cooling for {CAPTCHA_COOLDOWN_MIN}m.")
-        await post_event_api(client_httpx, row["id"], f"captcha_cooldown:{centre}")
-        raise
-    except Exception as e:
-        print(f"[dvsa_check_centre] {centre}: {e}")
-        centre_fail(centre)
-        return []
+    # ---- NEW: bounded retry for login/layout hiccups ----
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            async with DVSAClient(headless=True, session_key=session_key) as dvsa:
+                await post_event_api(client_httpx, row["id"], f"login_start:{centre}")
+                if (row.get("booking_type") or "") == "swap":
+                    await dvsa.login_swap(
+                        licence_number=row.get("licence_number") or "",
+                        booking_reference=row.get("booking_reference") or "",
+                        email=row.get("email") or None,
+                    )
+                else:
+                    await dvsa.login_new(
+                        licence_number=row.get("licence_number") or "",
+                        theory_pass=row.get("theory_pass") or None,
+                        email=row.get("email") or None,
+                    )
+                await post_event_api(client_httpx, row["id"], f"login_ok:{centre}")
+
+                slots = await dvsa.search_centre_slots(centre)
+                await post_event_api(client_httpx, row["id"], f"checked:{centre}")
+                return slots
+
+        except CaptchaDetected:
+            centre_fail(centre)
+            global_cooldown(CAPTCHA_COOLDOWN_MIN)
+            wa_owner(f"🛑 DVSA bot wall hit for search #{row['id']} at {centre}. Cooling for {CAPTCHA_COOLDOWN_MIN}m.")
+            await post_event_api(client_httpx, row["id"], f"captcha_cooldown:{centre}")
+            # Bubble up so caller marks job queued w/ cooldown
+            raise
+
+        except Exception as e:
+            msg = _human(e).lower()
+            # Heuristics for selector/layout/timeout problems from dvsa_client
+            layout_like = any(k in msg for k in [
+                "timeout",
+                "not found",
+                "selector",
+                "locator",
+                "No node found for selector".lower(),
+                "failed to find",
+            ])
+            if layout_like:
+                await post_event_api(client_httpx, row["id"], f"layout_issue:{centre}")
+            # Do not loop forever; bounded attempts
+            if attempt >= attempts:
+                print(f"[dvsa_check_centre] {centre}: { _human(e) } (gave up after {attempts})")
+                centre_fail(centre)
+                return []
+            # small backoff
+            await asyncio.sleep(0.5 * attempt)
+
+    return []
 
 async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
     session_key = (row.get("licence_number") or f"job{row['id']}").replace(" ", "")[:20]
@@ -508,6 +570,13 @@ async def assist_window_monitor(sid: int, slot_txt: str):
 async def process_job(client: httpx.AsyncClient, row: dict):
     sid = row["id"]
 
+    # ---- NEW: stale search guard (5 minutes) ----
+    # Accepts either created_at or queued_at timestamps (ISO). If absent, skip stale check.
+    created_ts = row.get("created_at") or row.get("queued_at")
+    if _is_stale(created_ts, minutes=STALE_MINUTES):
+        await set_status_api(client, row, "queued", f"stale_skipped:>{STALE_MINUTES}m")
+        return
+
     # ---- enforce required credentials before spending DVSA checks ----
     missing_reason = _missing_required_fields(row)
     if missing_reason:
@@ -518,6 +587,11 @@ async def process_job(client: httpx.AsyncClient, row: dict):
     centres = normalize_centres(centres)
     if not centres:
         centres = ["(no centre provided)"]
+
+    # ---- NEW: rotate to avoid biasing the first centre on every pass ----
+    # preserves determinism per job cycle by seeding with job id
+    rnd = random.Random(sid)
+    rnd.shuffle(centres)
 
     sem = asyncio.Semaphore(JOB_MAX_PARALLEL_CHECKS)
     found_slot: Optional[str] = None
@@ -585,7 +659,7 @@ async def run():
     headers = {"User-Agent": USER_AGENT}
 
     async with httpx.AsyncClient(http2=False, limits=limits, timeout=timeout, headers=headers) as client:
-        print(f"[worker] up state_db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=off rps={DVSA_RPS} mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED}")
+        print(f"[worker] up state_db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=off rps={DVSA_RPS} mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED} stale={STALE_MINUTES}m")
         while True:
             try:
                 if is_quiet_now():
@@ -603,7 +677,7 @@ async def run():
                     _status_cache[j["id"]] = (j.get("status") or "searching", j.get("last_event") or "")
                 await asyncio.gather(*(process_job(client, j) for j in jobs))
             except Exception as e:
-                print(f"[worker] error: {e}")
+                print(f"[worker] error: {_human(e)}")
                 await asyncio.sleep(POLL_SEC)
 
 if __name__ == "__main__":
