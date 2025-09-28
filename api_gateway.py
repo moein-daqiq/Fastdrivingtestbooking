@@ -604,6 +604,17 @@ def _badge(s: str) -> str:
     c = colors.get(s, "#334155")
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
 
+    def _derive_flags(row: sqlite3.Row):
+    """
+    Compute Admin flags from last_event only (no schema changes):
+    - reached: True if we saw a DVSA interaction event.
+    - last_centre: parsed from known event prefixes that include a centre.
+    - captcha: True when last_event starts with 'captcha_cooldown:'.
+    """
+    ev = (row["last_event"] or "").strip()
+    reached = False
+    last_centre = ""
+    captcha = False
     prefixes_with_centre = (
         "checked:",
         "slot_found:",
@@ -795,5 +806,6 @@ def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
     conn.commit()
     conn.close()
     return {"ok": True}
+
 
 
