@@ -6,7 +6,7 @@ import random
 import sqlite3
 import asyncio
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
 
 import httpx
@@ -95,16 +95,20 @@ def ensure_browser():
 ensure_browser()
 
 # ==============================
-# Utils
+# Utils (UTC-aware)
 # ==============================
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 def now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    # ISO 8601 Zulu
+    return utcnow().replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 def parse_date(d: Optional[str]) -> Optional[datetime]:
     if not d:
         return None
     try:
-        return datetime.strptime(d, "%Y-%m-%d")
+        return datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except Exception:
         return None
 
@@ -144,7 +148,7 @@ def _parse_quiet_hours(spec: str) -> List[Tuple[int,int]]:
 def is_quiet_now() -> bool:
     if not QUIET_HOURS:
         return False
-    now_h = datetime.utcnow().hour
+    now_h = utcnow().hour
     for start, end in _parse_quiet_hours(QUIET_HOURS):
         if start == end:
             # 24h quiet if start==end (intentionally “always quiet” window)
@@ -178,7 +182,7 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
         return None
     try:
-        # accept "2025-09-27T19:55:43Z" or with offset
+        # accept "....Z" or with offset
         ts2 = ts.replace("Z", "+00:00")
         return datetime.fromisoformat(ts2)
     except Exception:
@@ -188,7 +192,10 @@ def _is_stale(created_ts: Optional[str], minutes: int = STALE_MINUTES) -> bool:
     dt = _parse_iso(created_ts)
     if not dt:
         return False
-    return (datetime.utcnow() - dt) > timedelta(minutes=minutes)
+    # normalise to aware UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (utcnow() - dt) > timedelta(minutes=minutes)
 
 def _human(e: Exception) -> str:
     s = str(e).strip().split("\n")[0]
@@ -378,7 +385,7 @@ bucket_dvsa = TokenBucket(DVSA_RPS, DVSA_RPS)
 def centre_fail(centre: str):
     conn = get_conn()
     cur = conn.cursor()
-    new_until = (datetime.utcnow() + timedelta(seconds=CB_COOLDOWN_SEC)).isoformat() + "Z"
+    new_until = (utcnow() + timedelta(seconds=CB_COOLDOWN_SEC)).isoformat().replace("+00:00", "Z")
     cur.execute(
         """
         INSERT INTO centre_health(centre, fail_count, cooldown_until)
@@ -409,15 +416,15 @@ def centre_allowed(centre: str) -> bool:
     if not row or not row["cooldown_until"]:
         return True
     try:
-        until = datetime.fromisoformat(row["cooldown_until"].replace("Z",""))
-        return datetime.utcnow() >= until
+        until = datetime.fromisoformat(row["cooldown_until"].replace("Z", "+00:00"))
+        return utcnow() >= until
     except Exception:
         return True
 
 def global_cooldown(extra_min: int):
     conn = get_conn()
     cur = conn.cursor()
-    until = (datetime.utcnow() + timedelta(minutes=max(1, extra_min))).isoformat() + "Z"
+    until = (utcnow() + timedelta(minutes=max(1, extra_min))).isoformat().replace("+00:00", "Z")
     cur.execute("""
         INSERT INTO centre_health(centre, fail_count, cooldown_until)
         VALUES ('*global*', 0, ?)
@@ -433,7 +440,7 @@ def global_allowed() -> bool:
     if not row or not row["cooldown_until"]:
         return True
     try:
-        return datetime.utcnow() >= datetime.fromisoformat(row["cooldown_until"].replace("Z",""))
+        return utcnow() >= datetime.fromisoformat(row["cooldown_until"].replace("Z", "+00:00"))
     except Exception:
         return True
 
@@ -503,7 +510,7 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
                 "not found",
                 "selector",
                 "locator",
-                "No node found for selector".lower(),
+                "no node found for selector",
                 "failed to find",
             ])
             if layout_like:
@@ -546,13 +553,13 @@ async def dvsa_book_and_pay(client_unused, row, slot: str) -> bool:
 async def assist_window_monitor(sid: int, slot_txt: str):
     if not ASSIST_NOTIFY_ENABLED:
         return
-    end_at = datetime.utcnow() + timedelta(minutes=ASSIST_NOTIFY_WINDOW_MIN)
-    while datetime.utcnow() < end_at:
+    end_at = utcnow() + timedelta(minutes=ASSIST_NOTIFY_WINDOW_MIN)
+    while utcnow() < end_at:
         status, _ = get_status_tuple_from_cache(sid)
         if status in ("booked", "failed"):
             return
-        mins_left = int((end_at - datetime.utcnow()).total_seconds() // 60)
-        secs_left = int((end_at - datetime.utcnow()).total_seconds() % 60)
+        mins_left = int((end_at - utcnow()).total_seconds() // 60)
+        secs_left = int((end_at - utcnow()).total_seconds() % 60)
         wa_owner(
             f"⏳ FASTDTF: Slot still available? Search #{sid}\n"
             f"{slot_txt}\n"
