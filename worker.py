@@ -159,8 +159,11 @@ def is_quiet_now() -> bool:
     return False
 
 def normalize_centres(centres: List[str]) -> List[str]:
-    seen = set()
-    cleaned = []
+    """
+    Preserve duplicates: if a centre appears twice, we will run two checkers.
+    Still trims whitespace and drops empty items.
+    """
+    cleaned: List[str] = []
     for c in centres:
         c0 = (c or "").strip()
         if not c0:
@@ -168,9 +171,7 @@ def normalize_centres(centres: List[str]) -> List[str]:
         parts = c0.split()
         if len(parts) >= 2 and parts[0].lower() in {"london", "city", "borough"}:
             c0 = " ".join(parts[1:])
-        if c0 not in seen:
-            seen.add(c0)
-            cleaned.append(c0)
+        cleaned.append(c0)
     return cleaned
 
 # ===== Helpers: stale check + humanize errors =====
@@ -569,89 +570,102 @@ async def assist_window_monitor(sid: int, slot_txt: str):
     if status not in ("booked", "failed"):
         wa_owner(f"⌛ FASTDTF: Assist window ended for search #{sid}. If not booked, the slot may be gone.")
 
+# ---------------- Per-licence mutual exclusion ----------------
+LICENCE_LOCKS: dict[str, asyncio.Lock] = {}
+def _lic_lock(key: str) -> asyncio.Lock:
+    lock = LICENCE_LOCKS.get(key)
+    if lock is None:
+        lock = LICENCE_LOCKS[key] = asyncio.Lock()
+    return lock
+
 # ==============================
 # Core Job Processing
 # ==============================
 async def process_job(client: httpx.AsyncClient, row: dict):
     sid = row["id"]
 
-    # ---- FIXED: only apply stale guard to jobs already in 'searching' ----
-    status_now = (row.get("status") or "").strip()
-    if status_now == "searching":
-        updated_ts = row.get("updated_at") or row.get("created_at")
-        if _is_stale(updated_ts, minutes=STALE_MINUTES):
-            await set_status_api(client, row, "queued", f"stale_skipped:>{STALE_MINUTES}m")
+    # Use licence as the mutex key (fallback to job id string)
+    session_key_for_lock = (row.get("licence_number") or f"job{sid}").replace(" ", "")[:20]
+    async with _lic_lock(session_key_for_lock):
+
+        # ---- FIXED: only apply stale guard to jobs already in 'searching' ----
+        status_now = (row.get("status") or "").strip()
+        if status_now == "searching":
+            updated_ts = row.get("updated_at") or row.get("created_at")
+            if _is_stale(updated_ts, minutes=STALE_MINUTES):
+                await set_status_api(client, row, "queued", f"stale_skipped:>{STALE_MINUTES}m")
+                return
+
+        # ---- enforce required credentials before spending DVSA checks ----
+        missing_reason = _missing_required_fields(row)
+        if missing_reason:
+            await set_status_api(client, row, "queued", missing_reason)
             return
 
-    # ---- enforce required credentials before spending DVSA checks ----
-    missing_reason = _missing_required_fields(row)
-    if missing_reason:
-        await set_status_api(client, row, "queued", missing_reason)
-        return
+        centres: List[str] = safe_json_loads(row.get("centres_json"), [])
+        centres = normalize_centres(centres)
+        if not centres:
+            centres = ["(no centre provided)"]
 
-    centres: List[str] = safe_json_loads(row.get("centres_json"), [])
-    centres = normalize_centres(centres)
-    if not centres:
-        centres = ["(no centre provided)"]
+        # Rotate to avoid biasing the first centre on every pass
+        rnd = random.Random(sid)
+        rnd.shuffle(centres)
 
-    # Rotate to avoid biasing the first centre on every pass
-    rnd = random.Random(sid)
-    rnd.shuffle(centres)
+        # One checker per centre (including duplicates)
+        sem = asyncio.Semaphore(max(1, len(centres)))
+        found_slot: Optional[str] = None
+        captcha_hit = False
+        last_checked: Optional[str] = None
 
-    sem = asyncio.Semaphore(JOB_MAX_PARALLEL_CHECKS)
-    found_slot: Optional[str] = None
-    captcha_hit = False
-    last_checked: Optional[str] = None
+        async def check_one(c: str):
+            nonlocal found_slot, captcha_hit, last_checked
+            async with sem:
+                if found_slot is not None or captcha_hit:
+                    return
+                last_checked = c
+                try:
+                    await post_event_api(client, row["id"], f"trying:{c}")
+                except Exception:
+                    pass
 
-    async def check_one(c: str):
-        nonlocal found_slot, captcha_hit, last_checked
-        async with sem:
-            if found_slot is not None or captcha_hit:
-                return
-            last_checked = c
-            try:
-                await post_event_api(client, row["id"], f"trying:{c}")
-            except Exception:
-                pass
+                try:
+                    slots = await dvsa_check_centre(client, c, row)
+                except CaptchaDetected:
+                    captcha_hit = True
+                    return
+                if slots and found_slot is None:
+                    found_slot = slots[0]
 
-            try:
-                slots = await dvsa_check_centre(client, c, row)
-            except CaptchaDetected:
-                captcha_hit = True
-                return
-            if slots and found_slot is None:
-                found_slot = slots[0]
+        await asyncio.gather(*(asyncio.create_task(check_one(c)) for c in centres))
 
-    await asyncio.gather(*(asyncio.create_task(check_one(c)) for c in centres))
+        if captcha_hit:
+            await set_status_api(client, row, "queued", f"captcha_cooldown:{last_checked or ''}")
+            return
 
-    if captcha_hit:
-        await set_status_api(client, row, "queued", f"captcha_cooldown:{last_checked or ''}")
-        return
+        if not found_slot:
+            await set_status_api(client, row, "queued", f"no_slots_this_round:{last_checked or ''}")
+            return
 
-    if not found_slot:
-        await set_status_api(client, row, "queued", f"no_slots_this_round:{last_checked or ''}")
-        return
+        sig = f"{found_slot}"
+        prev = get_last_slot_sig(sid)
+        if prev == sig:
+            await set_status_api(client, row, "queued", f"slot_unchanged:{last_checked or ''}")
+            return
+        save_last_slot_sig(sid, sig)
 
-    sig = f"{found_slot}"
-    prev = get_last_slot_sig(sid)
-    if prev == sig:
-        await set_status_api(client, row, "queued", f"slot_unchanged:{last_checked or ''}")
-        return
-    save_last_slot_sig(sid, sig)
-
-    options = safe_json_loads(row.get("options_json"), {})
-    if AUTOBOOK_ENABLED and options.get("auto_book", False):
-        if (row.get("booking_type") or "") == "swap":
-            ok = await dvsa_swap_to_slot(client, row, found_slot)
+        options = safe_json_loads(row.get("options_json"), {})
+        if AUTOBOOK_ENABLED and options.get("auto_book", False):
+            if (row.get("booking_type") or "") == "swap":
+                ok = await dvsa_swap_to_slot(client, row, found_slot)
+            else:
+                ok = await dvsa_book_and_pay(client, row, found_slot)
+            if ok:
+                await set_status_api(client, row, "booked", f"booked:{found_slot}")
+            else:
+                await set_status_api(client, row, "failed", f"booking_failed:{found_slot}")
         else:
-            ok = await dvsa_book_and_pay(client, row, found_slot)
-        if ok:
-            await set_status_api(client, row, "booked", f"booked:{found_slot}")
-        else:
-            await set_status_api(client, row, "failed", f"booking_failed:{found_slot}")
-    else:
-        await set_status_api(client, row, "found", f"slot_found:{found_slot}")
-        asyncio.create_task(assist_window_monitor(sid, found_slot))
+            await set_status_api(client, row, "found", f"slot_found:{found_slot}")
+            asyncio.create_task(assist_window_monitor(sid, found_slot))
 
 # ==============================
 # Main loop
