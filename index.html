@@ -978,15 +978,7 @@
         return false;
       }
 
-      function ensureStopButton() {
-        if (document.getElementById('stopSearchBtn')) return;
-        const btn = document.createElement('button');
-        btn.id = 'stopSearchBtn'; btn.type = 'button'; btn.textContent = 'Stop searching';
-        btn.title = 'Disable this search so the bot stops scanning/swapping';
-        btn.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:9999;padding:10px 14px;border-radius:8px;border:0;background:#fee2e2;color:#991b1b;font-weight:700;box-shadow:0 6px 18px rgba(0,0,0,.15);cursor:pointer';
-        btn.addEventListener('click', disableCurrentSearch);
-        document.body.appendChild(btn);
-      }
+      function ensureStopButton(){return;}
 
       function currentSearchId() { return localStorage.getItem('dvsa_last_search_id') || ''; }
 
@@ -1271,6 +1263,7 @@
   </script>
 </body>
 </html>
+
 
 
 
