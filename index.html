@@ -71,8 +71,13 @@
   .field-col{ display:flex; flex-direction:column; gap:6px } .field-col input{ width:100% }
   .inline{ display:flex; flex-direction:column; gap:8px; width:100% }
   .time-inline{ display:flex; align-items:center; gap:10px; flex-wrap:nowrap }
-  .time-input{ width:12ch; max-width:100% }
+  .time-input{ width:6ch; max-width:100% }  /* CHANGED from 12ch to 6ch to match AM/PM & Notice Period */
   .time-inline > span, .days-inline > span{ display:inline-flex; align-items:center; height:34px; line-height:34px }
+
+  /* NEW: Notice Period input + "Day(s)" inline */
+  .notice-inline{ display:flex; align-items:center; gap:8px; }
+  .notice-inline span{ line-height:34px; }
+
   .subtotal{ font-weight:bold; margin-top:10px; font-size:16px; text-align:right; color:var(--primary-dark) }
   .indicator{ margin-top:12px; text-align:center; font-weight:bold; display:none }
   .indicator.success{ color:#16a34a } .indicator.fail{ color:#dc2626 }
@@ -112,6 +117,7 @@
     <div class="strip title">Risk-Free, Stress-Free Booking</div>
     <div class="strip subtitle">Money-Back Guarantee</div>
     <div class="strip important">❗ Important: Please read everything carefully and provide complete and accurate information.</div>
+
 
     <!-- ===================== Test Booking Type ===================== -->
     <section id="test-booking-type" class="panel">
@@ -1250,6 +1256,7 @@
   </script>
 </body>
 </html>
+
 
 
 
