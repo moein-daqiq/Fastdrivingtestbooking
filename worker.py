@@ -6,6 +6,8 @@ import random
 import sqlite3
 import asyncio
 import subprocess
+import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
 
@@ -291,12 +293,9 @@ async def _api_post(client: httpx.AsyncClient, path: str, payload: dict):
             return r.json()
         except Exception as e:
             last_err = e
-            # Log the first and last attempt for visibility
             if i in (0, attempts - 1):
                 print(f"[api] POST {path} attempt {i+1}/{attempts} failed: {_human(e)}")
-            # 5xx often transient (Render/Cloudflare); small backoff
             await asyncio.sleep(min(2.5, 0.25 * (2 ** i)) + random.random() * 0.2)
-    # if we get here, give up
     raise last_err
 
 async def claim_candidates_api(client: httpx.AsyncClient, limit: int) -> List[dict]:
@@ -449,6 +448,30 @@ def global_allowed() -> bool:
         return True
 
 # ==============================
+# Session identity helpers
+# ==============================
+def session_base(row: dict) -> str:
+    """
+    For NEW bookings use licence; for SWAP use booking reference.
+    Falls back to job id if absent.
+    """
+    if (row.get("booking_type") or "").strip() == "swap":
+        return (row.get("booking_reference") or f"job{row['id']}").strip()
+    return (row.get("licence_number") or f"job{row['id']}").strip()
+
+def make_session_key(row: dict, centre: Optional[str] = None) -> str:
+    """
+    Deterministic, filesystem-safe key. Base depends on booking type.
+    We include centre (when provided) so parallel centre checks can use
+    separate browser profiles while still being tied to the same identity.
+    """
+    base = session_base(row)
+    trunk = re.sub(r"[^A-Za-z0-9]+", "", base)[:12] or "anon"
+    digest_src = f"{base}|{row.get('id')}|{centre or ''}"
+    h = hashlib.sha1(digest_src.encode("utf-8")).hexdigest()[:8]
+    return f"{trunk}-{h}"
+
+# ==============================
 # DVSA integration
 # ==============================
 async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -> List[str]:
@@ -458,7 +481,7 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
       - trying:{centre}
       - login_start:{centre} / login_ok:{centre}
       - checked:{centre}
-      - layout_issue:{centre}        (if selectors/layout likely changed)
+      - layout_issue:{centre}
       - captcha_cooldown:{centre}
     """
     if not global_allowed():
@@ -471,7 +494,7 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
     await bucket_dvsa.acquire()
     await asyncio.sleep(random.randint(0, JITTER_MS) / 1000.0)
 
-    session_key = (row.get("licence_number") or f"job{row['id']}").replace(" ", "")[:20]
+    session_key = make_session_key(row, centre)
 
     attempts = 3
     for attempt in range(1, attempts + 1):
@@ -524,7 +547,7 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
     return []
 
 async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
-    session_key = (row.get("licence_number") or f"job{row['id']}").replace(" ", "")[:20]
+    session_key = make_session_key(row)
     try:
         async with DVSAClient(headless=True, session_key=session_key) as dvsa:
             await dvsa.login_swap(
@@ -570,7 +593,7 @@ async def assist_window_monitor(sid: int, slot_txt: str):
     if status not in ("booked", "failed"):
         wa_owner(f"⌛ FASTDTF: Assist window ended for search #{sid}. If not booked, the slot may be gone.")
 
-# ---------------- Per-licence mutual exclusion ----------------
+# ---------------- Per-identity mutual exclusion ----------------
 LICENCE_LOCKS: dict[str, asyncio.Lock] = {}
 def _lic_lock(key: str) -> asyncio.Lock:
     lock = LICENCE_LOCKS.get(key)
@@ -584,8 +607,10 @@ def _lic_lock(key: str) -> asyncio.Lock:
 async def process_job(client: httpx.AsyncClient, row: dict):
     sid = row["id"]
 
-    # Use licence as the mutex key (fallback to job id string)
-    session_key_for_lock = (row.get("licence_number") or f"job{sid}").replace(" ", "")[:20]
+    # Mutex key uses the same rule as session identity:
+    # - new  -> licence
+    # - swap -> booking reference
+    session_key_for_lock = session_base(row).replace(" ", "")[:20]
     async with _lic_lock(session_key_for_lock):
 
         # ---- FIXED: only apply stale guard to jobs already in 'searching' ----
