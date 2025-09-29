@@ -27,70 +27,85 @@
 
   <!-- ===================== Base Styles ===================== -->
   <style>
-    :root{ --line:#e5e7eb; --ink:#0f172a; --muted:#475569; --primary:#2563eb; --primary-dark:#1e40af; --danger:#dc2626; --tint-blue: rgba(37,99,235,.044); --tint-amber: rgba(245,158,11,.055); --tint-slate: rgba(15,23,42,.033); }
-    html, body { height: 100%; }
-    body{ margin:0; font-family:"Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif; background:#f7fafc; color:var(--ink); line-height:1.45; }
-    .wrap{ max-width:760px; margin:10px auto; background:#fff; border:1px solid var(--line); box-shadow:0 2px 16px rgba(15,23,42,.06) }
-    .strip{ padding:10px 12px; text-align:center; color:#fff; font-weight:700 }
-    .strip.title{ background:linear-gradient(180deg,#60a5fa 0%, #3b82f6 100%) }
-    .strip.subtitle{ background:#34d399 }
-    .strip.important{ background:#fbbf24; color:#111827 }
-    .strip + section{ margin-top:14px }
-    section.panel, section.blue-panel, section.yellow-panel{ border:1px solid var(--line); border-radius:10px; box-shadow:0 2px 10px rgba(15,23,42,.04); padding:16px 18px; margin:16px; background-clip:padding-box; }
-    .panel{ background:var(--tint-slate) } .blue-panel{ background:var(--tint-blue) } .yellow-panel{ background:var(--tint-amber) }
-    .row{ display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-top:10px }
-    label{ font-size:14px; font-weight:bold; color:var(--ink) }
-    .note-line{ display:flex; justify-content:space-between; width:100%; font-size:12px; color:var(--muted); margin-top:2px }
-    .section{ margin-bottom:14px } .section-title{ font-weight:700; margin-bottom:8px } .small-note{ color:#475569; font-size:12px; margin-top:4px }
-    label.req::after{ content:" *"; color:var(--danger); font-weight:bold; } .req-title::after{ content:" *"; color:var(--danger); font-weight:bold; margin-left:4px; }
-    #test-booking-type .heading{ display:grid; grid-template-columns:1fr; text-align:center }
-    #test-booking-type .heading .helper{ color:var(--muted); font-size:15.5px; font-weight:400; margin-top:6px }
-    #test-booking-type .row{ display:grid; grid-template-columns:1fr 1fr; column-gap:16px; row-gap:10px; align-items:start }
-    #btnBook{ grid-column:1; grid-row:1 }  #theoryPass{ grid-column:1; grid-row:2 }
-    #btnSwap{ grid-column:2; grid-row:1 }  #swapRef{ grid-column:2; grid-row:2 }
-    #test-booking-type .note-line{ display:grid; grid-template-columns:1fr 1fr; gap:16px }
-    input, select{ box-sizing:border-box; height:34px; padding:6px 8px; border:1px solid var(--line); border-radius:4px; background:#fff; color:var(--ink); font:14px/22px "Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif; transition:border-color .15s, box-shadow .15s; }
-    input:focus, select:focus{ outline:none; border-color:var(--primary); box-shadow:0 0 0 2px rgba(37,99,235,.15) }
-    .error{ border-color:var(--danger)!important; box-shadow:0 0 0 2px rgba(220,38,38,.15)!important }
-    [aria-invalid="true"]{ border-color:var(--danger)!important }
-    label.show-error{ color:#991b1b }
-    label.show-error::after{ content:attr(data-error) " "; display:block; font-weight:normal; color:#dc2626; font-size:12px; margin-top:4px; line-height:1.2; white-space:normal; max-width:32ch }
-    .phone-mask{ position:relative; flex:1 1 260px; min-width:260px } .phone-mask input{ width:100% }
-    .btn{ background:#93c5fd; border:1px solid #bfdbfe; color:#0b1a33; font-weight:700; padding:6px 12px; border-radius:4px; cursor:pointer; height:34px }
-    .btn:hover{ background:#60a5fa; color:#fff } .btn.selected{ background:var(--primary-dark); color:#fff; border-color:var(--primary-dark) }
-    .yesno button{ height:32px; background:#fff; color:#1e3a8a; border:1px solid var(--line); padding:4px 12px; border-radius:4px; font-weight:600; cursor:pointer }
-    .yesno button:hover{ border-color:var(--primary) } .yesno button.selected{ background:#2563eb; color:#fff; border-color:#2563eb }
-    .centres-intro{ color:#475569; line-height:1.45; margin:0 0 10px 0 }
-    .centres-grid{ display:grid; grid-template-columns:1fr 1fr; gap:16px; align-items:start }
-    .centre-field{ display:flex; flex-direction:column; gap:6px } .centre-field input{ width:100% }
-    .lock-full{ width:100%!important; max-width:100%!important }
-    .centre-input{ background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"><path fill="%2399a3b3" d="M7 10l5 5 5-5z"/></svg>'); background-repeat:no-repeat; background-position:right 10px center; padding-right:28px; cursor:text; }
-    .dt-heading{ margin:0 0 8px 0; font-weight:bold }
-    .dt-grid{ display:grid; grid-template-columns:1fr 1fr; gap:16px }
-    .field-col{ display:flex; flex-direction:column; gap:6px } .field-col input{ width:100% }
-    .inline{ display:flex; flex-direction:column; gap:8px; width:100% }
-    .time-inline{ display:flex; align-items:center; gap:10px; flex-wrap:nowrap }
-    .time-input{ width:12ch; max-width:100% }
-    .time-inline > span, .days-inline > span{ display:inline-flex; align-items:center; height:34px; line-height:34px }
-    .subtotal{ font-weight:bold; margin-top:10px; font-size:16px; text-align:right; color:var(--primary-dark) }
-    .indicator{ margin-top:12px; text-align:center; font-weight:bold; display:none }
-    .indicator.success{ color:#16a34a } .indicator.fail{ color:#dc2626 }
-    .submit-row{ display:flex; align-items:center; gap:12px; margin:16px 0 }
-    .status-pill{ padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700; background:#eef2ff; color:#1e40af }
-    .status-pill.paid{ background:#ecfdf5; color:#16a34a }
-    .submit-btn{ flex:1; background:#2563eb; color:#fff; padding:10px; border:none; font-size:15px; border-radius:4px; cursor:pointer; opacity:.6 }
-    .submit-btn.enabled{ opacity:1 }
-    .pp-row{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:8px }
-    #stripePayBtn{ width:100%; max-width:360px; background:#635bff }
-    #stripeConfirmBtn{ margin-top:12px; width:100%; max-width:360px }
-    #stripePanel{ display:none; margin-top:12px; padding:12px; border:1px dashed var(--line); border-radius:10px; background:#fff }
-    .fields-grid{ display:grid; grid-template-columns:220px 1fr; column-gap:16px; row-gap:10px; align-items:center }
-    .option-text{ flex:1 }
-    .promo-row{ display:flex; align-items:center; gap:12px; margin-top:8px; border-top:1px dashed var(--line); padding-top:10px }
-  </style>
+  :root{ --line:#e5e7eb; --ink:#0f172a; --muted:#475569; --primary:#2563eb; --primary-dark:#1e40af; --danger:#dc2626; --tint-blue: rgba(37,99,235,.044); --tint-amber: rgba(245,158,11,.055); --tint-slate: rgba(15,23,42,.033); }
+  html, body { height: 100%; }
+  body{ margin:0; font-family:"Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif; background:#f7fafc; color:var(--ink); line-height:1.45; }
+  .wrap{ max-width:760px; margin:10px auto; background:#fff; border:1px solid var(--line); box-shadow:0 2px 16px rgba(15,23,42,.06) }
+  .strip{ padding:10px 12px; text-align:center; color:#fff; font-weight:700 }
+  .strip.title{ background:linear-gradient(180deg,#60a5fa 0%, #3b82f6 100%) }
+  .strip.subtitle{ background:#34d399 }
+  .strip.important{ background:#fbbf24; color:#111827 }
+  .strip + section{ margin-top:14px }
+  section.panel, section.blue-panel, section.yellow-panel{ border:1px solid var(--line); border-radius:10px; box-shadow:0 2px 10px rgba(15,23,42,.04); padding:16px 18px; margin:16px; background-clip:padding-box; }
+  .panel{ background:var(--tint-slate) } .blue-panel{ background:var(--tint-blue) } .yellow-panel{ background:var(--tint-amber) }
+  .row{ display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-top:10px }
+  label{ font-size:14px; font-weight:bold; color:var(--ink) }
+  .note-line{ display:flex; justify-content:space-between; width:100%; font-size:12px; color:var(--muted); margin-top:2px }
+  .section{ margin-bottom:14px } .section-title{ font-weight:700; margin-bottom:8px } .small-note{ color:#475569; font-size:12px; margin-top:4px }
+  label.req::after{ content:" *"; color:var(--danger); font-weight:bold; } .req-title::after{ content:" *"; color:var(--danger); font-weight:bold; margin-left:4px; }
+  #test-booking-type .heading{ display:grid; grid-template-columns:1fr; text-align:center }
+  #test-booking-type .heading .helper{ color:var(--muted); font-size:15.5px; font-weight:400; margin-top:6px }
+  #test-booking-type .row{ display:grid; grid-template-columns:1fr 1fr; column-gap:16px; row-gap:10px; align-items:start }
+  #btnBook{ grid-column:1; grid-row:1 }  #theoryPass{ grid-column:1; grid-row:2 }
+  #btnSwap{ grid-column:2; grid-row:1 }  #swapRef{ grid-column:2; grid-row:2 }
+  #test-booking-type .note-line{ display:grid; grid-template-columns:1fr 1fr; gap:16px }
+  input, select{ box-sizing:border-box; height:34px; padding:6px 8px; border:1px solid var(--line); border-radius:4px; background:#fff; color:var(--ink); font:14px/22px "Segoe UI","Helvetica Neue",Arial,Helvetica,sans-serif; transition:border-color .15s, box-shadow .15s; }
+  input:focus, select:focus{ outline:none; border-color:var(--primary); box-shadow:0 0 0 2px rgba(37,99,235,.15) }
+  .error{ border-color:var(--danger)!important; box-shadow:0 0 0 2px rgba(220,38,38,.15)!important }
+  [aria-invalid="true"]{ border-color:var(--danger)!important }
+  label.show-error{ color:#991b1b }
+  label.show-error::after{ content:attr(data-error) " "; display:block; font-weight:normal; color:#dc2626; font-size:12px; margin-top:4px; line-height:1.2; white-space:normal; max-width:32ch }
+  /* FIX: allow phone field to shrink on mobile */
+  .phone-mask{ position:relative; flex:1 1 260px; min-width:0 } .phone-mask input{ width:100% }
+  .btn{ background:#93c5fd; border:1px solid #bfdbfe; color:#0b1a33; font-weight:700; padding:6px 12px; border-radius:4px; cursor:pointer; height:34px }
+  .btn:hover{ background:#60a5fa; color:#fff } .btn.selected{ background:var(--primary-dark); color:#fff; border-color:var(--primary-dark) }
+  .yesno button{ height:32px; background:#fff; color:#1e3a8a; border:1px solid var(--line); padding:4px 12px; border-radius:4px; font-weight:600; cursor:pointer }
+  .yesno button:hover{ border-color:var(--primary) } .yesno button.selected{ background:#2563eb; color:#fff; border-color:#2563eb }
+  .centres-intro{ color:#475569; line-height:1.45; margin:0 0 10px 0 }
+  .centres-grid{ display:grid; grid-template-columns:1fr 1fr; gap:16px; align-items:start }
+  .centre-field{ display:flex; flex-direction:column; gap:6px } .centre-field input{ width:100% }
+  .lock-full{ width:100%!important; max-width:100%!important }
+  .centre-input{ background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"><path fill="%2399a3b3" d="M7 10l5 5 5-5z"/></svg>'); background-repeat:no-repeat; background-position:right 10px center; padding-right:28px; cursor:text; }
+  .dt-heading{ margin:0 0 8px 0; font-weight:bold }
+  .dt-grid{ display:grid; grid-template-columns:1fr 1fr; gap:16px }
+  .field-col{ display:flex; flex-direction:column; gap:6px } .field-col input{ width:100% }
+  .inline{ display:flex; flex-direction:column; gap:8px; width:100% }
+  .time-inline{ display:flex; align-items:center; gap:10px; flex-wrap:nowrap }
+  .time-input{ width:12ch; max-width:100% }
+  .time-inline > span, .days-inline > span{ display:inline-flex; align-items:center; height:34px; line-height:34px }
+  .subtotal{ font-weight:bold; margin-top:10px; font-size:16px; text-align:right; color:var(--primary-dark) }
+  .indicator{ margin-top:12px; text-align:center; font-weight:bold; display:none }
+  .indicator.success{ color:#16a34a } .indicator.fail{ color:#dc2626 }
+  .submit-row{ display:flex; align-items:center; gap:12px; margin:16px 0 }
+  .status-pill{ padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700; background:#eef2ff; color:#1e40af }
+  .status-pill.paid{ background:#ecfdf5; color:#16a34a }
+  .submit-btn{ flex:1; background:#2563eb; color:#fff; padding:10px; border:none; font-size:15px; border-radius:4px; cursor:pointer; opacity:.6 }
+  .submit-btn.enabled{ opacity:1 }
+  .pp-row{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:8px }
+  #stripePayBtn{ width:100%; max-width:360px; background:#635bff }
+  #stripeConfirmBtn{ margin-top:12px; width:100%; max-width:360px }
+  #stripePanel{ display:none; margin-top:12px; padding:12px; border:1px dashed var(--line); border-radius:10px; background:#fff }
 
-  <!-- Stripe.js -->
-  <script src="https://js.stripe.com/v3/"></script>
+  /* FIX: mobile-first grid so fields don’t overflow the panel */
+  .fields-grid{
+    display:grid;
+    grid-template-columns: 1fr;       /* mobile: stack */
+    column-gap:16px;
+    row-gap:10px;
+    align-items:center;
+  }
+  @media (min-width:640px){
+    .fields-grid{
+      grid-template-columns:220px 1fr; /* desktop: label | input */
+    }
+  }
+
+  .option-text{ flex:1 }
+  .promo-row{ display:flex; align-items:center; gap:12px; margin-top:8px; border-top:1px dashed var(--line); padding-top:10px }
+</style>
+
+<!-- Stripe.js -->
+<script src="https://js.stripe.com/v3/"></script>
 </head>
 <body>
   <div class="wrap">
@@ -119,26 +134,36 @@
     <!-- ===================== Applicant Details ===================== -->
     <section id="applicant-details" class="panel">
       <div class="row heading"><label class="small">Applicant Details:</label></div>
+
       <div class="fields-grid">
         <label class="req" for="surname">Surname(s):</label>
         <input type="text" id="surname" placeholder="Exactly as shown on your driving licence (field 1)"/>
+
         <label class="req" for="firstname">First and Middle Name(s):</label>
         <input type="text" id="firstname" placeholder="Exactly as shown on your driving licence (field 2)"/>
+
         <label class="req" for="drivingLicence">Driving Licence No:</label>
         <input type="text" id="drivingLicence" placeholder="FIRST 16 CHARACTERS ONLY (EXCLUDE THE LAST 2)" maxlength="16"/>
+
         <label class="req" for="address">Address:</label>
         <input type="text" id="address" placeholder="House number and street name"/>
+
         <label for="town">Town/City:</label>
         <input type="text" id="town" placeholder="Town/City"/>
+
         <label class="req" for="postcode">Postcode:</label>
         <input type="text" id="postcode" placeholder="UK postcode (e.g., SW1A 1AA)" inputmode="text" autocomplete="postal-code"/>
+
         <label class="req" for="email">Email Address:</label>
         <input type="email" id="email" placeholder="If the email is incorrect, you will not receive a confirmation" autocomplete="email"/>
+
         <label class="req" for="phoneRaw">UK WhatsApp Phone No:</label>
         <div class="phone-mask"><input type="tel" id="phoneRaw" autocomplete="off" placeholder="+44"/></div>
-        <div class="small-note" style="grid-column:2/3">If you do not have a WhatsApp number, the system will not send a confirmation.</div>
+
+        <div class="small-note">If you do not have a WhatsApp number, the system will not send a confirmation.</div>
       </div>
     </section>
+
 
     <!-- ===================== Test Centres ===================== -->
     <section class="blue-panel">
@@ -1227,3 +1252,4 @@
   </script>
 </body>
 </html>
+
