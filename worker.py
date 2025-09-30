@@ -532,28 +532,42 @@ async def process_job(client: httpx.AsyncClient, row: dict):
             else:
                 low.append(c)
         random.Random(sid).shuffle(low)
-        centres = high + low
 
-        sem = asyncio.Semaphore(max(1, min(JOB_MAX_PARALLEL_CHECKS, len(centres))))
         found_slot: Optional[str] = None
         captcha_hit = False
         last_checked: Optional[str] = None
 
         async def check_one(c: str):
             nonlocal found_slot, captcha_hit, last_checked
-            async with sem:
-                if found_slot is not None or captcha_hit: return
-                last_checked = c
-                try: await post_event_api(client, row["id"], f"trying:{c}")
-                except Exception: pass
-                try:
-                    slots = await dvsa_check_centre(client, c, row)
-                except CaptchaDetected:
-                    captcha_hit = True; return
-                if slots and found_slot is None:
-                    found_slot = slots[0]
+            if found_slot is not None or captcha_hit:
+                return
+            last_checked = c
+            try:
+                await post_event_api(client, row["id"], f"trying:{c}")
+            except Exception:
+                pass
+            try:
+                slots = await dvsa_check_centre(client, c, row)
+            except CaptchaDetected:
+                captcha_hit = True
+                return
+            if slots and found_slot is None:
+                found_slot = slots[0]
 
-        await asyncio.gather(*(asyncio.create_task(check_one(c)) for c in centres))
+        async def run_pass(items: List[str]):
+            if not items or found_slot is not None or captcha_hit:
+                return
+            sem = asyncio.Semaphore(max(1, min(JOB_MAX_PARALLEL_CHECKS, len(items))))
+            async def worker(c):
+                async with sem:
+                    await check_one(c)
+            await asyncio.gather(*(worker(c) for c in items))
+
+        # 1) STRICT priority pass (e.g., Elgin first)
+        await run_pass(high)
+        # 2) Only if nothing found and no captcha, check the rest
+        if not found_slot and not captcha_hit:
+            await run_pass(low)
 
         if captcha_hit:
             await set_status_api(client, row, "queued", f"captcha_cooldown:{last_checked or ''}")
