@@ -54,7 +54,10 @@ STALE_MINUTES = int(os.environ.get("STALE_MINUTES", "5"))
 PRIORITY_CENTRES = [
     c.strip().lower() for c in os.environ.get("PRIORITY_CENTRES", "").split(",") if c.strip()
 ]
-CURRENT_PRIORITY_CENTRES = PRIORITY_CENTRES[:]  # can be updated from API controls
+CURRENT_PRIORITY_CENTRES = PRIORITY_CENTRES[:]  # live-updated from API controls
+
+# Global controls (kill-switch + live priority)
+CTRL: Dict[str, object] = {"pause_all": False, "priority_centres": CURRENT_PRIORITY_CENTRES[:]}
 
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/ms-playwright")
 os.environ.setdefault("FASTDTF_LAUNCH_ARGS", "--no-sandbox --disable-dev-shm-usage")
@@ -404,6 +407,15 @@ def make_session_key(row: dict, centre: Optional[str] = None) -> str:
 # DVSA integration
 # ==============================
 async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -> List[str]:
+    # NEW: obey global pause before doing anything
+    if CTRL.get("pause_all"):
+        try:
+            await post_event_api(client_httpx, row["id"], "paused:global")
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)
+        return []
+
     if not global_allowed():
         await post_event_api(client_httpx, row["id"], f"cooldown_skip:*global*")
         await asyncio.sleep(0.05); return []
@@ -413,6 +425,14 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
 
     await bucket_dvsa.acquire()
     await asyncio.sleep(random.randint(0, JITTER_MS) / 1000.0)
+
+    # Double-check pause just before network activity
+    if CTRL.get("pause_all"):
+        try:
+            await post_event_api(client_httpx, row["id"], "paused:global")
+        except Exception:
+            pass
+        return []
 
     session_key = make_session_key(row, centre)
     attempts = 5  # a bit more persistent
@@ -515,6 +535,15 @@ def _lic_lock(key: str) -> asyncio.Lock:
 # Core Job Processing
 # ==============================
 async def process_job(client: httpx.AsyncClient, row: dict):
+    # NEW: bail out early if globally paused (handles pre-claimed jobs)
+    if CTRL.get("pause_all"):
+        try:
+            await post_event_api(client, row["id"], "paused:global")
+            await set_status_api(client, row, "queued", "paused:global")
+        except Exception:
+            pass
+        return
+
     sid = row["id"]
 
     # Mutex: new->licence, swap->booking reference
@@ -555,6 +584,8 @@ async def process_job(client: httpx.AsyncClient, row: dict):
 
         async def check_one(c: str):
             nonlocal found_slot, captcha_hit, last_checked
+            if CTRL.get("pause_all"):  # hard stop mid-pass if paused while running
+                return
             if found_slot is not None or captcha_hit:
                 return
             last_checked = c
@@ -582,8 +613,12 @@ async def process_job(client: httpx.AsyncClient, row: dict):
         # 1) STRICT priority pass (e.g., Elgin first)
         await run_pass(high)
         # 2) Only if nothing found and no captcha, check the rest
-        if not found_slot and not captcha_hit:
+        if not found_slot and not captcha_hit and not CTRL.get("pause_all"):
             await run_pass(low)
+
+        if CTRL.get("pause_all"):
+            await set_status_api(client, row, "queued", "paused:global")
+            return
 
         if captcha_hit:
             await set_status_api(client, row, "queued", f"captcha_cooldown:{last_checked or ''}")
@@ -630,15 +665,19 @@ async def run():
                 # Pull latest controls each loop (cheap GET)
                 controls = await get_controls_api(client)
                 if controls:
-                    if controls.get("pause_all"):
-                        # soft idle while paused
-                        await asyncio.sleep(POLL_SEC); 
-                        continue
-                    # live-update priority centres from API, falling back to env if empty
-                    new_prio = [str(x).strip().lower() for x in controls.get("priority_centres", []) if str(x).strip()]
-                    if new_prio:
-                        global CURRENT_PRIORITY_CENTRES
-                        CURRENT_PRIORITY_CENTRES = new_prio
+                    # update globals atomically
+                    global CTRL, CURRENT_PRIORITY_CENTRES
+                    CTRL = {"pause_all": bool(controls.get("pause_all", False)),
+                            "priority_centres": [str(x).strip().lower()
+                                                 for x in controls.get("priority_centres", [])
+                                                 if str(x).strip()]}
+                    if CTRL["priority_centres"]:
+                        CURRENT_PRIORITY_CENTRES = CTRL["priority_centres"][:]  # live update
+
+                if CTRL.get("pause_all"):
+                    # soft idle while paused
+                    await asyncio.sleep(POLL_SEC)
+                    continue
 
                 if is_quiet_now() or not global_allowed():
                     await asyncio.sleep(POLL_SEC); continue
