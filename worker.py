@@ -56,7 +56,7 @@ QUIET_HOURS = os.environ.get("QUIET_HOURS", "").strip()
 # Stale search expiry
 STALE_MINUTES = int(os.environ.get("STALE_MINUTES", "5"))
 
-# NEW: let you force-priority some centres (e.g., "Elgin")
+# Priority centres env (comma-separated)
 PRIORITY_CENTRES = [
     c.strip().lower() for c in os.environ.get("PRIORITY_CENTRES", "").split(",") if c.strip()
 ]
@@ -399,7 +399,7 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
     await asyncio.sleep(random.randint(0, JITTER_MS) / 1000.0)
 
     session_key = make_session_key(row, centre)
-    attempts = 5  # was 3: be a bit more persistent
+    attempts = 5  # a bit more persistent
 
     for attempt in range(1, attempts + 1):
         try:
@@ -420,7 +420,7 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
                 await post_event_api(client_httpx, row["id"], f"login_ok:{centre}")
 
                 slots = await dvsa.search_centre_slots(centre)
-                await post_event_api(client_httpx, row["id"], f"checked:{centre}")
+                await post_event_api(client_httpx, row["id"], f"checked:{centre} ({len(slots)} slots)")
                 return slots
 
         except CaptchaDetected:
@@ -522,14 +522,19 @@ async def process_job(client: httpx.AsyncClient, row: dict):
         centres: List[str] = normalize_centres(safe_json_loads(row.get("centres_json"), []))
         if not centres: centres = ["(no centre provided)"]
 
-        # Priority centres first (e.g., Elgin), then the rest (shuffled)
+        # Priority centres first (prefix match), then the rest (shuffled per job)
         high, low = [], []
+        prio = PRIORITY_CENTRES
         for c in centres:
-            (high if c.lower() in PRIORITY_CENTRES else low).append(c)
+            cname = c.lower()
+            if any(cname.startswith(p) for p in prio):
+                high.append(c)
+            else:
+                low.append(c)
         random.Random(sid).shuffle(low)
         centres = high + low
 
-        sem = asyncio.Semaphore(max(1, len(centres)))
+        sem = asyncio.Semaphore(max(1, min(JOB_MAX_PARALLEL_CHECKS, len(centres))))
         found_slot: Optional[str] = None
         captcha_hit = False
         last_checked: Optional[str] = None
