@@ -88,15 +88,15 @@ SEL = {
 
     # New booking login (CSS fallbacks)
     "new_licence":   "input[name='driving-licence-number'], input[name*='licence'], input[id*='licence'], input[name='driverLicenceNumber']",
-    "new_theory":    "input[name='theory-pass-number'], input[name*='candidate'], input[id*='theory'], input[name='theoryPassNumber']",
+    "new_theory":    "input[name='theory-pass-number'], input[name='theoryPassNumber'], input[name*='theory'], input[id*='theory']",
     "new_email":     "input[name='email'], input[id*='email'], input[name='candidateEmail']",
     "new_continue":  "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
 
     # Centre search & availability
     "centre_search_box":  "input[name*='test-centre'], input[id*='test-centre'], input[name*='centre'], input[name='testCentreSearch']",
     "centre_suggestions": "ul[role='listbox'] li, li[role='option'], ul li a",
-    "centre_dates":       "[data-test='available-dates'] li, ul.available-dates li, .dates li, .available-dates li",
-    "centre_times":       "[data-test='available-times'] li, ul.available-times li, .times li, .available-times li",
+    "centre_dates":       "[data-test='available-dates'] li, ul.available-dates li, .dates li, .available-dates li, a:has-text('view')",
+    "centre_times":       "[data-test='available-times'] li, ul.available-times li, .times li, .available-times li, .slot, a:has-text(':')",
 
     # Confirm
     "confirm_button": "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
@@ -249,6 +249,7 @@ class DVSAClient:
     # ------------- Low-level helpers -------------
     async def _goto(self, url: str, marker: Optional[str] = None):
         await self.page.goto(url, wait_until="domcontentloaded")
+        await self._accept_cookies()
         await self._captcha_guard()
         if marker:
             await self.page.get_by_text(marker, exact=False).first.wait_for()
@@ -270,25 +271,67 @@ class DVSAClient:
             except Exception:
                 continue
         # CSS fallback
-        try:
-            await self._click_css(_sel("new_continue"))
-            return True
-        except Exception:
+        for sel in (_sel("new_continue"), _sel("swap_continue")):
             try:
-                await self._click_css(_sel("swap_continue"))
-                return True
-            except Exception:
-                return False
-
-    async def _fill_by_label_variants(self, names: list[str], value: str) -> bool:
-        # Try label-based lookup first
-        for n in names:
-            try:
-                await self.page.get_by_label(n, exact=False).fill(value, timeout=5000)
+                await self._click_css(sel)
                 return True
             except Exception:
                 continue
+        # very last-chance: any primary govuk button
+        try:
+            await self.page.locator("button.govuk-button").first.click(timeout=3000)
+            return True
+        except Exception:
+            return False
+
+    async def _fill_by_label_variants(self, names: list[str], value: str) -> bool:
+        """
+        Try (1) label-based; (2) ARIA/placeholder; (3) nearest-input to text node.
+        This covers DVSA pages that use legends, fieldsets or custom markup.
+        """
+        # 1) Labels
+        for n in names:
+            try:
+                await self.page.get_by_label(n, exact=False).fill(value, timeout=3500)
+                return True
+            except Exception:
+                continue
+
+        # 2) Common placeholders/aria-labels
+        for ph in [n for n in names] + ["Driver number", "Licence", "Booking reference", "Reference"]:
+            try:
+                await self.page.get_by_placeholder(ph, exact=False).fill(value, timeout=2500)
+                return True
+            except Exception:
+                continue
+            try:
+                await self.page.locator(f"input[aria-label*='{ph}'], input[aria-labelledby*='{ph}']").first.fill(value, timeout=2500)
+                return True
+            except Exception:
+                continue
+
+        # 3) Nearest input after visible text node
+        for n in names:
+            try:
+                # Find text node then the first input that follows
+                lab = self.page.get_by_text(n, exact=False).first
+                await lab.wait_for(timeout=1500)
+                container = lab.locator("xpath=ancestor-or-self::*[self::label or self::div or self::fieldset][1]")
+                await container.locator("input").first.fill(value, timeout=2500)
+                return True
+            except Exception:
+                continue
+
         return False
+
+    async def _accept_cookies(self):
+        """Dismiss DVSA cookie banners if present (quietly)."""
+        for name in ["Accept all cookies", "Accept analytics cookies", "Accept cookies", "I agree"]:
+            try:
+                await self.page.get_by_role("button", name=name).click(timeout=1500)
+                break
+            except Exception:
+                pass
 
     async def _captcha_guard(self):
         html = (await self.page.content()).lower()
@@ -357,11 +400,11 @@ class DVSAClient:
 
     # ------------- Public API used by worker -------------
     async def login_swap(self, licence_number: str, booking_reference: str, email: Optional[str] = None):
-        # Navigate + guard
+        # Navigate + guards
         await self._goto(URL_CHANGE_TEST)
         await self._maybe_click_start_now()
 
-        # Fill licence via label-first, then CSS fallback
+        # Fill licence via robust helper (labels/nearby/placeholder) then CSS fallback
         ok_lic = await self._fill_by_label_variants(LABELS["licence"], licence_number)
         if not ok_lic:
             try:
@@ -386,22 +429,21 @@ class DVSAClient:
                 except Exception:
                     pass  # not fatal
 
-        # Continue button (role-first)
+        # Continue button
         if not await self._click_continue_role_fallback():
             raise DVSAError("layout_change: continue button not found")
 
-        # Page-level checks
         await self._expect_ok()
 
     async def login_new(self, licence_number: str, theory_pass: Optional[str] = None, email: Optional[str] = None):
-        # Navigate + guard
+        # Navigate + guards
         await self._goto(URL_BOOK_TEST)
         await self._maybe_click_start_now()
 
         # If the category picker is visible, choose Car.
         await self._select_car_category_if_present()
 
-        # Licence (label-first)
+        # Licence (robust)
         ok_lic = await self._fill_by_label_variants(LABELS["licence"], licence_number)
         if not ok_lic:
             try:
@@ -411,8 +453,9 @@ class DVSAClient:
 
         # Optional theory pass
         if theory_pass:
-            # Try label-ish first; then CSS
-            filled = await self._fill_by_label_variants(["Theory pass number", "Theory test pass number", "Theory pass certificate number"], theory_pass)
+            filled = await self._fill_by_label_variants(
+                ["Theory pass number", "Theory test pass number", "Theory pass certificate number"], theory_pass
+            )
             if not filled:
                 try:
                     await self._fill_css(_sel("new_theory"), theory_pass)
@@ -437,6 +480,14 @@ class DVSAClient:
         await self._expect_ok()
 
     async def _open_centre(self, centre_name: str) -> bool:
+        # Some flows require a link to the centre search first; try common link names.
+        for name in ["Test centre availability", "Change test centre", "Find a test centre", "Change location"]:
+            try:
+                await self.page.get_by_role("link", name=name).click(timeout=2000)
+                break
+            except Exception:
+                pass
+
         await self.page.wait_for_selector(_sel("centre_search_box"))
         await self.page.fill(_sel("centre_search_box"), centre_name)
 
@@ -459,6 +510,9 @@ class DVSAClient:
                 await self.page.keyboard.press("Enter")
         except PWTimeout:
             await self.page.keyboard.press("Enter")
+
+        # If there is an explicit Search/Continue button, click it
+        await self._click_continue_role_fallback()
 
         await self._expect_ok()
         return True
@@ -502,6 +556,19 @@ class DVSAClient:
                     for t in time_nodes:
                         ttxt = (await t.text_content() or "").strip()
                         if ttxt:
+                            # normalise "view" rows (obs-web style): clicking view loads a page with times
+                            if ttxt.lower() == "view":
+                                try:
+                                    await t.click()
+                                    await asyncio.sleep(0.25)
+                                    time_nodes2 = await self.page.query_selector_all(_sel("centre_times"))
+                                    for tt in time_nodes2:
+                                        vtxt = (await tt.text_content() or "").strip()
+                                        if vtxt:
+                                            slots.append(f"{centre_name} · {dtxt} · {vtxt}")
+                                    continue
+                                except Exception:
+                                    pass
                             slots.append(f"{centre_name} · {dtxt} · {ttxt}")
             else:
                 # Times only
