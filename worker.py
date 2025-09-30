@@ -1,4 +1,4 @@
-# --- worker.py (priority centres + better logging + more attempts) ---
+# --- worker.py (priority centres + kill-switch + better logging + more attempts) ---
 
 import os, json, math, time, random, sqlite3, asyncio, subprocess, hashlib, re
 from datetime import datetime, timedelta, timezone
@@ -44,12 +44,6 @@ DVSA_RPS = float(os.environ.get("DVSA_RPS", "4.0"))
 CB_FAILS_THRESHOLD = int(os.environ.get("CB_FAILS_THRESHOLD", "12"))
 CB_COOLDOWN_SEC = int(os.environ.get("CB_COOLDOWN_SEC", "120"))
 
-W_DATE_URGENCY = float(os.environ.get("W_DATE_URGENCY", "5.0"))
-W_DATE_WINDOW_WIDTH = float(os.environ.get("W_DATE_WINDOW_WIDTH", "3.0"))
-W_TIME_WINDOW_WIDTH = float(os.environ.get("W_TIME_WINDOW_WIDTH", "2.0"))
-W_AGE_BOOST = float(os.environ.get("W_AGE_BOOST", "1.5"))
-W_SWAP_BONUS = float(os.environ.get("W_SWAP_BONUS", "0.5"))
-
 CAPTCHA_COOLDOWN_MIN = int(os.environ.get("CAPTCHA_COOLDOWN_MIN", "30"))
 QUIET_HOURS = os.environ.get("QUIET_HOURS", "").strip()
 
@@ -60,6 +54,7 @@ STALE_MINUTES = int(os.environ.get("STALE_MINUTES", "5"))
 PRIORITY_CENTRES = [
     c.strip().lower() for c in os.environ.get("PRIORITY_CENTRES", "").split(",") if c.strip()
 ]
+CURRENT_PRIORITY_CENTRES = PRIORITY_CENTRES[:]  # can be updated from API controls
 
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/ms-playwright")
 os.environ.setdefault("FASTDTF_LAUNCH_ARGS", "--no-sandbox --disable-dev-shm-usage")
@@ -235,6 +230,21 @@ async def _api_post(client: httpx.AsyncClient, path: str, payload: dict):
             await asyncio.sleep(min(2.5, 0.25 * (2 ** i)) + random.random() * 0.2)
     raise last_err
 
+async def _api_get(client: httpx.AsyncClient, path: str):
+    if not API_BASE: raise RuntimeError("API_BASE not set")
+    url = f"{API_BASE}{path}"
+    headers = {"Authorization": f"Bearer {WORKER_TOKEN}"} if WORKER_TOKEN else {}
+    attempts, last_err = 3, None
+    for i in range(attempts):
+        try:
+            r = await client.get(url, headers=headers)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            await asyncio.sleep(0.3 * (i + 1))
+    raise last_err
+
 async def claim_candidates_api(client: httpx.AsyncClient, limit: int) -> List[dict]:
     data = await _api_post(client, "/api/worker/claim", {"limit": limit})
     return data.get("items", [])
@@ -244,6 +254,12 @@ async def post_event_api(client: httpx.AsyncClient, sid: int, event: str):
         await _api_post(client, f"/api/worker/searches/{sid}/event", {"event": event})
     except Exception as e:
         print(f"[worker:event] {sid}: {_human(e)}")
+
+async def get_controls_api(client: httpx.AsyncClient) -> dict:
+    try:
+        return await _api_get(client, "/api/worker/controls")
+    except Exception:
+        return {}
 
 _status_cache: dict[int, Tuple[Optional[str], Optional[str]]] = {}
 async def set_status_api(client: httpx.AsyncClient, job: dict, status: str, event: str):
@@ -524,7 +540,7 @@ async def process_job(client: httpx.AsyncClient, row: dict):
 
         # Priority centres first (prefix match), then the rest (shuffled per job)
         high, low = [], []
-        prio = PRIORITY_CENTRES
+        prio = CURRENT_PRIORITY_CENTRES
         for c in centres:
             cname = c.lower()
             if any(cname.startswith(p) for p in prio):
@@ -608,11 +624,25 @@ async def run():
     async with httpx.AsyncClient(http2=False, limits=limits, timeout=timeout, headers=headers) as client:
         print(f"[worker] up state_db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=off rps={DVSA_RPS} "
               f"mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED} stale={STALE_MINUTES}m api={API_BASE or '(unset!)'} "
-              f"priority={PRIORITY_CENTRES or '-'}")
+              f"priority_env={PRIORITY_CENTRES or '-'}")
         while True:
             try:
+                # Pull latest controls each loop (cheap GET)
+                controls = await get_controls_api(client)
+                if controls:
+                    if controls.get("pause_all"):
+                        # soft idle while paused
+                        await asyncio.sleep(POLL_SEC); 
+                        continue
+                    # live-update priority centres from API, falling back to env if empty
+                    new_prio = [str(x).strip().lower() for x in controls.get("priority_centres", []) if str(x).strip()]
+                    if new_prio:
+                        global CURRENT_PRIORITY_CENTRES
+                        CURRENT_PRIORITY_CENTRES = new_prio
+
                 if is_quiet_now() or not global_allowed():
                     await asyncio.sleep(POLL_SEC); continue
+
                 jobs = await claim_candidates_api(client, CONCURRENCY)
                 if not jobs:
                     await asyncio.sleep(POLL_SEC); continue
