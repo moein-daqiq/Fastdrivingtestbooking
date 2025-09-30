@@ -75,7 +75,13 @@ WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 # All selectors live here; include generous fallbacks.
 SEL = {
     # GOV.UK landing “Start now”
-    "start_now": "a.govuk-button, a.button--start, a[href*='start']",
+    "start_now": (
+        "a.govuk-button--start, "
+        "a.govuk-button[href*='start'], "
+        "a.button--start, "
+        "a[href*='start now' i], "
+        "a[class*='start'][class*='button']"
+    ),
 
     # NEW booking – category page (pick Car)
     "car_button": "button:has-text('Car'), a:has-text('Car (manual'), .app-button:has-text('Car'), [role='button']:has-text('Car')",
@@ -313,7 +319,6 @@ class DVSAClient:
         # 3) Nearest input after visible text node
         for n in names:
             try:
-                # Find text node then the first input that follows
                 lab = self.page.get_by_text(n, exact=False).first
                 await lab.wait_for(timeout=1500)
                 container = lab.locator("xpath=ancestor-or-self::*[self::label or self::div or self::fieldset][1]")
@@ -336,7 +341,6 @@ class DVSAClient:
     async def _captcha_guard(self):
         html = (await self.page.content()).lower()
         if any(k in html for k in ["recaptcha", "hcaptcha", "unusual traffic", "not a robot", "captcha", "additional security check is required"]):
-            # Optional: screenshot for debugging
             try:
                 ts = str(int(asyncio.get_event_loop().time()))
                 await self.page.screenshot(path=f"/tmp/captcha_{ts}.png", full_page=True)
@@ -352,13 +356,39 @@ class DVSAClient:
             raise DVSAError(f"DVSA error: {msg}")
 
     async def _maybe_click_start_now(self):
-        # If we land on the GOV.UK explainer, click Start now.
+        """
+        If we land on the GOV.UK explainer, click Start now to reach the form.
+        Tries role-based (accessible) lookup first, then CSS, then loose text.
+        """
         try:
-            start = await self.page.query_selector(_sel("start_now"))
-            if start:
-                await start.click()
+            # Role/name first (more resilient to markup tweaks)
+            for name in ["Start now", "Start", "Begin", "Continue"]:
+                try:
+                    await self.page.get_by_role("link", name=re.compile(name, re.I)).click(timeout=2000)
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
+                    return
+                except Exception:
+                    pass
+
+            # CSS fallbacks
+            try:
+                el = await self.page.query_selector(_sel("start_now"))
+                if el:
+                    await el.click()
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
+                    return
+            except Exception:
+                pass
+
+            # Loose text search
+            try:
+                el = await self.page.get_by_text(re.compile(r"\bstart now\b", re.I)).first
+                await el.click(timeout=1500)
+                await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
+            except Exception:
+                pass
         except Exception:
-            pass
+            pass  # never fail flow just on this
 
     async def _select_car_category_if_present(self):
         # On /application the first page is the category picker (Car, Motorcycles, ...).
@@ -371,7 +401,6 @@ class DVSAClient:
         except PWTimeout:
             pass
         except Exception:
-            # Non-fatal: if the page is already the licence details, proceed.
             pass
 
     async def _answer_no_no_if_present(self):
@@ -387,7 +416,6 @@ class DVSAClient:
             await asyncio.sleep(0.05)
             await no_radios.nth(1).check(timeout=2000)
         except Exception:
-            # Fall back: click any radios with value=no.
             try:
                 radios = await self.page.query_selector_all("input[type='radio'][value='no'], input[type='radio'][aria-label='No']")
                 for r in radios[:2]:
@@ -398,11 +426,27 @@ class DVSAClient:
             except Exception:
                 pass
 
+    async def _licence_form_present(self) -> bool:
+        """Return True if any known licence input is present (swap/new)."""
+        css = (
+            "input[name='driving-licence-number'], "
+            "input[name*='licence'], input[id*='licence'], "
+            "input[name='driverLicenceNumber']"
+        )
+        try:
+            el = await self.page.query_selector(css)
+            return el is not None
+        except Exception:
+            return False
+
     # ------------- Public API used by worker -------------
     async def login_swap(self, licence_number: str, booking_reference: str, email: Optional[str] = None):
         # Navigate + guards
         await self._goto(URL_CHANGE_TEST)
         await self._maybe_click_start_now()
+        if not await self._licence_form_present():
+            await asyncio.sleep(0.3)
+            await self._maybe_click_start_now()
 
         # Fill licence via robust helper (labels/nearby/placeholder) then CSS fallback
         ok_lic = await self._fill_by_label_variants(LABELS["licence"], licence_number)
@@ -439,6 +483,9 @@ class DVSAClient:
         # Navigate + guards
         await self._goto(URL_BOOK_TEST)
         await self._maybe_click_start_now()
+        if not await self._licence_form_present():
+            await asyncio.sleep(0.3)
+            await self._maybe_click_start_now()
 
         # If the category picker is visible, choose Car.
         await self._select_car_category_if_present()
@@ -578,7 +625,6 @@ class DVSAClient:
                     if ttxt:
                         slots.append(f"{centre_name} · (date unknown) · {ttxt}")
 
-            # emit a compact heartbeat with count
             await self._event(f"checked:{centre_name} · {('no_slots' if not slots else str(len(slots)))}")
             return slots
 
