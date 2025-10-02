@@ -10,7 +10,7 @@ Instrumentation added:
 - Optional event/status callbacks to your API when a job id (sid) is attached.
 - Events posted:
     checked:<centre> · no_slots|<count>
-    captcha_cooldown:<centre>
+    captcha_cooldown:<centre|stage>
     slot_found:<centre> · <date> · <time>        (only when swap_to() is called)
     booked:<centre> · <date> · <time>
     booking_failed:<centre> · <date> · <time>
@@ -49,7 +49,10 @@ class DVSAError(Exception):
 
 
 class CaptchaDetected(DVSAError):
-    pass
+    """Raised when a CAPTCHA/anti-bot wall is detected; carries the page URL."""
+    def __init__(self, message: str = "Captcha/anti-bot detected", url: Optional[str] = None):
+        super().__init__(message)
+        self.url = url or ""
 
 
 # ---------------- Config (override via env if needed) ----------------
@@ -156,6 +159,9 @@ class DVSAClient:
         self.sid: Optional[int] = None  # attach_job() sets this
         self._http: Optional["aiohttp.ClientSession"] = None
 
+        # small breadcrumb for better captcha events
+        self._stage: str = "init"
+
     # ------------- Instrumentation helpers (optional) -------------
     def attach_job(self, sid: int):
         """Attach a backend search id for event/status posting."""
@@ -253,7 +259,8 @@ class DVSAClient:
             await self._close_http()
 
     # ------------- Low-level helpers -------------
-    async def _goto(self, url: str, marker: Optional[str] = None):
+    async def _goto(self, url: str, marker: Optional[str] = None, stage: str = "nav"):
+        self._stage = stage
         await self.page.goto(url, wait_until="domcontentloaded")
         await self._accept_cookies()
         await self._captcha_guard()
@@ -338,15 +345,32 @@ class DVSAClient:
             except Exception:
                 pass
 
-    async def _captcha_guard(self):
+    async def _captcha_guard(self, where: Optional[str] = None):
+        """
+        Inspect current DOM for anti-bot widgets/messages.
+        If found: emit admin event (when sid is attached), save a screenshot, raise CaptchaDetected(url=...).
+        """
         html = (await self.page.content()).lower()
-        if any(k in html for k in ["recaptcha", "hcaptcha", "unusual traffic", "not a robot", "captcha", "additional security check is required"]):
+        indicators = [
+            "recaptcha", "hcaptcha", "turnstile",  # common widgets
+            "not a robot", "unusual traffic", "additional security check", "enter the characters", "are you human",
+            "verify you are human", "security challenge", "captcha"
+        ]
+        if any(k in html for k in indicators):
+            # best-effort screenshot
             try:
                 ts = str(int(asyncio.get_event_loop().time()))
                 await self.page.screenshot(path=f"/tmp/captcha_{ts}.png", full_page=True)
             except Exception:
                 pass
-            raise CaptchaDetected("Captcha/anti-bot detected")
+            # post event immediately if we know the job
+            stage = where or self._stage or "unknown"
+            try:
+                await self._event(f"captcha_cooldown:{stage}")
+            except Exception:
+                pass
+            # raise with URL for the worker to include in WhatsApp (if desired)
+            raise CaptchaDetected(url=(self.page.url if self.page else ""))
 
     async def _expect_ok(self):
         await self._captcha_guard()
@@ -366,6 +390,7 @@ class DVSAClient:
                 try:
                     await self.page.get_by_role("link", name=re.compile(name, re.I)).click(timeout=2000)
                     await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
+                    await self._captcha_guard("start_now")
                     return
                 except Exception:
                     pass
@@ -376,6 +401,7 @@ class DVSAClient:
                 if el:
                     await el.click()
                     await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
+                    await self._captcha_guard("start_now_css")
                     return
             except Exception:
                 pass
@@ -385,6 +411,7 @@ class DVSAClient:
                 el = await self.page.get_by_text(re.compile(r"\bstart now\b", re.I)).first
                 await el.click(timeout=1500)
                 await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
+                await self._captcha_guard("start_now_text")
             except Exception:
                 pass
         except Exception:
@@ -397,7 +424,7 @@ class DVSAClient:
             btn = await self.page.query_selector(_sel("car_button"))
             if btn:
                 await btn.click()
-                await self._captcha_guard()
+                await self._captcha_guard("category_car")
         except PWTimeout:
             pass
         except Exception:
@@ -441,14 +468,15 @@ class DVSAClient:
 
     # ------------- Public API used by worker -------------
     async def login_swap(self, licence_number: str, booking_reference: str, email: Optional[str] = None):
-        # Navigate + guards
-        await self._goto(URL_CHANGE_TEST)
+        self._stage = "login_swap_nav"
+        await self._goto(URL_CHANGE_TEST, stage="login_swap_nav")
         await self._maybe_click_start_now()
         if not await self._licence_form_present():
             await asyncio.sleep(0.3)
             await self._maybe_click_start_now()
 
-        # Fill licence via robust helper (labels/nearby/placeholder) then CSS fallback
+        # Fill licence
+        self._stage = "login_swap_licence"
         ok_lic = await self._fill_by_label_variants(LABELS["licence"], licence_number)
         if not ok_lic:
             try:
@@ -457,6 +485,7 @@ class DVSAClient:
                 raise DVSAError("layout_change: licence field not found")
 
         # Fill booking reference
+        self._stage = "login_swap_reference"
         ok_ref = await self._fill_by_label_variants(LABELS["swap_ref"], booking_reference)
         if not ok_ref:
             try:
@@ -466,6 +495,7 @@ class DVSAClient:
 
         # Optional email
         if email:
+            self._stage = "login_swap_email"
             ok_email = await self._fill_by_label_variants(LABELS["email"], email)
             if not ok_email:
                 try:
@@ -474,23 +504,25 @@ class DVSAClient:
                     pass  # not fatal
 
         # Continue button
+        self._stage = "login_swap_continue"
         if not await self._click_continue_role_fallback():
             raise DVSAError("layout_change: continue button not found")
 
         await self._expect_ok()
 
     async def login_new(self, licence_number: str, theory_pass: Optional[str] = None, email: Optional[str] = None):
-        # Navigate + guards
-        await self._goto(URL_BOOK_TEST)
+        self._stage = "login_new_nav"
+        await self._goto(URL_BOOK_TEST, stage="login_new_nav")
         await self._maybe_click_start_now()
         if not await self._licence_form_present():
             await asyncio.sleep(0.3)
             await self._maybe_click_start_now()
 
-        # If the category picker is visible, choose Car.
+        # Category (if present)
         await self._select_car_category_if_present()
 
         # Licence (robust)
+        self._stage = "login_new_licence"
         ok_lic = await self._fill_by_label_variants(LABELS["licence"], licence_number)
         if not ok_lic:
             try:
@@ -500,6 +532,7 @@ class DVSAClient:
 
         # Optional theory pass
         if theory_pass:
+            self._stage = "login_new_theory"
             filled = await self._fill_by_label_variants(
                 ["Theory pass number", "Theory test pass number", "Theory pass certificate number"], theory_pass
             )
@@ -511,6 +544,7 @@ class DVSAClient:
 
         # Optional email
         if email:
+            self._stage = "login_new_email"
             ok_email = await self._fill_by_label_variants(LABELS["email"], email)
             if not ok_email:
                 try:
@@ -521,12 +555,14 @@ class DVSAClient:
         await self._answer_no_no_if_present()
 
         # Continue
+        self._stage = "login_new_continue"
         if not await self._click_continue_role_fallback():
             raise DVSAError("layout_change: continue button not found")
 
         await self._expect_ok()
 
     async def _open_centre(self, centre_name: str) -> bool:
+        self._stage = f"centre_open:{centre_name}"
         # Some flows require a link to the centre search first; try common link names.
         for name in ["Test centre availability", "Change test centre", "Find a test centre", "Change location"]:
             try:
@@ -572,11 +608,11 @@ class DVSAClient:
             "Pinner · (date unknown) · 08:10"
         Posts admin events when a sid is attached:
             checked:<centre> · no_slots|<n>
-            captcha_cooldown:<centre>
+            captcha_cooldown:<centre|stage>
             error:<centre> · <ExceptionName>
         """
         try:
-            await self._captcha_guard()
+            await self._captcha_guard(f"pre_open:{centre_name}")
             if not await self._open_centre(centre_name):
                 await self._event(f"error:{centre_name} · OpenFailed")
                 return []
@@ -603,7 +639,7 @@ class DVSAClient:
                     for t in time_nodes:
                         ttxt = (await t.text_content() or "").strip()
                         if ttxt:
-                            # normalise "view" rows (obs-web style): clicking view loads a page with times
+                            # normalise "view" rows
                             if ttxt.lower() == "view":
                                 try:
                                     await t.click()
@@ -641,7 +677,7 @@ class DVSAClient:
         Accepts either "Centre · YYYY-MM-DD · HH:MM" or "Centre · (date unknown) · HH:MM".
         Emits 'booked:' or 'booking_failed:' status when sid is attached.
         """
-        await self._captcha_guard()
+        await self._captcha_guard("pre_swap_confirm")
 
         # Parse parts
         m = re.match(r"^(.*?) · (.*?) · (\d{1,2}:\d{2})$", slot_label)
