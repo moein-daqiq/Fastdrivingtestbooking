@@ -1,4 +1,4 @@
-# --- worker.py (priority centres + kill-switch + CAPTCHA WhatsApp alert + better logging + more attempts) ---
+# --- worker.py (priority centres + kill-switch + CAPTCHA WhatsApp alert + resume link + better logging + more attempts) ---
 
 import os, json, math, time, random, sqlite3, asyncio, subprocess, hashlib, re
 from datetime import datetime, timedelta, timezone
@@ -6,6 +6,10 @@ from typing import Dict, List, Tuple, Optional
 
 import httpx
 from dvsa_client import DVSAClient, CaptchaDetected  # <-- your dvsa_client.py
+
+import hmac
+import base64
+from urllib.parse import urlencode
 
 # ==============================
 # Config / Environment
@@ -50,6 +54,9 @@ QUIET_HOURS = os.environ.get("QUIET_HOURS", "").strip()
 # DVSA entry points (overrideable from env, used in CAPTCHA alerts)
 DVSA_URL_CHANGE = os.environ.get("DVSA_URL_CHANGE", "https://driverpracticaltest.dvsa.gov.uk/manage")
 DVSA_URL_BOOK   = os.environ.get("DVSA_URL_BOOK",   "https://driverpracticaltest.dvsa.gov.uk/application")
+
+# Optional backend "resume now" endpoint (used in WhatsApp)
+RESUME_URL = os.environ.get("RESUME_URL", "").rstrip("/")
 
 # Stale search expiry
 STALE_MINUTES = int(os.environ.get("STALE_MINUTES", "5"))
@@ -408,7 +415,7 @@ def make_session_key(row: dict, centre: Optional[str] = None) -> str:
     return f"{trunk}-{h}"
 
 # ==============================
-# CAPTCHA alert helper (WhatsApp with DVSA link) + debounce
+# CAPTCHA alert helper (WhatsApp with DVSA link) + debounce + resume link
 # ==============================
 CAPTCHA_ALERT_SENT: Dict[str, float] = {}  # key = session_base(row); value=epoch seconds
 
@@ -421,8 +428,25 @@ def _captcha_url_for(row: dict) -> str:
     sep = "&" if "?" in base else "?"
     return f"{base}{sep}sid={sid}"
 
+def _sign(s: str) -> str:
+    """HMAC-SHA256 signature using WORKER_TOKEN (base64url, no padding)."""
+    if not WORKER_TOKEN:
+        return ""
+    mac = hmac.new(WORKER_TOKEN.encode("utf-8"), s.encode("utf-8"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).decode("ascii").rstrip("=")
+
+def _resume_link_for(row: dict) -> Optional[str]:
+    """Create a signed 'resume this job' link for your backend, or None if RESUME_URL empty."""
+    if not RESUME_URL:
+        return None
+    sid = int(row.get("id"))
+    ident = session_base(row)
+    sig = _sign(f"{sid}|{ident}")
+    q = {"sid": sid, "ident": ident, "sig": sig}
+    return f"{RESUME_URL}?{urlencode(q)}"
+
 def send_captcha_alert(row: dict, centre: str):
-    """Send a single WhatsApp alert (debounced 10m per identity) with the DVSA link."""
+    """Send a single WhatsApp alert (debounced 10m per identity) with the DVSA link + optional Resume link."""
     ident = session_base(row)
     now = time.time()
     last = CAPTCHA_ALERT_SENT.get(ident, 0.0)
@@ -431,16 +455,20 @@ def send_captcha_alert(row: dict, centre: str):
     CAPTCHA_ALERT_SENT[ident] = now
 
     url = _captcha_url_for(row)
+    resume = _resume_link_for(row)
     sid = row.get("id")
     typ = (row.get("booking_type") or "").strip().lower() or "new"
+
+    extra = f"\nResume this job now:\n{resume}\n" if resume else ""
 
     msg = (
         "🧩 FASTDTF: CAPTCHA required\n"
         f"Search #{sid} ({typ})\n"
         f"Centre: {centre}\n\n"
         f"Open DVSA and complete the CAPTCHA:\n{url}\n\n"
-        f"After you pass the CAPTCHA, the bot will resume. "
-        f"(Cooling for ~{CAPTCHA_COOLDOWN_MIN}m to be safe.)"
+        f"After you pass the CAPTCHA, tap resume so I try again immediately."
+        f"{extra}"
+        f"(Also cooling for ~{CAPTCHA_COOLDOWN_MIN}m to be safe.)"
     )
     wa_owner(msg)
 
@@ -448,6 +476,10 @@ def send_captcha_alert(row: dict, centre: str):
 # DVSA integration
 # ==============================
 async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -> List[str]:
+    # Optional resume override: if last event was 'resume_now', ignore cooldown checks once
+    _, last_event = get_status_tuple_from_cache(row["id"])
+    resume_override = (last_event == "resume_now")
+
     # NEW: obey global pause before doing anything
     if CTRL.get("pause_all"):
         try:
@@ -457,10 +489,10 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
         await asyncio.sleep(0.05)
         return []
 
-    if not global_allowed():
+    if not resume_override and not global_allowed():
         await post_event_api(client_httpx, row["id"], f"cooldown_skip:*global*")
         await asyncio.sleep(0.05); return []
-    if not centre_allowed(centre):
+    if not resume_override and not centre_allowed(centre):
         await post_event_api(client_httpx, row["id"], f"cooldown_skip:{centre}")
         await asyncio.sleep(0.05); return []
 
@@ -503,7 +535,7 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
         except CaptchaDetected:
             # mark health + global cooldown
             centre_fail(centre); global_cooldown(CAPTCHA_COOLDOWN_MIN)
-            # WhatsApp with DVSA link
+            # WhatsApp with DVSA link (+ resume)
             send_captcha_alert(row, centre)
             # admin-side event
             await post_event_api(client_httpx, row["id"], f"captcha_cooldown:{centre}")
