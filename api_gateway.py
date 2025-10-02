@@ -224,6 +224,18 @@ def _verify_worker(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=403, detail="Invalid token")
     return True
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except Exception:
+        return default
+
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "y", "on")
+
 def _expire_unpaid(conn: sqlite3.Connection):
     cur = conn.cursor()
     ts = now_iso()
@@ -334,10 +346,65 @@ def _set_controls(conn: sqlite3.Connection, pause_all: Optional[bool], priority_
 
 @app.get("/api/worker/controls")
 def worker_controls(_: bool = Depends(_verify_worker)):
+    """
+    Read-only controls for the worker:
+      - Admin pause flag + priority centres (from DB)
+      - DVSA throttling / timeouts / URLs / UA (from ENV)
+      - Service info (API base, Playwright path)
+    """
     conn = get_conn()
-    data = _get_controls(conn)
+    controls = _get_controls(conn)
     conn.close()
-    return data
+
+    # RPS & jitter (from env, clamped to safe ranges)
+    dvsa_rps = _env_float("DVSA_RPS", 0.5)
+    dvsa_rps = max(0.2, min(2.0, dvsa_rps))
+    dvsa_jitter = _env_float("DVSA_RPS_JITTER", 0.35)
+    dvsa_jitter = max(0.0, min(0.9, dvsa_jitter))
+    target_interval_sec = round(1.0 / dvsa_rps, 3)
+
+    # Other DVSA behaviour toggles / timeouts
+    headless = _env_bool("DVSA_HEADLESS", True)
+    nav_timeout_ms = int(os.environ.get("DVSA_NAV_TIMEOUT_MS", "25000"))
+    ready_max_ms = int(os.environ.get("DVSA_READY_MAX_MS", "30000"))
+    post_nav_settle_ms = int(os.environ.get("DVSA_POST_NAV_SETTLE_MS", "800"))
+    click_settle_ms = int(os.environ.get("DVSA_CLICK_SETTLE_MS", "700"))
+
+    # URLs and UA
+    url_change = os.environ.get("DVSA_URL_CHANGE", "")
+    url_book = os.environ.get("DVSA_URL_BOOK", "")
+    ua_full = os.environ.get("DVSA_USER_AGENT", "")
+    ua_short = (ua_full[:80] + "...") if ua_full else ""
+
+    # Service info
+    api_base = os.environ.get("API_BASE", "")
+    pw_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+
+    return {
+        "pause_all": controls["pause_all"],
+        "priority_centres": controls["priority_centres"],
+        "dvsa": {
+            "rps": dvsa_rps,
+            "jitter": dvsa_jitter,
+            "target_interval_sec": target_interval_sec,
+            "headless": headless,
+            "timeouts": {
+                "nav_timeout_ms": nav_timeout_ms,
+                "ready_max_ms": ready_max_ms,
+                "post_nav_settle_ms": post_nav_settle_ms,
+                "click_settle_ms": click_settle_ms,
+            },
+            "urls": {
+                "change": url_change,
+                "book": url_book,
+            },
+            "user_agent": ua_short,
+        },
+        "service": {
+            "api_base": api_base,
+            "playwright_path": pw_path,
+        },
+    }
 
 @app.get("/api/admin/controls")
 def admin_get_controls(request: Request):
