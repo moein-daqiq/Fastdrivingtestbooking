@@ -44,7 +44,12 @@ AUTOBOOK_ENABLED = os.environ.get("AUTOBOOK_ENABLED", "true").lower() == "true"
 AUTOBOOK_MODE = os.environ.get("AUTOBOOK_MODE", "simulate")  # simulate | real
 AUTOBOOK_SIM_SUCCESS_RATE = float(os.environ.get("AUTOBOOK_SIM_SUCCESS_RATE", "0.85"))
 
-DVSA_RPS = float(os.environ.get("DVSA_RPS", "4.0"))
+# IMPORTANT:
+# Let dvsa_client.py enforce the per-request DVSA_RPS (default there is 0.5) to avoid *double throttling*.
+# If you want to keep THIS worker's token-bucket instead, set HONOUR_CLIENT_RPS=false.
+HONOUR_CLIENT_RPS = os.environ.get("HONOUR_CLIENT_RPS", "true").lower() == "true"
+
+DVSA_RPS = float(os.environ.get("DVSA_RPS", "4.0"))  # only used if HONOUR_CLIENT_RPS=false
 CB_FAILS_THRESHOLD = int(os.environ.get("CB_FAILS_THRESHOLD", "12"))
 CB_COOLDOWN_SEC = int(os.environ.get("CB_COOLDOWN_SEC", "120"))
 
@@ -342,7 +347,12 @@ class TokenBucket:
                 return
             await asyncio.sleep(0.01)
 
-bucket_dvsa = TokenBucket(DVSA_RPS, DVSA_RPS)
+class _NoopBucket:
+    async def acquire(self):
+        return
+
+# Only use the worker bucket when HONOUR_CLIENT_RPS is False
+bucket_dvsa = TokenBucket(DVSA_RPS, DVSA_RPS) if not HONOUR_CLIENT_RPS else _NoopBucket()
 
 def centre_fail(centre: str):
     conn = get_conn(); cur = conn.cursor()
@@ -496,6 +506,7 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
         await post_event_api(client_httpx, row["id"], f"cooldown_skip:{centre}")
         await asyncio.sleep(0.05); return []
 
+    # Worker-side throttle (NOOP if HONOUR_CLIENT_RPS=true)
     await bucket_dvsa.acquire()
     await asyncio.sleep(random.randint(0, JITTER_MS) / 1000.0)
 
@@ -513,6 +524,9 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
     for attempt in range(1, attempts + 1):
         try:
             async with DVSAClient(headless=True, session_key=session_key) as dvsa:
+                # IMPORTANT: attach sid so dvsa_client can post events/status to API
+                dvsa.attach_job(int(row["id"]))
+
                 await post_event_api(client_httpx, row["id"], f"login_start:{centre}")
                 if (row.get("booking_type") or "") == "swap":
                     await dvsa.login_swap(
@@ -561,6 +575,7 @@ async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
     session_key = make_session_key(row)
     try:
         async with DVSAClient(headless=True, session_key=session_key) as dvsa:
+            dvsa.attach_job(int(row["id"]))  # instrumentation
             await dvsa.login_swap(
                 licence_number=row.get("licence_number") or "",
                 booking_reference=row.get("booking_reference") or "",
@@ -682,7 +697,9 @@ async def process_job(client: httpx.AsyncClient, row: dict):
         async def run_pass(items: List[str]):
             if not items or found_slot is not None or captcha_hit:
                 return
-            sem = asyncio.Semaphore(max(1, min(JOB_MAX_PARALLEL_CHECKS, len(items))))
+            # If the client is doing RPS, force serial checks (one Playwright context at a time).
+            effective_parallel = 1 if HONOUR_CLIENT_RPS else max(1, min(JOB_MAX_PARALLEL_CHECKS, len(items)))
+            sem = asyncio.Semaphore(effective_parallel)
             async def worker(c):
                 async with sem:
                     await check_one(c)
@@ -735,7 +752,9 @@ async def run():
     headers = {"User-Agent": USER_AGENT}
 
     async with httpx.AsyncClient(http2=False, limits=limits, timeout=timeout, headers=headers) as client:
-        print(f"[worker] up state_db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=off rps={DVSA_RPS} "
+        print(f"[worker] up state_db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=off "
+              f"client_rps={'ON' if HONOUR_CLIENT_RPS else 'OFF'} "
+              f"worker_rps={('disabled' if HONOUR_CLIENT_RPS else DVSA_RPS)} "
               f"mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED} stale={STALE_MINUTES}m api={API_BASE or '(unset!)'} "
               f"priority_env={PRIORITY_CENTRES or '-'}")
         while True:
