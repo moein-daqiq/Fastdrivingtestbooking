@@ -1,11 +1,12 @@
 # dvsa_client.py
 """
-Minimal, SAFE DVSA automation for FastDTF (with robust readiness gates):
+Minimal, SAFE DVSA automation for FastDTF (with robust readiness gates + built-in RPS throttle):
 - No CAPTCHA bypass: raises CaptchaDetected if a bot wall appears.
 - Public API used by worker: login_swap, login_new, search_centre_slots, swap_to.
 - All selectors centralized in SEL with fallbacks.
 - Optional session reuse (per licence) and optional proxy support.
-- NEW: Wait-until-ready guards so we never click while DVSA says "please wait".
+- Wait-until-ready guards so we never click while DVSA says "please wait".
+- NEW: Internal DVSA_RPS throttle with jitter to avoid machine-perfect cadence.
 
 Instrumentation:
 - Optional event/status callbacks to your API when a job id (sid) is attached.
@@ -30,12 +31,17 @@ Env you may set on the worker host (optional):
     DVSA_READY_MAX_MS=30000          # max wait for loading banners to clear / form to appear
     DVSA_POST_NAV_SETTLE_MS=800      # small post-nav jitter (0..this, randomized)
     DVSA_CLICK_SETTLE_MS=700         # small post-click jitter (0..this, randomized)
+
+    # NEW: Internal throttle
+    DVSA_RPS=0.5                     # requests per second (0.5 => ~1 request every 2s)
+    DVSA_RPS_JITTER=0.35             # ±35% randomness on the interval
 """
 
 from __future__ import annotations
 
 import os
 import re
+import time
 import asyncio
 import random
 from typing import List, Optional
@@ -88,6 +94,19 @@ CLICK_SETTLE_MS = int(os.environ.get("DVSA_CLICK_SETTLE_MS", "700"))
 # Backend instrumentation config (optional)
 API_BASE = os.environ.get("API_BASE", "https://api.fastdrivingtestfinder.co.uk/api").rstrip("/")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
+
+# Internal RPS throttle (with jitter)
+def _safe_float(env_val: str, default: float) -> float:
+    try:
+        return float(env_val)
+    except Exception:
+        return default
+
+_DVSA_RPS = _safe_float(os.environ.get("DVSA_RPS", "0.5"), 0.5)          # default 0.5 rps
+_DVSA_RPS = max(0.2, min(2.0, _DVSA_RPS))                                 # clamp 0.2..2.0
+_DVSA_RPS_JITTER = _safe_float(os.environ.get("DVSA_RPS_JITTER", "0.35"), 0.35)
+_DVSA_RPS_JITTER = max(0.0, min(0.9, _DVSA_RPS_JITTER))                   # clamp 0..0.9
+_DVSA_MIN_INTERVAL = 1.0 / _DVSA_RPS                                      # base seconds between requests
 
 # ---------------- Robust selectors ----------------
 SEL = {
@@ -175,6 +194,11 @@ class DVSAClient:
         # small breadcrumb for better captcha events
         self._stage: str = "init"
 
+        # internal RPS state
+        self._last_rps_ts: Optional[float] = None
+        self._rps_interval: float = _DVSA_MIN_INTERVAL
+        self._rps_jitter: float = _DVSA_RPS_JITTER
+
     # ------------- Instrumentation helpers (optional) -------------
     def attach_job(self, sid: int):
         """Attach a backend search id for event/status posting."""
@@ -215,63 +239,37 @@ class DVSAClient:
         finally:
             self._http = None
 
-    # ------------- Context mgr -------------
-    async def __aenter__(self) -> "DVSAClient":
-        self.pw = await async_playwright().start()
+    # ------------- RPS throttle -------------
+    async def _rps_pause(self, where: str = ""):
+        """
+        Ensure at most ~1 request / interval with ±jitter.
+        Called after actions that likely hit the network (nav, form submit, click).
+        """
+        # Determine randomized target interval for this step
+        factor = 1.0
+        if self._rps_jitter > 0.0:
+            # pick in [1 - j, 1 + j]
+            low = max(0.1, 1.0 - self._rps_jitter)
+            high = 1.0 + self._rps_jitter
+            factor = random.uniform(low, high)
+        interval = self._rps_interval * factor
 
-        launch_kwargs = dict(headless=self.headless, slow_mo=SLOWMO_MS)
-        if DVSA_PROXY:
-            launch_kwargs["proxy"] = {"server": DVSA_PROXY}
+        now = time.monotonic()
+        if self._last_rps_ts is None:
+            self._last_rps_ts = now
+            return
 
-        self.browser = await self.pw.chromium.launch(
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-extensions",
-                "--disable-background-networking",
-                "--disable-breakpad",
-                "--no-first-run",
-            ],
-            **launch_kwargs,
-        )
+        elapsed = now - self._last_rps_ts
+        remain = interval - elapsed
+        if remain > 0:
+            try:
+                await asyncio.sleep(remain)
+            finally:
+                self._last_rps_ts = time.monotonic()
+        else:
+            self._last_rps_ts = now
 
-        storage_state = None
-        if self.session_key:
-            safe_key = "".join(ch for ch in self.session_key if ch.isalnum() or ch in ("-", "_"))[:40]
-            self._storage_path = f"/tmp/dvsa_sess_{safe_key}.json"
-            if os.path.exists(self._storage_path):
-                storage_state = self._storage_path
-
-        self.context = await self.browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 1366, "height": 850},
-            storage_state=storage_state,
-        )
-        # Reduce automation fingerprint
-        await self.context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-
-        self.page = await self.context.new_page()
-        self.page.set_default_timeout(NAV_TIMEOUT_MS)
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        try:
-            if self._storage_path and self.context:
-                try:
-                    await self.context.storage_state(path=self._storage_path)
-                except Exception:
-                    pass
-            if self.context:
-                await self.context.close()
-            if self.browser:
-                await self.browser.close()
-        finally:
-            if self.pw:
-                await self.pw.stop()
-            await self._close_http()
-
-    # ------------- Timing helpers -------------
+    # ------------- Timing helpers (human-like settle) -------------
     async def _human_pause(self, max_ms: int):
         """Small randomized settle to avoid machine-perfect cadence."""
         if max_ms <= 0:
@@ -286,7 +284,6 @@ class DVSAClient:
         await self._captcha_guard("ready_gate_pre")
 
         # If DVSA shows a loading banner, wait for it to disappear
-        # Match loosely to survive copy tweaks
         try:
             banner = self.page.locator("text=/please\\s+wait|loading\\s+the\\s+page/i")
             if await banner.count() > 0:
@@ -329,13 +326,12 @@ class DVSAClient:
     async def _goto(self, url: str, marker: Optional[str] = None, stage: str = "nav"):
         self._stage = stage
         await self.page.goto(url, wait_until="domcontentloaded")
+        await self._rps_pause("after_goto")
         await self._accept_cookies()
         await self._captcha_guard()
         if marker:
             await self.page.get_by_text(marker, exact=False).first.wait_for()
-        # small randomized settle after navigation
         await self._human_pause(POST_NAV_SETTLE_MS)
-        # and ensure page is truly ready before we interact
         await self._wait_for_dvsa_ready()
 
     async def _fill_css(self, sel: str, value: str):
@@ -345,25 +341,25 @@ class DVSAClient:
 
     async def _click_css(self, sel: str):
         await self.page.wait_for_selector(sel)
-        # Try to avoid clicking while network is hot
         try:
             await self.page.wait_for_load_state("networkidle", timeout=8000)
         except Exception:
             pass
         await self.page.click(sel)
         await self._human_pause(CLICK_SETTLE_MS)
+        await self._rps_pause("after_click_css")
 
     async def _click_continue_role_fallback(self) -> bool:
         # Prefer accessible role/name to resist copy changes
         for name in ROLE_BUTTONS["continue"]:
             try:
-                # Avoid click during hot network
                 try:
                     await self.page.wait_for_load_state("networkidle", timeout=8000)
                 except Exception:
                     pass
                 await self.page.get_by_role("button", name=name).click(timeout=4000)
                 await self._human_pause(CLICK_SETTLE_MS)
+                await self._rps_pause("after_click_continue_role")
                 return True
             except Exception:
                 continue
@@ -378,6 +374,7 @@ class DVSAClient:
         try:
             await self.page.locator("button.govuk-button").first.click(timeout=3000)
             await self._human_pause(CLICK_SETTLE_MS)
+            await self._rps_pause("after_click_continue_govuk")
             return True
         except Exception:
             return False
@@ -431,6 +428,7 @@ class DVSAClient:
             try:
                 await self.page.get_by_role("button", name=name).click(timeout=1500)
                 await self._human_pause(300)
+                await self._rps_pause("after_accept_cookies")
                 break
             except Exception:
                 pass
@@ -482,6 +480,7 @@ class DVSAClient:
                     await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                     await self._captcha_guard("start_now")
                     await self._human_pause(POST_NAV_SETTLE_MS)
+                    await self._rps_pause("after_start_now_role")
                     await self._wait_for_dvsa_ready()
                     return
                 except Exception:
@@ -495,6 +494,7 @@ class DVSAClient:
                     await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                     await self._captcha_guard("start_now_css")
                     await self._human_pause(POST_NAV_SETTLE_MS)
+                    await self._rps_pause("after_start_now_css")
                     await self._wait_for_dvsa_ready()
                     return
             except Exception:
@@ -507,6 +507,7 @@ class DVSAClient:
                 await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                 await self._captcha_guard("start_now_text")
                 await self._human_pause(POST_NAV_SETTLE_MS)
+                await self._rps_pause("after_start_now_text")
                 await self._wait_for_dvsa_ready()
             except Exception:
                 pass
@@ -520,6 +521,7 @@ class DVSAClient:
                 await btn.click()
                 await self._captcha_guard("category_car")
                 await self._human_pause(CLICK_SETTLE_MS)
+                await self._rps_pause("after_car_category")
         except PWTimeout:
             pass
         except Exception:
@@ -668,6 +670,7 @@ class DVSAClient:
             try:
                 await self.page.get_by_role("link", name=name).click(timeout=2000)
                 await self._human_pause(CLICK_SETTLE_MS)
+                await self._rps_pause("after_open_centre_link")
                 break
             except Exception:
                 pass
@@ -693,12 +696,15 @@ class DVSAClient:
             if chosen:
                 await chosen.click()
                 await self._human_pause(CLICK_SETTLE_MS)
+                await self._rps_pause("after_centre_suggestion_click")
             else:
                 await self.page.keyboard.press("Enter")
                 await self._human_pause(CLICK_SETTLE_MS)
+                await self._rps_pause("after_centre_enter")
         except PWTimeout:
             await self.page.keyboard.press("Enter")
             await self._human_pause(CLICK_SETTLE_MS)
+            await self._rps_pause("after_centre_enter_timeout")
 
         # If there is an explicit Search/Continue button, click it
         await self._click_continue_role_fallback()
@@ -739,6 +745,7 @@ class DVSAClient:
                     try:
                         await d.click()
                         await self._human_pause(CLICK_SETTLE_MS)
+                        await self._rps_pause("after_date_click")
                     except PWTimeout:
                         continue
                     time_nodes = await self.page.query_selector_all(_sel("centre_times"))
@@ -750,6 +757,7 @@ class DVSAClient:
                                 try:
                                     await t.click()
                                     await self._human_pause(CLICK_SETTLE_MS)
+                                    await self._rps_pause("after_view_click")
                                     time_nodes2 = await self.page.query_selector_all(_sel("centre_times"))
                                     for tt in time_nodes2:
                                         vtxt = (await tt.text_content() or "").strip()
@@ -806,6 +814,7 @@ class DVSAClient:
                     if date_txt in dtxt:
                         await d.click()
                         await self._human_pause(CLICK_SETTLE_MS)
+                        await self._rps_pause("after_swap_date_click")
                         break
             except PWTimeout:
                 pass
@@ -819,11 +828,13 @@ class DVSAClient:
                 if time_txt and ttxt.startswith(time_txt):
                     await t.click()
                     await self._human_pause(CLICK_SETTLE_MS)
+                    await self._rps_pause("after_swap_time_click")
                     clicked = True
                     break
                 if not time_txt and slot_label in ttxt:
                     await t.click()
                     await self._human_pause(CLICK_SETTLE_MS)
+                    await self._rps_pause("after_swap_time_click2")
                     clicked = True
                     break
             if not clicked:
