@@ -1,4 +1,4 @@
-# --- worker.py (priority centres + kill-switch + better logging + more attempts) ---
+# --- worker.py (priority centres + kill-switch + CAPTCHA WhatsApp alert + better logging + more attempts) ---
 
 import os, json, math, time, random, sqlite3, asyncio, subprocess, hashlib, re
 from datetime import datetime, timedelta, timezone
@@ -46,6 +46,10 @@ CB_COOLDOWN_SEC = int(os.environ.get("CB_COOLDOWN_SEC", "120"))
 
 CAPTCHA_COOLDOWN_MIN = int(os.environ.get("CAPTCHA_COOLDOWN_MIN", "30"))
 QUIET_HOURS = os.environ.get("QUIET_HOURS", "").strip()
+
+# DVSA entry points (overrideable from env, used in CAPTCHA alerts)
+DVSA_URL_CHANGE = os.environ.get("DVSA_URL_CHANGE", "https://driverpracticaltest.dvsa.gov.uk/manage")
+DVSA_URL_BOOK   = os.environ.get("DVSA_URL_BOOK",   "https://driverpracticaltest.dvsa.gov.uk/application")
 
 # Stale search expiry
 STALE_MINUTES = int(os.environ.get("STALE_MINUTES", "5"))
@@ -404,6 +408,43 @@ def make_session_key(row: dict, centre: Optional[str] = None) -> str:
     return f"{trunk}-{h}"
 
 # ==============================
+# CAPTCHA alert helper (WhatsApp with DVSA link) + debounce
+# ==============================
+CAPTCHA_ALERT_SENT: Dict[str, float] = {}  # key = session_base(row); value=epoch seconds
+
+def _captcha_url_for(row: dict) -> str:
+    """Return the best DVSA entry link for this job."""
+    typ = (row.get("booking_type") or "").strip().lower()
+    base = DVSA_URL_CHANGE if typ == "swap" else DVSA_URL_BOOK
+    # Include sid as a benign marker so you know which job triggered it
+    sid = row.get("id")
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}sid={sid}"
+
+def send_captcha_alert(row: dict, centre: str):
+    """Send a single WhatsApp alert (debounced 10m per identity) with the DVSA link."""
+    ident = session_base(row)
+    now = time.time()
+    last = CAPTCHA_ALERT_SENT.get(ident, 0.0)
+    if now - last < 600:  # 10 minutes debounce
+        return
+    CAPTCHA_ALERT_SENT[ident] = now
+
+    url = _captcha_url_for(row)
+    sid = row.get("id")
+    typ = (row.get("booking_type") or "").strip().lower() or "new"
+
+    msg = (
+        "🧩 FASTDTF: CAPTCHA required\n"
+        f"Search #{sid} ({typ})\n"
+        f"Centre: {centre}\n\n"
+        f"Open DVSA and complete the CAPTCHA:\n{url}\n\n"
+        f"After you pass the CAPTCHA, the bot will resume. "
+        f"(Cooling for ~{CAPTCHA_COOLDOWN_MIN}m to be safe.)"
+    )
+    wa_owner(msg)
+
+# ==============================
 # DVSA integration
 # ==============================
 async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -> List[str]:
@@ -460,9 +501,13 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
                 return slots
 
         except CaptchaDetected:
+            # mark health + global cooldown
             centre_fail(centre); global_cooldown(CAPTCHA_COOLDOWN_MIN)
-            wa_owner(f"🛑 DVSA bot wall hit for search #{row['id']} at {centre}. Cooling for {CAPTCHA_COOLDOWN_MIN}m.")
+            # WhatsApp with DVSA link
+            send_captcha_alert(row, centre)
+            # admin-side event
             await post_event_api(client_httpx, row["id"], f"captcha_cooldown:{centre}")
+            # re-raise so caller can treat as hard stop for the pass
             raise
 
         except Exception as e:
@@ -491,6 +536,7 @@ async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
             )
             return await dvsa.swap_to(slot)
     except CaptchaDetected:
+        send_captcha_alert(row, "(during swap confirm)")
         return False
     except Exception as e:
         print(f"[dvsa_swap_to_slot] {e}")
