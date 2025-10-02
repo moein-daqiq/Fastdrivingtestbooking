@@ -1,12 +1,13 @@
 # dvsa_client.py
 """
-Minimal, SAFE DVSA automation for FastDTF:
+Minimal, SAFE DVSA automation for FastDTF (with robust readiness gates):
 - No CAPTCHA bypass: raises CaptchaDetected if a bot wall appears.
 - Public API used by worker: login_swap, login_new, search_centre_slots, swap_to.
 - All selectors centralized in SEL with fallbacks.
 - Optional session reuse (per licence) and optional proxy support.
+- NEW: Wait-until-ready guards so we never click while DVSA says "please wait".
 
-Instrumentation added:
+Instrumentation:
 - Optional event/status callbacks to your API when a job id (sid) is attached.
 - Events posted:
     checked:<centre> · no_slots|<count>
@@ -16,9 +17,19 @@ Instrumentation added:
     booking_failed:<centre> · <date> · <time>
     error:<centre> · <ExceptionName>
 
-Set these env vars on the worker host (optional):
+Env you may set on the worker host (optional):
     API_BASE=https://api.fastdrivingtestfinder.co.uk/api
     WORKER_TOKEN=<same secret as backend>
+
+    # Behavioural tuning (optional; sensible defaults below)
+    DVSA_HEADLESS=true
+    DVSA_NAV_TIMEOUT_MS=25000
+    DVSA_SLOWMO_MS=0
+    DVSA_USER_AGENT=<string>
+    DVSA_PROXY=http://user:pass@host:port
+    DVSA_READY_MAX_MS=30000          # max wait for loading banners to clear / form to appear
+    DVSA_POST_NAV_SETTLE_MS=800      # small post-nav jitter (0..this, randomized)
+    DVSA_CLICK_SETTLE_MS=700         # small post-click jitter (0..this, randomized)
 """
 
 from __future__ import annotations
@@ -26,6 +37,7 @@ from __future__ import annotations
 import os
 import re
 import asyncio
+import random
 from typing import List, Optional
 
 from playwright.async_api import (
@@ -56,7 +68,6 @@ class CaptchaDetected(DVSAError):
 
 
 # ---------------- Config (override via env if needed) ----------------
-# Use DVSA application/manage entry points directly (skip the GOV.UK explainer).
 URL_CHANGE_TEST = os.environ.get("DVSA_URL_CHANGE", "https://driverpracticaltest.dvsa.gov.uk/manage")
 URL_BOOK_TEST   = os.environ.get("DVSA_URL_BOOK",   "https://driverpracticaltest.dvsa.gov.uk/application")
 
@@ -70,12 +81,15 @@ USER_AGENT = os.environ.get(
 )
 DVSA_PROXY = os.environ.get("DVSA_PROXY")  # e.g. http://user:pass@host:port
 
+READY_MAX_MS = int(os.environ.get("DVSA_READY_MAX_MS", "30000"))
+POST_NAV_SETTLE_MS = int(os.environ.get("DVSA_POST_NAV_SETTLE_MS", "800"))
+CLICK_SETTLE_MS = int(os.environ.get("DVSA_CLICK_SETTLE_MS", "700"))
+
 # Backend instrumentation config (optional)
 API_BASE = os.environ.get("API_BASE", "https://api.fastdrivingtestfinder.co.uk/api").rstrip("/")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 
 # ---------------- Robust selectors ----------------
-# All selectors live here; include generous fallbacks.
 SEL = {
     # GOV.UK landing “Start now”
     "start_now": (
@@ -114,7 +128,6 @@ SEL = {
     "error_summary": ".govuk-error-summary, [role='alert']",
 }
 
-# Label/role variants (more resilient than CSS)
 LABELS = {
     "licence": [
         "Driving licence number",
@@ -258,6 +271,60 @@ class DVSAClient:
                 await self.pw.stop()
             await self._close_http()
 
+    # ------------- Timing helpers -------------
+    async def _human_pause(self, max_ms: int):
+        """Small randomized settle to avoid machine-perfect cadence."""
+        if max_ms <= 0:
+            return
+        await asyncio.sleep(random.uniform(0.25, max_ms / 1000.0))
+
+    async def _wait_for_dvsa_ready(self) -> bool:
+        """
+        Gate interactions until DVSA has finished its initial "please wait" loading,
+        hCaptcha (if any) has mounted, and a known interactive element is visible.
+        """
+        await self._captcha_guard("ready_gate_pre")
+
+        # If DVSA shows a loading banner, wait for it to disappear
+        # Match loosely to survive copy tweaks
+        try:
+            banner = self.page.locator("text=/please\\s+wait|loading\\s+the\\s+page/i")
+            if await banner.count() > 0:
+                await banner.first.wait_for(state="detached", timeout=READY_MAX_MS)
+        except Exception:
+            pass  # continue with other readiness checks
+
+        # If hCaptcha iframe appears, give it a moment to settle
+        try:
+            await self.page.wait_for_selector('iframe[src*="hcaptcha.com"]', timeout=7000)
+            await self._human_pause(700)
+        except Exception:
+            pass
+
+        # Look for elements that signal the page is actually usable
+        candidates = [
+            'form button[type="submit"]',
+            'a[href*="start"]',
+            'input[name="booking-reference"]',
+            'input[name="email"]',
+            'input[name*="licence"], input[id*="licence"]',
+        ]
+        for sel in candidates:
+            try:
+                await self.page.wait_for_selector(sel, state="visible", timeout=READY_MAX_MS)
+                await self._human_pause(650)
+                return True
+            except Exception:
+                continue
+
+        # As a last resort: near-idle network
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=15000)
+            await self._human_pause(600)
+            return True
+        except Exception:
+            return False
+
     # ------------- Low-level helpers -------------
     async def _goto(self, url: str, marker: Optional[str] = None, stage: str = "nav"):
         self._stage = stage
@@ -266,20 +333,37 @@ class DVSAClient:
         await self._captcha_guard()
         if marker:
             await self.page.get_by_text(marker, exact=False).first.wait_for()
+        # small randomized settle after navigation
+        await self._human_pause(POST_NAV_SETTLE_MS)
+        # and ensure page is truly ready before we interact
+        await self._wait_for_dvsa_ready()
 
     async def _fill_css(self, sel: str, value: str):
         await self.page.wait_for_selector(sel)
         await self.page.fill(sel, value)
+        await self._human_pause(450)
 
     async def _click_css(self, sel: str):
         await self.page.wait_for_selector(sel)
+        # Try to avoid clicking while network is hot
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
         await self.page.click(sel)
+        await self._human_pause(CLICK_SETTLE_MS)
 
     async def _click_continue_role_fallback(self) -> bool:
         # Prefer accessible role/name to resist copy changes
         for name in ROLE_BUTTONS["continue"]:
             try:
+                # Avoid click during hot network
+                try:
+                    await self.page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
                 await self.page.get_by_role("button", name=name).click(timeout=4000)
+                await self._human_pause(CLICK_SETTLE_MS)
                 return True
             except Exception:
                 continue
@@ -293,6 +377,7 @@ class DVSAClient:
         # very last-chance: any primary govuk button
         try:
             await self.page.locator("button.govuk-button").first.click(timeout=3000)
+            await self._human_pause(CLICK_SETTLE_MS)
             return True
         except Exception:
             return False
@@ -306,6 +391,7 @@ class DVSAClient:
         for n in names:
             try:
                 await self.page.get_by_label(n, exact=False).fill(value, timeout=3500)
+                await self._human_pause(400)
                 return True
             except Exception:
                 continue
@@ -314,11 +400,13 @@ class DVSAClient:
         for ph in [n for n in names] + ["Driver number", "Licence", "Booking reference", "Reference"]:
             try:
                 await self.page.get_by_placeholder(ph, exact=False).fill(value, timeout=2500)
+                await self._human_pause(350)
                 return True
             except Exception:
                 continue
             try:
                 await self.page.locator(f"input[aria-label*='{ph}'], input[aria-labelledby*='{ph}']").first.fill(value, timeout=2500)
+                await self._human_pause(350)
                 return True
             except Exception:
                 continue
@@ -330,6 +418,7 @@ class DVSAClient:
                 await lab.wait_for(timeout=1500)
                 container = lab.locator("xpath=ancestor-or-self::*[self::label or self::div or self::fieldset][1]")
                 await container.locator("input").first.fill(value, timeout=2500)
+                await self._human_pause(350)
                 return True
             except Exception:
                 continue
@@ -341,6 +430,7 @@ class DVSAClient:
         for name in ["Accept all cookies", "Accept analytics cookies", "Accept cookies", "I agree"]:
             try:
                 await self.page.get_by_role("button", name=name).click(timeout=1500)
+                await self._human_pause(300)
                 break
             except Exception:
                 pass
@@ -391,6 +481,8 @@ class DVSAClient:
                     await self.page.get_by_role("link", name=re.compile(name, re.I)).click(timeout=2000)
                     await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                     await self._captcha_guard("start_now")
+                    await self._human_pause(POST_NAV_SETTLE_MS)
+                    await self._wait_for_dvsa_ready()
                     return
                 except Exception:
                     pass
@@ -402,6 +494,8 @@ class DVSAClient:
                     await el.click()
                     await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                     await self._captcha_guard("start_now_css")
+                    await self._human_pause(POST_NAV_SETTLE_MS)
+                    await self._wait_for_dvsa_ready()
                     return
             except Exception:
                 pass
@@ -412,19 +506,20 @@ class DVSAClient:
                 await el.click(timeout=1500)
                 await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                 await self._captcha_guard("start_now_text")
+                await self._human_pause(POST_NAV_SETTLE_MS)
+                await self._wait_for_dvsa_ready()
             except Exception:
                 pass
         except Exception:
             pass  # never fail flow just on this
 
     async def _select_car_category_if_present(self):
-        # On /application the first page is the category picker (Car, Motorcycles, ...).
-        # If it's there, click Car. If not, we are already on licence details.
         try:
             btn = await self.page.query_selector(_sel("car_button"))
             if btn:
                 await btn.click()
                 await self._captcha_guard("category_car")
+                await self._human_pause(CLICK_SETTLE_MS)
         except PWTimeout:
             pass
         except Exception:
@@ -442,14 +537,17 @@ class DVSAClient:
             await no_radios.nth(0).check(timeout=2000)
             await asyncio.sleep(0.05)
             await no_radios.nth(1).check(timeout=2000)
+            await self._human_pause(350)
         except Exception:
             try:
                 radios = await self.page.query_selector_all("input[type='radio'][value='no'], input[type='radio'][aria-label='No']")
                 for r in radios[:2]:
                     try:
                         await r.check()
+                        await asyncio.sleep(0.05)
                     except Exception:
                         pass
+                await self._human_pause(300)
             except Exception:
                 pass
 
@@ -474,6 +572,7 @@ class DVSAClient:
         if not await self._licence_form_present():
             await asyncio.sleep(0.3)
             await self._maybe_click_start_now()
+        await self._wait_for_dvsa_ready()
 
         # Fill licence
         self._stage = "login_swap_licence"
@@ -517,6 +616,7 @@ class DVSAClient:
         if not await self._licence_form_present():
             await asyncio.sleep(0.3)
             await self._maybe_click_start_now()
+        await self._wait_for_dvsa_ready()
 
         # Category (if present)
         await self._select_car_category_if_present()
@@ -567,12 +667,15 @@ class DVSAClient:
         for name in ["Test centre availability", "Change test centre", "Find a test centre", "Change location"]:
             try:
                 await self.page.get_by_role("link", name=name).click(timeout=2000)
+                await self._human_pause(CLICK_SETTLE_MS)
                 break
             except Exception:
                 pass
 
         await self.page.wait_for_selector(_sel("centre_search_box"))
+        await self._wait_for_dvsa_ready()
         await self.page.fill(_sel("centre_search_box"), centre_name)
+        await self._human_pause(450)
 
         # Use suggestions if present; else submit
         try:
@@ -589,10 +692,13 @@ class DVSAClient:
                 chosen = suggestions[0]
             if chosen:
                 await chosen.click()
+                await self._human_pause(CLICK_SETTLE_MS)
             else:
                 await self.page.keyboard.press("Enter")
+                await self._human_pause(CLICK_SETTLE_MS)
         except PWTimeout:
             await self.page.keyboard.press("Enter")
+            await self._human_pause(CLICK_SETTLE_MS)
 
         # If there is an explicit Search/Continue button, click it
         await self._click_continue_role_fallback()
@@ -632,7 +738,7 @@ class DVSAClient:
                         continue
                     try:
                         await d.click()
-                        await asyncio.sleep(0.25)  # small settle
+                        await self._human_pause(CLICK_SETTLE_MS)
                     except PWTimeout:
                         continue
                     time_nodes = await self.page.query_selector_all(_sel("centre_times"))
@@ -643,7 +749,7 @@ class DVSAClient:
                             if ttxt.lower() == "view":
                                 try:
                                     await t.click()
-                                    await asyncio.sleep(0.25)
+                                    await self._human_pause(CLICK_SETTLE_MS)
                                     time_nodes2 = await self.page.query_selector_all(_sel("centre_times"))
                                     for tt in time_nodes2:
                                         vtxt = (await tt.text_content() or "").strip()
@@ -678,6 +784,7 @@ class DVSAClient:
         Emits 'booked:' or 'booking_failed:' status when sid is attached.
         """
         await self._captcha_guard("pre_swap_confirm")
+        await self._wait_for_dvsa_ready()
 
         # Parse parts
         m = re.match(r"^(.*?) · (.*?) · (\d{1,2}:\d{2})$", slot_label)
@@ -698,6 +805,7 @@ class DVSAClient:
                     dtxt = (await d.text_content() or "").strip()
                     if date_txt in dtxt:
                         await d.click()
+                        await self._human_pause(CLICK_SETTLE_MS)
                         break
             except PWTimeout:
                 pass
@@ -710,10 +818,12 @@ class DVSAClient:
                 ttxt = (await t.text_content() or "").strip()
                 if time_txt and ttxt.startswith(time_txt):
                     await t.click()
+                    await self._human_pause(CLICK_SETTLE_MS)
                     clicked = True
                     break
                 if not time_txt and slot_label in ttxt:
                     await t.click()
+                    await self._human_pause(CLICK_SETTLE_MS)
                     clicked = True
                     break
             if not clicked:
@@ -741,6 +851,5 @@ async def polite_sleep(base_seconds: float = 75.0, jitter: float = 0.25):
     Sleep for base_seconds ± (base_seconds * jitter), min 5s.
     Use between DVSA polls per job to keep requests friendly.
     """
-    import random
     j = base_seconds * (1 + random.uniform(-jitter, jitter))
     await asyncio.sleep(max(5.0, j))
