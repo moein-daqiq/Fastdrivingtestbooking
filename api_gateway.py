@@ -996,3 +996,68 @@ def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+# ---------- WORKER RESUME (Signed) ----------
+def _hmac_b64url(data: str, secret: str) -> str:
+    import hmac, hashlib, base64
+    mac = hmac.new(secret.encode("utf-8"), data.encode("utf-8"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).decode("ascii").rstrip("=")
+
+def _verify_resume_sig(sid: int, ident: str, sig: str) -> bool:
+    if not WORKER_TOKEN:
+        # If no token is set, accept nothing (safer than accepting everything)
+        return False
+    expected = _hmac_b64url(f"{sid}|{ident}", WORKER_TOKEN)
+    # constant-time-ish compare
+    import hmac as _hmac
+    return _hmac.compare_digest(expected, (sig or ""))
+
+@app.get("/api/worker/resume")
+def worker_resume(
+    sid: int,
+    ident: str,
+    sig: str,
+):
+    """
+    One-tap 'resume now' link target.
+    Example (from worker WhatsApp):
+      RESUME_URL?sid=123&ident=<licence_or_ref>&sig=<hmac>
+
+    Effect:
+      - Validates signature with WORKER_TOKEN
+      - Sets last_event='resume_now'
+      - Sets status='queued', queued_at=now, updated_at=now
+      - Clears expires_at so it can be processed
+    """
+    if not _verify_resume_sig(sid, ident, sig):
+        raise HTTPException(status_code=401, detail="Bad signature")
+
+    conn = get_conn()
+    cur = conn.cursor()
+    now = now_iso()
+
+    # Ensure the search exists
+    cur.execute("SELECT id, paid, status FROM searches WHERE id=?", (sid,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="search not found")
+
+    # Only re-queue if it's not already booked/failed/disabled/expired
+    if row["status"] in ("booked", "failed", "disabled", "expired"):
+        conn.close()
+        return {"ok": False, "id": sid, "status": row["status"], "message": "cannot resume in final state"}
+
+    # Stamp resume + requeue
+    cur.execute("""
+        UPDATE searches
+           SET last_event='resume_now',
+               status='queued',
+               updated_at=?,
+               queued_at=?,
+               expires_at=NULL
+         WHERE id=?
+    """, (now, now, sid))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": sid, "status": "queued", "event": "resume_now"}
