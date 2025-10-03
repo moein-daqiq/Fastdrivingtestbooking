@@ -6,6 +6,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 
+from zoneinfo import ZoneInfo  # <-- NEW for Europe/London conversion
+
 import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,7 +28,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.6.1")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.6.2")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -208,12 +210,12 @@ def require_admin(request: Request):
         return
     auth = request.headers.get("authorization") or ""
     if not auth.lower().startswith("basic "):
-        raise HTTPException(status_code=401, detail="Auth required", headers={"WWW-Authenticate": "Basic"})
+        raise HTTPException(status_code=401, detail="Auth required")
     import base64
     try:
         decoded = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
     except Exception:
-        raise HTTPException(status_code=401, detail="Bad auth", headers={"WWW-Authenticate": "Basic"})
+        raise HTTPException(status_code=401, detail="Bad auth")
     user, _, pwd = decoded.partition(":")
     if user != ADMIN_USER or pwd != ADMIN_PASS:
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -317,7 +319,7 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.6.1"}
+    return {"ok": True, "ts": now_iso(), "version": "1.6.2"}
 
 # ---------- CONTROLS (Admin + Worker) ----------
 def _get_controls(conn: sqlite3.Connection) -> dict:
@@ -784,20 +786,22 @@ def _fmt_booking_ref(row: sqlite3.Row) -> str:
         return f"{ref or '—'} <span title='Missing or not 8 digits'>⚠</span>"
     return ref or ""
 
-# FORMAT a stored ISO timestamp into "HH:MM:SS<br>DD/MM/YYYY"
+# FORMAT a stored ISO timestamp into "HH:MM:SS<br>DD/MM/YYYY" in Europe/London
 def _fmt_ts(val: Optional[str]) -> str:
     if not val:
         return ""
     s = str(val)
     try:
+        # Accept both "...Z" and "+00:00" and even naive strings (assume UTC)
+        if s.endswith("Z"):
+            s = s.replace("Z", "+00:00")
         dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(ZoneInfo("Europe/London"))
+        return dt.strftime("%H:%M:%S<br>%d/%m/%Y")
     except Exception:
-        try:
-            # tolerate 'Z'
-            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        except Exception:
-            return html.escape(s)
-    return dt.strftime("%H:%M:%S<br>%d/%m/%Y")
+        return html.escape(str(val))
 
 # NEW: pause/resume helpers and endpoints
 def _pause_ids(conn: sqlite3.Connection, ids: List[int]) -> int:
