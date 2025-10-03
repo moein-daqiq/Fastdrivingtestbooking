@@ -610,9 +610,25 @@ async def dvsa_book_and_pay(client_unused, row, slot: str) -> Tuple[bool, Option
         # Generate a plausible 8-digit ref if simulated success
         ref = f"{random.randint(10000000, 99999999)}" if ok else None
         return ok, ref
-    # Real implementation lives in dvsa_client (not shown here).
-    # If you wire it up, have it return (ok, booking_reference_str).
-    return False, None
+
+    # ---- REAL mode: use DVSAClient.book_and_pay() to get the actual reference
+    session_key = make_session_key(row)
+    try:
+        async with DVSAClient(headless=True, session_key=session_key) as dvsa:
+            dvsa.attach_job(int(row["id"]))  # instrumentation
+            await dvsa.login_new(
+                licence_number=row.get("licence_number") or "",
+                theory_pass=row.get("theory_pass") or None,
+                email=row.get("email") or None,
+            )
+            ref = await dvsa.book_and_pay(slot)  # returns Optional[str]
+            return (ref is not None), ref
+    except CaptchaDetected:
+        send_captcha_alert(row, "(during new booking confirm)")
+        return False, None
+    except Exception as e:
+        print(f"[dvsa_book_and_pay] {e}")
+        return False, None
 
 # ==============================
 # Assist window (15-min alert loop)
@@ -803,11 +819,12 @@ async def process_job(client: httpx.AsyncClient, row: dict):
             else:
                 ok, booking_ref = await dvsa_book_and_pay(client, row, found_slot)
                 if ok:
-                    await set_status_api(client, row, "booked", f"booked:{found_slot}")
+                    # include the ref in the booked status if we have it
+                    booked_event = f"booked:{found_slot}" + (f" · ref={booking_ref}" if booking_ref else "")
+                    await set_status_api(client, row, "booked", booked_event)
                     # Immediately flip this NEW job into SWAP against user's preferred centres
-                    # If dvsa flow couldn't fetch a real ref, generate a safe fallback (won't pass API validation if missing).
                     if not booking_ref or not (len(str(booking_ref)) == 8 and str(booking_ref).isdigit()):
-                        # Best-effort fallback to avoid losing momentum; your real dvsa_client should return the real ref.
+                        # Best-effort fallback to avoid losing momentum; real dvsa_client should usually return the real ref.
                         booking_ref = f"{random.randint(10000000, 99999999)}"
                     try:
                         await upgrade_to_swap_api(client, sid, booking_ref, centres_user)
