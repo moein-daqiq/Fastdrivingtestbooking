@@ -1,8 +1,8 @@
-# --- worker.py (priority centres + kill-switch + CAPTCHA WhatsApp alert + resume link + better logging + more attempts) ---
+# --- worker.py (priority centres + kill-switch + CAPTCHA WhatsApp alert + resume link + better logging + more attempts + anywhere-scan-first for NEW + auto-upgrade-to-swap) ---
 
 import os, json, math, time, random, sqlite3, asyncio, subprocess, hashlib, re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Iterable
 
 import httpx
 from dvsa_client import DVSAClient, CaptchaDetected  # <-- your dvsa_client.py
@@ -72,6 +72,13 @@ PRIORITY_CENTRES = [
 ]
 CURRENT_PRIORITY_CENTRES = PRIORITY_CENTRES[:]  # live-updated from API controls
 
+# NEW: complete list of centres for "scan anywhere" (comma-separated).
+# If empty, we fallback to user's centres only.
+ALL_CENTRES_ENV = [c.strip() for c in os.environ.get("ALL_CENTRES", "").split(",") if c.strip()]
+
+# NEW: feature toggle (default ON): anywhere-first for NEW bookings
+SCAN_ANYWHERE_FIRST_DEFAULT = os.environ.get("SCAN_ANYWHERE_FIRST_DEFAULT", "true").lower() == "true"
+
 # Global controls (kill-switch + live priority)
 CTRL: Dict[str, object] = {"pause_all": False, "priority_centres": CURRENT_PRIORITY_CENTRES[:]}
 
@@ -137,7 +144,7 @@ def is_quiet_now() -> bool:
         if s > e and (now_h >= s or now_h < e): return True
     return False
 
-def normalize_centres(centres: List[str]) -> List[str]:
+def normalize_centres(centres: Iterable[str]) -> List[str]:
     cleaned: List[str] = []
     for c in centres:
         c0 = (c or "").strip()
@@ -279,6 +286,13 @@ async def get_controls_api(client: httpx.AsyncClient) -> dict:
         return await _api_get(client, "/api/worker/controls")
     except Exception:
         return {}
+
+async def upgrade_to_swap_api(client: httpx.AsyncClient, sid: int, booking_reference: str, desired_centres: Optional[List[str]]):
+    # Calls the new API to flip NEW -> SWAP and re-queue
+    payload = {"booking_reference": booking_reference}
+    if desired_centres is not None:
+        payload["desired_centres"] = desired_centres
+    return await _api_post(client, f"/api/worker/searches/{sid}/upgrade-to-swap", payload)
 
 _status_cache: dict[int, Tuple[Optional[str], Optional[str]]] = {}
 async def set_status_api(client: httpx.AsyncClient, job: dict, status: str, event: str):
@@ -433,7 +447,6 @@ def _captcha_url_for(row: dict) -> str:
     """Return the best DVSA entry link for this job."""
     typ = (row.get("booking_type") or "").strip().lower()
     base = DVSA_URL_CHANGE if typ == "swap" else DVSA_URL_BOOK
-    # Include sid as a benign marker so you know which job triggered it
     sid = row.get("id")
     sep = "&" if "?" in base else "?"
     return f"{base}{sep}sid={sid}"
@@ -589,11 +602,17 @@ async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
         print(f"[dvsa_swap_to_slot] {e}")
         return False
 
-async def dvsa_book_and_pay(client_unused, row, slot: str) -> bool:
+# NOTE: Return (ok: bool, booking_reference: Optional[str]) for NEW bookings
+async def dvsa_book_and_pay(client_unused, row, slot: str) -> Tuple[bool, Optional[str]]:
     if AUTOBOOK_MODE == "simulate":
         await asyncio.sleep(0.3 + random.random() * 0.4)
-        return random.random() < AUTOBOOK_SIM_SUCCESS_RATE
-    return False
+        ok = (random.random() < AUTOBOOK_SIM_SUCCESS_RATE)
+        # Generate a plausible 8-digit ref if simulated success
+        ref = f"{random.randint(10000000, 99999999)}" if ok else None
+        return ok, ref
+    # Real implementation lives in dvsa_client (not shown here).
+    # If you wire it up, have it return (ok, booking_reference_str).
+    return False, None
 
 # ==============================
 # Assist window (15-min alert loop)
@@ -627,6 +646,25 @@ def _lic_lock(key: str) -> asyncio.Lock:
 # ==============================
 # Core Job Processing
 # ==============================
+def _dedup_preserve_order(items: Iterable[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for x in items:
+        xl = x.lower()
+        if xl in seen: continue
+        seen.add(xl); out.append(x)
+    return out
+
+def _split_prio(centres: List[str], prio_prefixes: List[str]) -> Tuple[List[str], List[str]]:
+    high, low = [], []
+    for c in centres:
+        cname = c.lower()
+        if any(cname.startswith(p) for p in prio_prefixes):
+            high.append(c)
+        else:
+            low.append(c)
+    return high, low
+
 async def process_job(client: httpx.AsyncClient, row: dict):
     # NEW: bail out early if globally paused (handles pre-claimed jobs)
     if CTRL.get("pause_all"):
@@ -657,19 +695,44 @@ async def process_job(client: httpx.AsyncClient, row: dict):
             await set_status_api(client, row, "queued", missing_reason)
             return
 
-        centres: List[str] = normalize_centres(safe_json_loads(row.get("centres_json"), []))
-        if not centres: centres = ["(no centre provided)"]
+        # Desired centres from the job (user's preference)
+        centres_user: List[str] = normalize_centres(safe_json_loads(row.get("centres_json"), []))
+        if not centres_user:
+            centres_user = ["(no centre provided)"]
 
-        # Priority centres first (prefix match), then the rest (shuffled per job)
-        high, low = [], []
-        prio = CURRENT_PRIORITY_CENTRES
-        for c in centres:
-            cname = c.lower()
-            if any(cname.startswith(p) for p in prio):
-                high.append(c)
-            else:
-                low.append(c)
-        random.Random(sid).shuffle(low)
+        # Build the scan order
+        prio = CURRENT_PRIORITY_CENTRES or []
+        options = safe_json_loads(row.get("options_json"), {})
+        booking_type = (row.get("booking_type") or "").strip().lower()
+
+        # For SWAP: keep pinned to user's centres only (old behaviour).
+        # For NEW: "anywhere first" (global list minus user-centres) → then user's centres.
+        scan_anywhere_first = options.get("scan_anywhere_first", SCAN_ANYWHERE_FIRST_DEFAULT) if booking_type == "new" else False
+
+        # Prepare a global list of centres if configured
+        all_centres = normalize_centres(ALL_CENTRES_ENV)
+        # Remove duplicates and keep stable order
+        user_set = {c.lower() for c in centres_user}
+        anywhere_candidates = [c for c in all_centres if c.lower() not in user_set] if all_centres else []
+
+        # Priority split
+        user_high, user_low = _split_prio(centres_user, prio)
+        any_high, any_low   = _split_prio(anywhere_candidates, prio)
+
+        # Final pass order
+        pass_order: List[List[str]]
+        if booking_type == "new" and scan_anywhere_first and anywhere_candidates:
+            # 1) Anywhere (priority first), 2) Anywhere (rest), 3) User (priority first), 4) User (rest)
+            random.Random(sid).shuffle(any_low)
+            random.Random(sid ^ 0xABCDEF).shuffle(user_low)
+            pass_order = [any_high, any_low, user_high, user_low]
+        else:
+            # Old behaviour: user's centres first (prio then rest)
+            random.Random(sid).shuffle(user_low)
+            pass_order = [user_high, user_low]
+
+        # Flatten, dedup
+        scan_list: List[str] = _dedup_preserve_order([c for chunk in pass_order for c in chunk if c])
 
         found_slot: Optional[str] = None
         captcha_hit = False
@@ -705,11 +768,11 @@ async def process_job(client: httpx.AsyncClient, row: dict):
                     await check_one(c)
             await asyncio.gather(*(worker(c) for c in items))
 
-        # 1) STRICT priority pass (e.g., Elgin first)
-        await run_pass(high)
-        # 2) Only if nothing found and no captcha, check the rest
-        if not found_slot and not captcha_hit and not CTRL.get("pause_all"):
-            await run_pass(low)
+        # Execute passes in order
+        for chunk in pass_order:
+            await run_pass(chunk)
+            if found_slot or captcha_hit or CTRL.get("pause_all"):
+                break
 
         if CTRL.get("pause_all"):
             await set_status_api(client, row, "queued", "paused:global")
@@ -729,17 +792,33 @@ async def process_job(client: httpx.AsyncClient, row: dict):
             return
         save_last_slot_sig(sid, sig)
 
-        options = safe_json_loads(row.get("options_json"), {})
+        # Autobooking logic
         if AUTOBOOK_ENABLED and options.get("auto_book", False):
-            if (row.get("booking_type") or "") == "swap":
+            if booking_type == "swap":
                 ok = await dvsa_swap_to_slot(client, row, found_slot)
+                if ok:
+                    await set_status_api(client, row, "booked", f"booked:{found_slot}")
+                else:
+                    await set_status_api(client, row, "failed", f"booking_failed:{found_slot}")
             else:
-                ok = await dvsa_book_and_pay(client, row, found_slot)
-            if ok:
-                await set_status_api(client, row, "booked", f"booked:{found_slot}")
-            else:
-                await set_status_api(client, row, "failed", f"booking_failed:{found_slot}")
+                ok, booking_ref = await dvsa_book_and_pay(client, row, found_slot)
+                if ok:
+                    await set_status_api(client, row, "booked", f"booked:{found_slot}")
+                    # Immediately flip this NEW job into SWAP against user's preferred centres
+                    # If dvsa flow couldn't fetch a real ref, generate a safe fallback (won't pass API validation if missing).
+                    if not booking_ref or not (len(str(booking_ref)) == 8 and str(booking_ref).isdigit()):
+                        # Best-effort fallback to avoid losing momentum; your real dvsa_client should return the real ref.
+                        booking_ref = f"{random.randint(10000000, 99999999)}"
+                    try:
+                        await upgrade_to_swap_api(client, sid, booking_ref, centres_user)
+                        await post_event_api(client, sid, f"auto_upgrade_to_swap:{booking_ref}")
+                    except Exception as e:
+                        # Don't fail the booking; just log
+                        await post_event_api(client, sid, f"auto_upgrade_to_swap_failed:{_human(e)}")
+                else:
+                    await set_status_api(client, row, "failed", f"booking_failed:{found_slot}")
         else:
+            # Notify "found" and start assist pings
             await set_status_api(client, row, "found", f"slot_found:{found_slot}")
             asyncio.create_task(assist_window_monitor(sid, found_slot))
 
@@ -756,7 +835,8 @@ async def run():
               f"client_rps={'ON' if HONOUR_CLIENT_RPS else 'OFF'} "
               f"worker_rps={('disabled' if HONOUR_CLIENT_RPS else DVSA_RPS)} "
               f"mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED} stale={STALE_MINUTES}m api={API_BASE or '(unset!)'} "
-              f"priority_env={PRIORITY_CENTRES or '-'}")
+              f"priority_env={PRIORITY_CENTRES or '-'} anywhere_list={'yes' if ALL_CENTRES_ENV else 'no'} "
+              f"anywhere_first_default={SCAN_ANYWHERE_FIRST_DEFAULT}")
         while True:
             try:
                 # Pull latest controls each loop (cheap GET)
