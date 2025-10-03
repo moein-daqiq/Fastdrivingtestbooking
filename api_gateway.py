@@ -26,7 +26,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.5.0")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.6.0")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -177,6 +177,10 @@ class AdminControlsIn(BaseModel):
     pause_all: Optional[bool] = None
     priority_centres: Optional[List[str] | str] = None
 
+# NEW: admin bulk pause/resume payload
+class AdminBatchIds(BaseModel):
+    ids: List[int]
+
 # ---------- HELPERS ----------
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -313,7 +317,7 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.5.0"}
+    return {"ok": True, "ts": now_iso(), "version": "1.6.0"}
 
 # ---------- CONTROLS (Admin + Worker) ----------
 def _get_controls(conn: sqlite3.Connection) -> dict:
@@ -731,7 +735,8 @@ def _badge(s: str) -> str:
     colors = {
         "pending_payment":"#64748b","new":"#64748b","queued":"#2563eb",
         "searching":"#a855f7","found":"#10b981","booked":"#16a34a",
-        "failed":"#ef4444","expired":"#334155","disabled":"#6b7280"
+        "failed":"#ef4444","expired":"#334155","disabled":"#6b7280",
+        "paused":"#f59e0b",  # NEW
     }
     c = colors.get(s, "#334155")
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
@@ -779,6 +784,54 @@ def _fmt_booking_ref(row: sqlite3.Row) -> str:
         return f"{ref or '—'} <span title='Missing or not 8 digits'>⚠</span>"
     return ref or ""
 
+# NEW: pause/resume helpers and endpoints
+def _pause_ids(conn: sqlite3.Connection, ids: List[int]) -> int:
+    cur = conn.cursor()
+    now = now_iso()
+    n = 0
+    for sid in ids:
+        cur.execute("""
+            UPDATE searches
+               SET status='paused', last_event='admin_paused', updated_at=?
+             WHERE id=? AND status NOT IN ('booked','failed','expired','disabled')
+        """, (now, sid))
+        n += cur.rowcount
+    conn.commit()
+    return n
+
+def _resume_ids(conn: sqlite3.Connection, ids: List[int]) -> int:
+    cur = conn.cursor()
+    now = now_iso()
+    n = 0
+    for sid in ids:
+        cur.execute("""
+            UPDATE searches
+               SET status='queued',
+                   last_event='admin_resumed',
+                   queued_at=COALESCE(queued_at, ?),
+                   updated_at=?
+             WHERE id=? AND status='paused'
+        """, (now, now, sid))
+        n += cur.rowcount
+    conn.commit()
+    return n
+
+@app.post("/api/admin/searches/pause")
+def admin_pause(payload: AdminBatchIds, request: Request):
+    require_admin(request)
+    conn = get_conn()
+    count = _pause_ids(conn, list(set(int(i) for i in payload.ids)))
+    conn.close()
+    return {"ok": True, "paused": count}
+
+@app.post("/api/admin/searches/resume")
+def admin_resume(payload: AdminBatchIds, request: Request):
+    require_admin(request)
+    conn = get_conn()
+    count = _resume_ids(conn, list(set(int(i) for i in payload.ids)))
+    conn.close()
+    return {"ok": True, "resumed": count}
+
 @app.get("/api/admin", response_class=HTMLResponse)
 async def admin(request: Request, status: Optional[str] = Query(None)):
     require_admin(request)
@@ -805,7 +858,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
 
     def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
 
-    statuses = ["pending_payment","new","queued","searching","found","booked","failed","expired","disabled"]
+    statuses = ["pending_payment","new","queued","searching","found","booked","failed","expired","disabled","paused"]
     pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
 
     rows_html = []
@@ -818,10 +871,19 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
         reached_html = "✅" if reached else "—"
         captcha_html = "🚧" if captcha else "—"
 
+        # per-row checkbox + action button
+        checkbox = f"<input type='checkbox' class='sel' value='{r['id']}' />"
+        if r["status"] == "paused":
+            action_btn = f"<button class='mini' onclick='resumeOne({r['id']})'>Resume</button>"
+        else:
+            action_btn = f"<button class='warn mini' onclick='pauseOne({r['id']})'>Pause</button>"
+
         rows_html.append(
             "<tr>"
+            + td(checkbox)
             + td(r["id"])
             + td(_badge(r["status"]))
+            + td(action_btn)
             + td(r["booking_type"] or "")
             + td(r["licence_number"] or "")
             + td(_fmt_booking_ref(r))
@@ -842,7 +904,6 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             + "</tr>"
         )
 
-    # admin page
     html_doc = f"""
     <html>
     <head>
@@ -862,8 +923,13 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
         input[type=text]{{padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px}}
         button{{padding:6px 10px;border:none;border-radius:8px;background:#2563eb;color:#fff;cursor:pointer}}
         button.grey{{background:#64748b}}
+        button.warn{{background:#f59e0b}}
+        .mini{{font-size:12px;padding:4px 8px}}
       </style>
       <script>
+        function idsSelected() {{
+          return Array.from(document.querySelectorAll('.sel:checked')).map(x => parseInt(x.value));
+        }}
         async function setPause(p) {{
           await fetch('/api/admin/controls', {{
             method:'POST', headers:{{'Content-Type':'application/json'}},
@@ -876,6 +942,41 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
           await fetch('/api/admin/controls', {{
             method:'POST', headers:{{'Content-Type':'application/json'}},
             body: JSON.stringify({{priority_centres: txt}})
+          }});
+          location.reload();
+        }}
+        function toggleAll(ck) {{
+          document.querySelectorAll('.sel').forEach(x => x.checked = ck.checked);
+        }}
+        async function bulkPause() {{
+          const ids = idsSelected();
+          if (!ids.length) return alert('Select at least one row');
+          await fetch('/api/admin/searches/pause', {{
+            method:'POST', headers:{{'Content-Type':'application/json'}},
+            body: JSON.stringify({{ids}})
+          }});
+          location.reload();
+        }}
+        async function bulkResume() {{
+          const ids = idsSelected();
+          if (!ids.length) return alert('Select at least one row');
+          await fetch('/api/admin/searches/resume', {{
+            method:'POST', headers:{{'Content-Type':'application/json'}},
+            body: JSON.stringify({{ids}})
+          }});
+          location.reload();
+        }}
+        async function pauseOne(id) {{
+          await fetch('/api/admin/searches/pause', {{
+            method:'POST', headers:{{'Content-Type':'application/json'}},
+            body: JSON.stringify({{ids:[id]}})
+          }});
+          location.reload();
+        }}
+        async function resumeOne(id) {{
+          await fetch('/api/admin/searches/resume', {{
+            method:'POST', headers:{{'Content-Type':'application/json'}},
+            body: JSON.stringify({{ids:[id]}})
           }});
           location.reload();
         }}
@@ -898,6 +999,12 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             <button class="grey" onclick="savePrio()">Save</button>
           </div>
           <div class="pill">{pills}<a href="/api/admin" style="margin-left:8px">Clear</a></div>
+          <div style="flex:1"></div>
+          <div>
+            <input type="checkbox" onclick="toggleAll(this)" title="Select all" /> Select
+            <button class="warn mini" onclick="bulkPause()">Pause selected</button>
+            <button class="mini" onclick="bulkResume()">Resume selected</button>
+          </div>
         </div>
 
         <div class="counts">
@@ -907,7 +1014,8 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
         <table>
           <thead>
             <tr>
-              <th>ID</th><th>Status</th><th>Type</th><th>Licence</th><th>Booking Ref</th><th>Theory</th>
+              <th></th><th>ID</th><th>Status</th><th>Actions</th>
+              <th>Type</th><th>Licence</th><th>Booking Ref</th><th>Theory</th>
               <th>Date/Time Window</th><th>Phone</th><th>Email</th><th>Centres</th><th>Options</th>
               <th>Last Event</th><th>Paid</th><th>PI</th>
               <th>Reached?</th><th>Last centre</th><th>Captcha?</th>
@@ -948,6 +1056,7 @@ def worker_claim(body: WorkerClaimRequest, _: bool = Depends(_verify_worker)):
     cur.execute("""
         SELECT * FROM searches
          WHERE paid=1
+           AND status NOT IN ('paused','disabled','failed','expired','booked')
            AND (
                  status IN ('queued','new')
                  OR (status='searching' AND (updated_at IS NULL OR updated_at < ?))
@@ -963,6 +1072,7 @@ def worker_claim(body: WorkerClaimRequest, _: bool = Depends(_verify_worker)):
             UPDATE searches
                SET status='searching', last_event='worker_claimed', updated_at=?
              WHERE id=? AND paid=1
+               AND status NOT IN ('paused','disabled','failed','expired','booked')
                AND (
                      status IN ('queued','new')
                      OR (status='searching' AND (updated_at IS NULL OR updated_at < ?))
@@ -1008,7 +1118,6 @@ def _verify_resume_sig(sid: int, ident: str, sig: str) -> bool:
         # If no token is set, accept nothing (safer than accepting everything)
         return False
     expected = _hmac_b64url(f"{sid}|{ident}", WORKER_TOKEN)
-    # constant-time-ish compare
     import hmac as _hmac
     return _hmac.compare_digest(expected, (sig or ""))
 
@@ -1020,9 +1129,6 @@ def worker_resume(
 ):
     """
     One-tap 'resume now' link target.
-    Example (from worker WhatsApp):
-      RESUME_URL?sid=123&ident=<licence_or_ref>&sig=<hmac>
-
     Effect:
       - Validates signature with WORKER_TOKEN
       - Sets last_event='resume_now'
@@ -1036,19 +1142,16 @@ def worker_resume(
     cur = conn.cursor()
     now = now_iso()
 
-    # Ensure the search exists
     cur.execute("SELECT id, paid, status FROM searches WHERE id=?", (sid,))
     row = cur.fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="search not found")
 
-    # Only re-queue if it's not already booked/failed/disabled/expired
     if row["status"] in ("booked", "failed", "disabled", "expired"):
         conn.close()
         return {"ok": False, "id": sid, "status": row["status"], "message": "cannot resume in final state"}
 
-    # Stamp resume + requeue
     cur.execute("""
         UPDATE searches
            SET last_event='resume_now',
