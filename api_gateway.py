@@ -26,7 +26,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.6.0")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.6.1")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -216,7 +216,7 @@ def require_admin(request: Request):
         raise HTTPException(status_code=401, detail="Bad auth", headers={"WWW-Authenticate": "Basic"})
     user, _, pwd = decoded.partition(":")
     if user != ADMIN_USER or pwd != ADMIN_PASS:
-        raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Basic"})
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
 def _verify_worker(authorization: str | None = Header(default=None)):
     if not WORKER_TOKEN:
@@ -317,7 +317,7 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.6.0"}
+    return {"ok": True, "ts": now_iso(), "version": "1.6.1"}
 
 # ---------- CONTROLS (Admin + Worker) ----------
 def _get_controls(conn: sqlite3.Connection) -> dict:
@@ -784,6 +784,21 @@ def _fmt_booking_ref(row: sqlite3.Row) -> str:
         return f"{ref or '—'} <span title='Missing or not 8 digits'>⚠</span>"
     return ref or ""
 
+# FORMAT a stored ISO timestamp into "HH:MM:SS<br>DD/MM/YYYY"
+def _fmt_ts(val: Optional[str]) -> str:
+    if not val:
+        return ""
+    s = str(val)
+    try:
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        try:
+            # tolerate 'Z'
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return html.escape(s)
+    return dt.strftime("%H:%M:%S<br>%d/%m/%Y")
+
 # NEW: pause/resume helpers and endpoints
 def _pause_ids(conn: sqlite3.Connection, ids: List[int]) -> int:
     cur = conn.cursor()
@@ -899,8 +914,8 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             + td(reached_html)
             + td(last_centre or "—")
             + td(captcha_html)
-            + td(r["created_at"] or "")
-            + td(r["updated_at"] or "")
+            + td(_fmt_ts(r["created_at"]))
+            + td(_fmt_ts(r["updated_at"]))
             + "</tr>"
         )
 
