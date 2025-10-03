@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 
-from zoneinfo import ZoneInfo  # <-- NEW for Europe/London conversion
+from zoneinfo import ZoneInfo  # for Europe/London conversion
 
 import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -28,7 +28,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.6.2")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.7.0")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -179,9 +179,14 @@ class AdminControlsIn(BaseModel):
     pause_all: Optional[bool] = None
     priority_centres: Optional[List[str] | str] = None
 
-# NEW: admin bulk pause/resume payload
+# admin bulk pause/resume payload
 class AdminBatchIds(BaseModel):
     ids: List[int]
+
+# NEW: worker upgrade NEW -> SWAP payload
+class UpgradeToSwapIn(BaseModel):
+    booking_reference: str
+    desired_centres: Optional[List[str]] = None  # keep existing if None
 
 # ---------- HELPERS ----------
 def utcnow() -> datetime:
@@ -319,7 +324,7 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.6.2"}
+    return {"ok": True, "ts": now_iso(), "version": "1.7.0"}
 
 # ---------- CONTROLS (Admin + Worker) ----------
 def _get_controls(conn: sqlite3.Connection) -> dict:
@@ -738,7 +743,7 @@ def _badge(s: str) -> str:
         "pending_payment":"#64748b","new":"#64748b","queued":"#2563eb",
         "searching":"#a855f7","found":"#10b981","booked":"#16a34a",
         "failed":"#ef4444","expired":"#334155","disabled":"#6b7280",
-        "paused":"#f59e0b",  # NEW
+        "paused":"#f59e0b",
     }
     c = colors.get(s, "#334155")
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
@@ -786,7 +791,7 @@ def _fmt_booking_ref(row: sqlite3.Row) -> str:
         return f"{ref or '—'} <span title='Missing or not 8 digits'>⚠</span>"
     return ref or ""
 
-# FORMAT a stored ISO timestamp into "HH:MM:SS<br>DD/MM/YYYY" in Europe/London
+# FORMAT a stored ISO timestamp into "HH:MM:SS<br>%d/%m/%Y" in Europe/London
 def _fmt_ts(val: Optional[str]) -> str:
     if not val:
         return ""
@@ -803,7 +808,7 @@ def _fmt_ts(val: Optional[str]) -> str:
     except Exception:
         return html.escape(str(val))
 
-# NEW: pause/resume helpers and endpoints
+# pause/resume helpers and endpoints
 def _pause_ids(conn: sqlite3.Connection, ids: List[int]) -> int:
     cur = conn.cursor()
     now = now_iso()
@@ -1125,6 +1130,49 @@ def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+# ---------- WORKER: upgrade NEW -> SWAP (after an 'anywhere' booking) ----------
+@app.post("/api/worker/searches/{sid}/upgrade-to-swap")
+def worker_upgrade_to_swap(sid: int, body: UpgradeToSwapIn, _: bool = Depends(_verify_worker)):
+    """
+    Convert a NEW booking into a SWAP job after we've secured a slot anywhere.
+    - booking_type -> 'swap'
+    - booking_reference -> provided by worker
+    - centres_json -> keep existing (user's preferred) unless desired_centres provided
+    - status -> 'queued' (so worker immediately starts swap passes)
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, status, booking_type, centres_json FROM searches WHERE id=?", (sid,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="search not found")
+
+    if row["status"] in ("failed", "expired", "disabled"):
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"cannot upgrade from state {row['status']}")
+
+    centres_json = row["centres_json"] or "[]"
+    if body.desired_centres is not None:
+        centres_json = json_dumps([s.strip() for s in body.desired_centres if str(s).strip()])
+
+    now = now_iso()
+    cur.execute("""
+        UPDATE searches
+           SET booking_type='swap',
+               booking_reference=?,
+               last_event='auto_swap_started',
+               status='queued',
+               updated_at=?,
+               queued_at=COALESCE(queued_at, ?),
+               centres_json=?
+         WHERE id=?
+    """, (body.booking_reference, now, now, centres_json, sid))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": sid, "status": "queued", "booking_type": "swap"}
 
 # ---------- WORKER RESUME (Signed) ----------
 def _hmac_b64url(data: str, secret: str) -> str:
