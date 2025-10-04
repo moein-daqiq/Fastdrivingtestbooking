@@ -41,6 +41,8 @@ ASSIST_NOTIFY_PING_SECONDS = int(os.environ.get("ASSIST_NOTIFY_PING_SECONDS", "6
 ASSIST_NOTIFY_ENABLED = os.environ.get("ASSIST_NOTIFY_ENABLED", "true").lower() == "true"
 
 AUTOBOOK_ENABLED = os.environ.get("AUTOBOOK_ENABLED", "true").lower() == "true"
+# NEW: default behaviour when options_json is empty/missing
+AUTOBOOK_DEFAULT = os.environ.get("AUTOBOOK_DEFAULT", "true").lower() == "true"
 AUTOBOOK_MODE = os.environ.get("AUTOBOOK_MODE", "simulate")  # simulate | real
 AUTOBOOK_SIM_SUCCESS_RATE = float(os.environ.get("AUTOBOOK_SIM_SUCCESS_RATE", "0.85"))
 
@@ -808,8 +810,10 @@ async def process_job(client: httpx.AsyncClient, row: dict):
             return
         save_last_slot_sig(sid, sig)
 
-        # Autobooking logic
-        if AUTOBOOK_ENABLED and options.get("auto_book", False):
+        # -------- Autobooking logic (with default fallback) --------
+        auto_book = options.get("auto_book", AUTOBOOK_DEFAULT)
+
+        if AUTOBOOK_ENABLED and auto_book:
             if booking_type == "swap":
                 ok = await dvsa_swap_to_slot(client, row, found_slot)
                 if ok:
@@ -851,7 +855,8 @@ async def run():
         print(f"[worker] up state_db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=off "
               f"client_rps={'ON' if HONOUR_CLIENT_RPS else 'OFF'} "
               f"worker_rps={('disabled' if HONOUR_CLIENT_RPS else DVSA_RPS)} "
-              f"mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED} stale={STALE_MINUTES}m api={API_BASE or '(unset!)'} "
+              f"mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED} autobook_default={AUTOBOOK_DEFAULT} "
+              f"stale={STALE_MINUTES}m api={API_BASE or '(unset!)'} "
               f"priority_env={PRIORITY_CENTRES or '-'} anywhere_list={'yes' if ALL_CENTRES_ENV else 'no'} "
               f"anywhere_first_default={SCAN_ANYWHERE_FIRST_DEFAULT}")
         while True:
