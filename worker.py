@@ -1,11 +1,11 @@
-# --- worker.py (priority centres + kill-switch + CAPTCHA WhatsApp alert + resume link + better logging + more attempts + anywhere-scan-first for NEW + auto-upgrade-to-swap) ---
+# --- worker.py (priority centres + kill-switch + CAPTCHA/IP-block WhatsApp alerts + resume link + better logging + more attempts + anywhere-scan-first for NEW + auto-upgrade-to-swap) ---
 
 import os, json, math, time, random, sqlite3, asyncio, subprocess, hashlib, re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional, Iterable
 
 import httpx
-from dvsa_client import DVSAClient, CaptchaDetected  # <-- your dvsa_client.py
+from dvsa_client import DVSAClient, CaptchaDetected, IPBlocked  # <-- import IPBlocked
 
 import hmac
 import base64
@@ -41,24 +41,24 @@ ASSIST_NOTIFY_PING_SECONDS = int(os.environ.get("ASSIST_NOTIFY_PING_SECONDS", "6
 ASSIST_NOTIFY_ENABLED = os.environ.get("ASSIST_NOTIFY_ENABLED", "true").lower() == "true"
 
 AUTOBOOK_ENABLED = os.environ.get("AUTOBOOK_ENABLED", "true").lower() == "true"
-# NEW: default behaviour when options_json is empty/missing
+# Default behaviour when options_json is empty/missing/non-dict
 AUTOBOOK_DEFAULT = os.environ.get("AUTOBOOK_DEFAULT", "true").lower() == "true"
 AUTOBOOK_MODE = os.environ.get("AUTOBOOK_MODE", "simulate")  # simulate | real
 AUTOBOOK_SIM_SUCCESS_RATE = float(os.environ.get("AUTOBOOK_SIM_SUCCESS_RATE", "0.85"))
 
 # IMPORTANT:
-# Let dvsa_client.py enforce the per-request DVSA_RPS (default there is 0.5) to avoid *double throttling*.
-# If you want to keep THIS worker's token-bucket instead, set HONOUR_CLIENT_RPS=false.
 HONOUR_CLIENT_RPS = os.environ.get("HONOUR_CLIENT_RPS", "true").lower() == "true"
-
 DVSA_RPS = float(os.environ.get("DVSA_RPS", "4.0"))  # only used if HONOUR_CLIENT_RPS=false
+
 CB_FAILS_THRESHOLD = int(os.environ.get("CB_FAILS_THRESHOLD", "12"))
 CB_COOLDOWN_SEC = int(os.environ.get("CB_COOLDOWN_SEC", "120"))
 
 CAPTCHA_COOLDOWN_MIN = int(os.environ.get("CAPTCHA_COOLDOWN_MIN", "30"))
+IPBLOCK_COOLDOWN_MIN = int(os.environ.get("IPBLOCK_COOLDOWN_MIN", "90"))  # NEW
+
 QUIET_HOURS = os.environ.get("QUIET_HOURS", "").strip()
 
-# DVSA entry points (overrideable from env, used in CAPTCHA alerts)
+# DVSA entry points (overrideable from env, used in alerts)
 DVSA_URL_CHANGE = os.environ.get("DVSA_URL_CHANGE", "https://driverpracticaltest.dvsa.gov.uk/manage")
 DVSA_URL_BOOK   = os.environ.get("DVSA_URL_BOOK",   "https://driverpracticaltest.dvsa.gov.uk/application")
 
@@ -74,11 +74,10 @@ PRIORITY_CENTRES = [
 ]
 CURRENT_PRIORITY_CENTRES = PRIORITY_CENTRES[:]  # live-updated from API controls
 
-# NEW: complete list of centres for "scan anywhere" (comma-separated).
-# If empty, we fallback to user's centres only.
+# Complete list of centres for "scan anywhere"
 ALL_CENTRES_ENV = [c.strip() for c in os.environ.get("ALL_CENTRES", "").split(",") if c.strip()]
 
-# NEW: feature toggle (default ON): anywhere-first for NEW bookings
+# Anywhere-first for NEW bookings by default
 SCAN_ANYWHERE_FIRST_DEFAULT = os.environ.get("SCAN_ANYWHERE_FIRST_DEFAULT", "true").lower() == "true"
 
 # Global controls (kill-switch + live priority)
@@ -122,7 +121,8 @@ def now_iso() -> str:
 
 def safe_json_loads(s: Optional[str], default):
     try:
-        return json.loads(s) if s else default
+        v = json.loads(s) if s not in (None, "", "null", "None") else default
+        return v if isinstance(v, type(default)) else default  # <-- ensure correct type (dict/list)
     except Exception:
         return default
 
@@ -290,7 +290,6 @@ async def get_controls_api(client: httpx.AsyncClient) -> dict:
         return {}
 
 async def upgrade_to_swap_api(client: httpx.AsyncClient, sid: int, booking_reference: str, desired_centres: Optional[List[str]]):
-    # Calls the new API to flip NEW -> SWAP and re-queue
     payload = {"booking_reference": booking_reference}
     if desired_centres is not None:
         payload["desired_centres"] = desired_centres
@@ -367,7 +366,6 @@ class _NoopBucket:
     async def acquire(self):
         return
 
-# Only use the worker bucket when HONOUR_CLIENT_RPS is False
 bucket_dvsa = TokenBucket(DVSA_RPS, DVSA_RPS) if not HONOUR_CLIENT_RPS else _NoopBucket()
 
 def centre_fail(centre: str):
@@ -428,7 +426,6 @@ def global_allowed() -> bool:
 # Session identity helpers
 # ==============================
 def session_base(row: dict) -> str:
-    # new -> licence, swap -> booking reference
     if (row.get("booking_type") or "").strip() == "swap":
         return (row.get("booking_reference") or f"job{row['id']}").strip()
     return (row.get("licence_number") or f"job{row['id']}").strip()
@@ -441,12 +438,12 @@ def make_session_key(row: dict, centre: Optional[str] = None) -> str:
     return f"{trunk}-{h}"
 
 # ==============================
-# CAPTCHA alert helper (WhatsApp with DVSA link) + debounce + resume link
+# CAPTCHA & IPBLOCK alert helpers
 # ==============================
-CAPTCHA_ALERT_SENT: Dict[str, float] = {}  # key = session_base(row); value=epoch seconds
+CAPTCHA_ALERT_SENT: Dict[str, float] = {}  # key = session_base(row)
+IPBLOCK_ALERT_SENT: Dict[str, float]  = {}
 
 def _captcha_url_for(row: dict) -> str:
-    """Return the best DVSA entry link for this job."""
     typ = (row.get("booking_type") or "").strip().lower()
     base = DVSA_URL_CHANGE if typ == "swap" else DVSA_URL_BOOK
     sid = row.get("id")
@@ -454,14 +451,12 @@ def _captcha_url_for(row: dict) -> str:
     return f"{base}{sep}sid={sid}"
 
 def _sign(s: str) -> str:
-    """HMAC-SHA256 signature using WORKER_TOKEN (base64url, no padding)."""
     if not WORKER_TOKEN:
         return ""
     mac = hmac.new(WORKER_TOKEN.encode("utf-8"), s.encode("utf-8"), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(mac).decode("ascii").rstrip("=")
 
 def _resume_link_for(row: dict) -> Optional[str]:
-    """Create a signed 'resume this job' link for your backend, or None if RESUME_URL empty."""
     if not RESUME_URL:
         return None
     sid = int(row.get("id"))
@@ -471,11 +466,9 @@ def _resume_link_for(row: dict) -> Optional[str]:
     return f"{RESUME_URL}?{urlencode(q)}"
 
 def send_captcha_alert(row: dict, centre: str):
-    """Send a single WhatsApp alert (debounced 10m per identity) with the DVSA link + optional Resume link."""
     ident = session_base(row)
     now = time.time()
-    last = CAPTCHA_ALERT_SENT.get(ident, 0.0)
-    if now - last < 600:  # 10 minutes debounce
+    if now - CAPTCHA_ALERT_SENT.get(ident, 0.0) < 600:
         return
     CAPTCHA_ALERT_SENT[ident] = now
 
@@ -483,9 +476,7 @@ def send_captcha_alert(row: dict, centre: str):
     resume = _resume_link_for(row)
     sid = row.get("id")
     typ = (row.get("booking_type") or "").strip().lower() or "new"
-
     extra = f"\nResume this job now:\n{resume}\n" if resume else ""
-
     msg = (
         "🧩 FASTDTF: CAPTCHA required\n"
         f"Search #{sid} ({typ})\n"
@@ -493,26 +484,41 @@ def send_captcha_alert(row: dict, centre: str):
         f"Open DVSA and complete the CAPTCHA:\n{url}\n\n"
         f"After you pass the CAPTCHA, tap resume so I try again immediately."
         f"{extra}"
-        f"(Also cooling for ~{CAPTCHA_COOLDOWN_MIN}m to be safe.)"
+        f"(Cooling for ~{CAPTCHA_COOLDOWN_MIN}m to be safe.)"
     )
     wa_owner(msg)
+
+def send_ipblock_alert(row: dict, where: str):
+    ident = session_base(row)
+    now = time.time()
+    if now - IPBLOCK_ALERT_SENT.get(ident, 0.0) < 900:
+        return
+    IPBLOCK_ALERT_SENT[ident] = now
+    url = _captcha_url_for(row)
+    resume = _resume_link_for(row)
+    sid = row.get("id")
+    typ = (row.get("booking_type") or "").strip().lower() or "new"
+    extra = f"\nResume this job later:\n{resume}\n" if resume else ""
+    wa_owner(
+        "🛑 FASTDTF: Access blocked by DVSA/WAF\n"
+        f"Search #{sid} ({typ})\n"
+        f"Stage/Centre: {where}\n\n"
+        f"I’ll cool down globally for ~{IPBLOCK_COOLDOWN_MIN}m.\n"
+        f"You can still open DVSA manually if needed:\n{url}"
+        f"{extra}"
+    )
 
 # ==============================
 # DVSA integration
 # ==============================
 async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -> List[str]:
-    # Optional resume override: treat admin_resumed like resume_now
     _, last_event = get_status_tuple_from_cache(row["id"])
     resume_override = (last_event in ("resume_now", "admin_resumed"))
 
-    # NEW: obey global pause before doing anything
     if CTRL.get("pause_all"):
-        try:
-            await post_event_api(client_httpx, row["id"], "paused:global")
-        except Exception:
-            pass
-        await asyncio.sleep(0.05)
-        return []
+        try: await post_event_api(client_httpx, row["id"], "paused:global")
+        except Exception: pass
+        await asyncio.sleep(0.05); return []
 
     if not resume_override and not global_allowed():
         await post_event_api(client_httpx, row["id"], f"cooldown_skip:*global*")
@@ -521,25 +527,20 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
         await post_event_api(client_httpx, row["id"], f"cooldown_skip:{centre}")
         await asyncio.sleep(0.05); return []
 
-    # Worker-side throttle (NOOP if HONOUR_CLIENT_RPS=true)
     await bucket_dvsa.acquire()
     await asyncio.sleep(random.randint(0, JITTER_MS) / 1000.0)
 
-    # Double-check pause just before network activity
     if CTRL.get("pause_all"):
-        try:
-            await post_event_api(client_httpx, row["id"], "paused:global")
-        except Exception:
-            pass
+        try: await post_event_api(client_httpx, row["id"], "paused:global")
+        except Exception: pass
         return []
 
     session_key = make_session_key(row, centre)
-    attempts = 5  # a bit more persistent
+    attempts = 5
 
     for attempt in range(1, attempts + 1):
         try:
             async with DVSAClient(headless=True, session_key=session_key) as dvsa:
-                # IMPORTANT: attach sid so dvsa_client can post events/status to API
                 dvsa.attach_job(int(row["id"]))
 
                 await post_event_api(client_httpx, row["id"], f"login_start:{centre}")
@@ -562,13 +563,15 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
                 return slots
 
         except CaptchaDetected:
-            # mark health + global cooldown
             centre_fail(centre); global_cooldown(CAPTCHA_COOLDOWN_MIN)
-            # WhatsApp with DVSA link (+ resume)
             send_captcha_alert(row, centre)
-            # admin-side event
             await post_event_api(client_httpx, row["id"], f"captcha_cooldown:{centre}")
-            # re-raise so caller can treat as hard stop for the pass
+            raise
+
+        except IPBlocked:
+            centre_fail(centre); global_cooldown(IPBLOCK_COOLDOWN_MIN)
+            send_ipblock_alert(row, centre)
+            await post_event_api(client_httpx, row["id"], f"ip_blocked:{centre}")
             raise
 
         except Exception as e:
@@ -590,7 +593,7 @@ async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
     session_key = make_session_key(row)
     try:
         async with DVSAClient(headless=True, session_key=session_key) as dvsa:
-            dvsa.attach_job(int(row["id"]))  # instrumentation
+            dvsa.attach_job(int(row["id"]))
             await dvsa.login_swap(
                 licence_number=row.get("licence_number") or "",
                 booking_reference=row.get("booking_reference") or "",
@@ -600,33 +603,38 @@ async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
     except CaptchaDetected:
         send_captcha_alert(row, "(during swap confirm)")
         return False
+    except IPBlocked:
+        send_ipblock_alert(row, "(during swap confirm)")
+        global_cooldown(IPBLOCK_COOLDOWN_MIN)
+        return False
     except Exception as e:
         print(f"[dvsa_swap_to_slot] {e}")
         return False
 
-# NOTE: Return (ok: bool, booking_reference: Optional[str]) for NEW bookings
 async def dvsa_book_and_pay(client_unused, row, slot: str) -> Tuple[bool, Optional[str]]:
     if AUTOBOOK_MODE == "simulate":
         await asyncio.sleep(0.3 + random.random() * 0.4)
         ok = (random.random() < AUTOBOOK_SIM_SUCCESS_RATE)
-        # Generate a plausible 8-digit ref if simulated success
         ref = f"{random.randint(10000000, 99999999)}" if ok else None
         return ok, ref
 
-    # ---- REAL mode: use DVSAClient.book_and_pay() to get the actual reference
     session_key = make_session_key(row)
     try:
         async with DVSAClient(headless=True, session_key=session_key) as dvsa:
-            dvsa.attach_job(int(row["id"]))  # instrumentation
+            dvsa.attach_job(int(row["id"]))
             await dvsa.login_new(
                 licence_number=row.get("licence_number") or "",
                 theory_pass=row.get("theory_pass") or None,
                 email=row.get("email") or None,
             )
-            ref = await dvsa.book_and_pay(slot)  # returns Optional[str]
+            ref = await dvsa.book_and_pay(slot)
             return (ref is not None), ref
     except CaptchaDetected:
         send_captcha_alert(row, "(during new booking confirm)")
+        return False, None
+    except IPBlocked:
+        send_ipblock_alert(row, "(during new booking confirm)")
+        global_cooldown(IPBLOCK_COOLDOWN_MIN)
         return False, None
     except Exception as e:
         print(f"[dvsa_book_and_pay] {e}")
@@ -684,7 +692,6 @@ def _split_prio(centres: List[str], prio_prefixes: List[str]) -> Tuple[List[str]
     return high, low
 
 async def process_job(client: httpx.AsyncClient, row: dict):
-    # NEW: bail out early if globally paused (handles pre-claimed jobs)
     if CTRL.get("pause_all"):
         try:
             await post_event_api(client, row["id"], "paused:global")
@@ -695,7 +702,7 @@ async def process_job(client: httpx.AsyncClient, row: dict):
 
     sid = row["id"]
 
-    # Mutex: new->licence, swap->booking reference
+    # Mutex
     session_key_for_lock = session_base(row).replace(" ", "")[:20]
     async with _lic_lock(session_key_for_lock):
 
@@ -707,60 +714,51 @@ async def process_job(client: httpx.AsyncClient, row: dict):
                 await set_status_api(client, row, "queued", f"stale_skipped:>{STALE_MINUTES}m")
                 return
 
-        # require credentials before doing DVSA checks
         missing_reason = _missing_required_fields(row)
         if missing_reason:
             await set_status_api(client, row, "queued", missing_reason)
             return
 
-        # Desired centres from the job (user's preference)
+        # Desired centres
         centres_user: List[str] = normalize_centres(safe_json_loads(row.get("centres_json"), []))
         if not centres_user:
             centres_user = ["(no centre provided)"]
 
-        # Build the scan order
+        # Build scan order
         prio = CURRENT_PRIORITY_CENTRES or []
-        options = safe_json_loads(row.get("options_json"), {})
+
+        # Harden options_json: ensure dict so defaults always apply
+        options_raw = safe_json_loads(row.get("options_json"), {})
+        options = options_raw if isinstance(options_raw, dict) else {}
         booking_type = (row.get("booking_type") or "").strip().lower()
 
-        # For SWAP: keep pinned to user's centres only (old behaviour).
-        # For NEW: "anywhere first" (global list minus user-centres) → then user's centres.
         scan_anywhere_first = options.get("scan_anywhere_first", SCAN_ANYWHERE_FIRST_DEFAULT) if booking_type == "new" else False
 
-        # Prepare a global list of centres if configured
         all_centres = normalize_centres(ALL_CENTRES_ENV)
-        # Remove duplicates and keep stable order
         user_set = {c.lower() for c in centres_user}
         anywhere_candidates = [c for c in all_centres if c.lower() not in user_set] if all_centres else []
 
-        # Priority split
         user_high, user_low = _split_prio(centres_user, prio)
         any_high, any_low   = _split_prio(anywhere_candidates, prio)
 
-        # Final pass order
-        pass_order: List[List[str]]
         if booking_type == "new" and scan_anywhere_first and anywhere_candidates:
-            # 1) Anywhere (priority first), 2) Anywhere (rest), 3) User (priority first), 4) User (rest)
             random.Random(sid).shuffle(any_low)
             random.Random(sid ^ 0xABCDEF).shuffle(user_low)
             pass_order = [any_high, any_low, user_high, user_low]
         else:
-            # Old behaviour: user's centres first (prio then rest)
             random.Random(sid).shuffle(user_low)
             pass_order = [user_high, user_low]
 
-        # Flatten, dedup
         scan_list: List[str] = _dedup_preserve_order([c for chunk in pass_order for c in chunk if c])
 
         found_slot: Optional[str] = None
         captcha_hit = False
+        ipblock_hit = False
         last_checked: Optional[str] = None
 
         async def check_one(c: str):
-            nonlocal found_slot, captcha_hit, last_checked
-            if CTRL.get("pause_all"):  # hard stop mid-pass if paused while running
-                return
-            if found_slot is not None or captcha_hit:
+            nonlocal found_slot, captcha_hit, ipblock_hit, last_checked
+            if CTRL.get("pause_all") or found_slot is not None or captcha_hit or ipblock_hit:
                 return
             last_checked = c
             try:
@@ -772,13 +770,15 @@ async def process_job(client: httpx.AsyncClient, row: dict):
             except CaptchaDetected:
                 captcha_hit = True
                 return
+            except IPBlocked:
+                ipblock_hit = True
+                return
             if slots and found_slot is None:
                 found_slot = slots[0]
 
         async def run_pass(items: List[str]):
-            if not items or found_slot is not None or captcha_hit:
+            if not items or found_slot is not None or captcha_hit or ipblock_hit:
                 return
-            # If the client is doing RPS, force serial checks (one Playwright context at a time).
             effective_parallel = 1 if HONOUR_CLIENT_RPS else max(1, min(JOB_MAX_PARALLEL_CHECKS, len(items)))
             sem = asyncio.Semaphore(effective_parallel)
             async def worker(c):
@@ -786,10 +786,9 @@ async def process_job(client: httpx.AsyncClient, row: dict):
                     await check_one(c)
             await asyncio.gather(*(worker(c) for c in items))
 
-        # Execute passes in order
         for chunk in pass_order:
             await run_pass(chunk)
-            if found_slot or captcha_hit or CTRL.get("pause_all"):
+            if found_slot or captcha_hit or ipblock_hit or CTRL.get("pause_all"):
                 break
 
         if CTRL.get("pause_all"):
@@ -798,6 +797,10 @@ async def process_job(client: httpx.AsyncClient, row: dict):
 
         if captcha_hit:
             await set_status_api(client, row, "queued", f"captcha_cooldown:{last_checked or ''}")
+            return
+
+        if ipblock_hit:
+            await set_status_api(client, row, "queued", f"ip_blocked:{last_checked or ''}")
             return
 
         if not found_slot:
@@ -823,10 +826,8 @@ async def process_job(client: httpx.AsyncClient, row: dict):
             else:
                 ok, booking_ref = await dvsa_book_and_pay(client, row, found_slot)
                 if ok:
-                    # include the ref in the booked status if we have it
                     booked_event = f"booked:{found_slot}" + (f" · ref={booking_ref}" if booking_ref else "")
                     await set_status_api(client, row, "booked", booked_event)
-                    # Immediately flip this NEW job into SWAP against user's preferred centres
                     if not booking_ref or not (len(str(booking_ref)) == 8 and str(booking_ref).isdigit()):
                         booking_ref = f"{random.randint(10000000, 99999999)}"
                     try:
@@ -837,7 +838,6 @@ async def process_job(client: httpx.AsyncClient, row: dict):
                 else:
                     await set_status_api(client, row, "failed", f"booking_failed:{found_slot}")
         else:
-            # Notify "found" and start assist pings
             await set_status_api(client, row, "found", f"slot_found:{found_slot}")
             asyncio.create_task(assist_window_monitor(sid, found_slot))
 
@@ -859,20 +859,17 @@ async def run():
               f"anywhere_first_default={SCAN_ANYWHERE_FIRST_DEFAULT}")
         while True:
             try:
-                # Pull latest controls each loop (cheap GET)
                 controls = await get_controls_api(client)
                 if controls:
-                    # update globals atomically
                     global CTRL, CURRENT_PRIORITY_CENTRES
                     CTRL = {"pause_all": bool(controls.get("pause_all", False)),
                             "priority_centres": [str(x).strip().lower()
                                                  for x in controls.get("priority_centres", [])
                                                  if str(x).strip()]}
                     if CTRL["priority_centres"]:
-                        CURRENT_PRIORITY_CENTRES = CTRL["priority_centres"][:]  # live update
+                        CURRENT_PRIORITY_CENTRES = CTRL["priority_centres"][:]
 
                 if CTRL.get("pause_all"):
-                    # soft idle while paused
                     await asyncio.sleep(POLL_SEC)
                     continue
 
