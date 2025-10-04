@@ -28,7 +28,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.7.0")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.8.0")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -324,7 +324,7 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.7.0"}
+    return {"ok": True, "ts": now_iso(), "version": "1.8.0"}
 
 # ---------- CONTROLS (Admin + Worker) ----------
 def _get_controls(conn: sqlite3.Connection) -> dict:
@@ -749,10 +749,18 @@ def _badge(s: str) -> str:
     return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
 
 def _derive_flags(row: sqlite3.Row):
+    """
+    Return booleans derived from last_event:
+      reached -> we definitely touched DVSA UI (now also true for login_form_ready)
+      last_centre -> parsed when event contains a centre payload
+      captcha -> captcha_cooldown seen
+      closed -> service_closed seen (maintenance window)
+    """
     ev = (row["last_event"] or "").strip()
     reached = False
     last_centre = ""
     captcha = False
+    closed = False
 
     prefixes_with_centre = (
         "checked:",
@@ -760,9 +768,11 @@ def _derive_flags(row: sqlite3.Row):
         "booked:",
         "booking_failed:",
         "captcha_cooldown:",
+        "ip_blocked:",
         "no_slots_this_round:",
         "slot_unchanged:",
         "trying:",
+        "service_closed:",  # stage may contain centre sometimes
     )
 
     for pfx in prefixes_with_centre:
@@ -774,13 +784,16 @@ def _derive_flags(row: sqlite3.Row):
                 last_centre = ""
             break
 
-    if ev.startswith(("checked:", "slot_found:", "booked:", "booking_failed:")):
+    if ev.startswith(("checked:", "slot_found:", "booked:", "booking_failed:", "login_form_ready:")):
         reached = True
 
     if ev.startswith("captcha_cooldown:"):
         captcha = True
 
-    return reached, last_centre, captcha
+    if ev.startswith("service_closed:"):
+        closed = True
+
+    return reached, last_centre, captcha, closed
 
 def _fmt_booking_ref(row: sqlite3.Row) -> str:
     ref = (row["booking_reference"] or "").strip()
@@ -891,9 +904,10 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
         opts_raw = r["options_json"] or ""
         opts = html.escape(opts_raw)
 
-        reached, last_centre, captcha = _derive_flags(r)
+        reached, last_centre, captcha, closed = _derive_flags(r)
         reached_html = "✅" if reached else "—"
         captcha_html = "🚧" if captcha else "—"
+        closed_html = "🕒" if closed else "—"
 
         # per-row checkbox + action button
         checkbox = f"<input type='checkbox' class='sel' value='{r['id']}' />"
@@ -923,6 +937,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             + td(reached_html)
             + td(last_centre or "—")
             + td(captcha_html)
+            + td(closed_html)
             + td(_fmt_ts(r["created_at"]))
             + td(_fmt_ts(r["updated_at"]))
             + "</tr>"
@@ -1042,7 +1057,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
               <th>Type</th><th>Licence</th><th>Booking Ref</th><th>Theory</th>
               <th>Date/Time Window</th><th>Phone</th><th>Email</th><th>Centres</th><th>Options</th>
               <th>Last Event</th><th>Paid</th><th>PI</th>
-              <th>Reached?</th><th>Last centre</th><th>Captcha?</th>
+              <th>Reached?</th><th>Last centre</th><th>Captcha?</th><th>Closed?</th>
               <th>Created</th><th>Updated</th>
             </tr>
           </thead>
