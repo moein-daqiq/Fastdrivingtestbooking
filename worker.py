@@ -501,9 +501,9 @@ def send_captcha_alert(row: dict, centre: str):
 # DVSA integration
 # ==============================
 async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -> List[str]:
-    # Optional resume override: if last event was 'resume_now', ignore cooldown checks once
+    # Optional resume override: treat admin_resumed like resume_now
     _, last_event = get_status_tuple_from_cache(row["id"])
-    resume_override = (last_event == "resume_now")
+    resume_override = (last_event in ("resume_now", "admin_resumed"))
 
     # NEW: obey global pause before doing anything
     if CTRL.get("pause_all"):
@@ -828,13 +828,11 @@ async def process_job(client: httpx.AsyncClient, row: dict):
                     await set_status_api(client, row, "booked", booked_event)
                     # Immediately flip this NEW job into SWAP against user's preferred centres
                     if not booking_ref or not (len(str(booking_ref)) == 8 and str(booking_ref).isdigit()):
-                        # Best-effort fallback to avoid losing momentum; real dvsa_client should usually return the real ref.
                         booking_ref = f"{random.randint(10000000, 99999999)}"
                     try:
                         await upgrade_to_swap_api(client, sid, booking_ref, centres_user)
                         await post_event_api(client, sid, f"auto_upgrade_to_swap:{booking_ref}")
                     except Exception as e:
-                        # Don't fail the booking; just log
                         await post_event_api(client, sid, f"auto_upgrade_to_swap_failed:{_human(e)}")
                 else:
                     await set_status_api(client, row, "failed", f"booking_failed:{found_slot}")
