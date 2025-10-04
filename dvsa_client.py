@@ -113,6 +113,7 @@ SESS_DIR = os.environ.get("DVSA_SESS_DIR", "/tmp/dvsa_sessions")
 os.makedirs(SESS_DIR, exist_ok=True)
 
 # ---------------- Robust selectors ----------------
+# Expanded with newer DVSA field names/ids.
 SEL = {
     # GOV.UK landing “Start now”
     "start_now": (
@@ -127,13 +128,34 @@ SEL = {
     "car_button": "button:has-text('Car'), a:has-text('Car (manual'), .app-button:has-text('Car'), [role='button']:has-text('Car')",
 
     # Existing booking (swap) login (CSS fallbacks)
-    "swap_licence":  "input[name='driving-licence-number'], input[name*='licence'], input[id*='licence'], input[name='driverLicenceNumber']",
-    "swap_ref":      "input[name='booking-reference'], input[name*='reference'], input[id*='reference'], input[name='bookingReference']",
+    "swap_licence":  (
+        "input[name='driving-licence-number'], "
+        "input[name='drivingLicenceNumber'], "
+        "input#driving-licence-number, "
+        "input#drivingLicenceNumber, "
+        "input[name*='licence'], input[id*='licence'], "
+        "input[name='driverLicenceNumber']"
+    ),
+    "swap_ref":      (
+        "input[name='booking-reference'], "
+        "input#booking-reference, "
+        "input[name='bookingReference'], "
+        "input#bookingReference, "
+        "input[name*='reference'], input[id*='reference'], "
+        "input[name='applicationReference'], input#applicationReference"
+    ),
     "swap_email":    "input[name='email'], input[id*='email'], input[name='candidateEmail']",
     "swap_continue": "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
 
     # New booking login (CSS fallbacks)
-    "new_licence":   "input[name='driving-licence-number'], input[name*='licence'], input[id*='licence'], input[name='driverLicenceNumber']",
+    "new_licence":   (
+        "input[name='driving-licence-number'], "
+        "input[name='drivingLicenceNumber'], "
+        "input#driving-licence-number, "
+        "input#drivingLicenceNumber, "
+        "input[name*='licence'], input[id*='licence'], "
+        "input[name='driverLicenceNumber']"
+    ),
     "new_theory":    "input[name='theory-pass-number'], input[name='theoryPassNumber'], input[name*='theory'], input[id*='theory']",
     "new_email":     "input[name='email'], input[id*='email'], input[name='candidateEmail']",
     "new_continue":  "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
@@ -358,7 +380,7 @@ class DVSAClient:
         except Exception:
             pass
 
-        # hCaptcha iframe settle
+        # hCaptcha iframe settle (if present, we pause briefly)
         try:
             await self.page.wait_for_selector('iframe[src*="hcaptcha.com"]', timeout=7000)
             await self._human_pause(700)
@@ -371,6 +393,7 @@ class DVSAClient:
             'input[name="booking-reference"]',
             'input[name="email"]',
             'input[name*="licence"], input[id*="licence"]',
+            'input[name="drivingLicenceNumber"], input#drivingLicenceNumber',
         ]
         for sel in candidates:
             try:
@@ -388,11 +411,19 @@ class DVSAClient:
             return False
 
     # ------------- Low-level helpers -------------
+    def _on_wrong_host(self) -> bool:
+        try:
+            return "hcaptcha.com" in (self.page.url.lower() if self.page else "")
+        except Exception:
+            return False
+
     async def _goto(self, url: str, marker: Optional[str] = None, stage: str = "nav"):
         self._stage = stage
         await self.page.goto(url, wait_until="domcontentloaded")
         await self._rps_pause("after_goto")
         await self._accept_cookies()
+        if self._on_wrong_host():
+            raise CaptchaDetected(url=self.page.url)
         await self._captcha_guard()
         if marker:
             await self.page.get_by_text(marker, exact=False).first.wait_for()
@@ -493,7 +524,13 @@ class DVSAClient:
         return False
 
     async def _accept_cookies(self):
-        for name in ["Accept all cookies", "Accept analytics cookies", "Accept cookies", "I agree"]:
+        for name in [
+            "Accept all cookies",
+            "Accept analytics cookies",
+            "Accept cookies",
+            "I agree",
+            "Accept additional cookies",
+        ]:
             try:
                 await self.page.get_by_role("button", name=name).click(timeout=1500)
                 await self._human_pause(300)
@@ -503,6 +540,15 @@ class DVSAClient:
                 pass
 
     async def _captcha_guard(self, where: Optional[str] = None):
+        # hCaptcha info-redirect guard (no DOM markers there)
+        if self._on_wrong_host():
+            stage = where or self._stage or "unknown"
+            try:
+                await self._event(f"captcha_cooldown:{stage}")
+            except Exception:
+                pass
+            raise CaptchaDetected(url=(self.page.url if self.page else ""))
+
         html = (await self.page.content()).lower()
         indicators = [
             "recaptcha", "hcaptcha", "turnstile",
@@ -608,11 +654,12 @@ class DVSAClient:
         try:
             css = (
                 "input[name='driving-licence-number'], "
+                "input[name='drivingLicenceNumber'], "
+                "input[id='driving-licence-number'], "
+                "input#drivingLicenceNumber, "
                 "input[name*='driving'][name*='licence'], "
                 "input[id*='driving'][id*='licence'], "
-                "input[name='driverLicenceNumber'], "
-                "input[id='driving-licence-number'], "
-                "input[autocomplete='organization']"
+                "input[name='driverLicenceNumber']"
             )
             if await self.page.query_selector(css):
                 return True
