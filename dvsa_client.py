@@ -13,7 +13,8 @@ Instrumentation (optional; only active when sid is attached AND API creds presen
   Events:
     checked:<centre> · no_slots|<count>
     captcha_cooldown:<centre|stage>
-    slot_found:<centre> · <date> · <time>        (when swap_to() is called)
+    ip_blocked:<centre|stage>
+    slot_found:<centre> · <date> · <time>
     booked:<centre> · <date> · <time>
     booking_failed:<centre> · <date> · <time>
     error:<centre> · <ExceptionName>
@@ -69,6 +70,13 @@ class DVSAError(Exception):
 class CaptchaDetected(DVSAError):
     """Raised when a CAPTCHA/anti-bot wall is detected; carries the page URL."""
     def __init__(self, message: str = "Captcha/anti-bot detected", url: Optional[str] = None):
+        super().__init__(message)
+        self.url = url or ""
+
+
+class IPBlocked(DVSAError):
+    """Raised when DVSA/WAF has likely blocked this IP (403/blocked page)."""
+    def __init__(self, message: str = "IP/WAF block detected", url: Optional[str] = None):
         super().__init__(message)
         self.url = url or ""
 
@@ -371,6 +379,7 @@ class DVSAClient:
 
     async def _wait_for_dvsa_ready(self) -> bool:
         await self._captcha_guard("ready_gate_pre")
+        await self._block_guard("ready_gate_pre")
 
         # "Please wait" / loading banners
         try:
@@ -425,6 +434,7 @@ class DVSAClient:
         if self._on_wrong_host():
             raise CaptchaDetected(url=self.page.url)
         await self._captcha_guard()
+        await self._block_guard(stage)
         if marker:
             await self.page.get_by_text(marker, exact=False).first.wait_for()
         await self._human_pause(POST_NAV_SETTLE_MS)
@@ -568,8 +578,34 @@ class DVSAClient:
                 pass
             raise CaptchaDetected(url=(self.page.url if self.page else ""))
 
+    async def _block_guard(self, where: Optional[str] = None):
+        """
+        Heuristic: detect 'access denied / request blocked' WAF pages (403 etc.).
+        """
+        html = (await self.page.content()).lower()
+        indicators = [
+            "access denied", "request blocked", "forbidden", "http 403",
+            "you don't have permission", "blocked by security rules",
+            "your request has been blocked", "error code 1020",  # cloudflare
+            "this website is using a security service",          # cloudflare generic
+            "akamai error", "permission denied"
+        ]
+        if any(k in html for k in indicators):
+            try:
+                ts = str(int(asyncio.get_event_loop().time()))
+                await self.page.screenshot(path=f"/tmp/ipblock_{ts}.png", full_page=True)
+            except Exception:
+                pass
+            stage = where or self._stage or "unknown"
+            try:
+                await self._event(f"ip_blocked:{stage}")
+            except Exception:
+                pass
+            raise IPBlocked(url=(self.page.url if self.page else ""))
+
     async def _expect_ok(self):
         await self._captcha_guard()
+        await self._block_guard()
         err = await self.page.query_selector(_sel("error_summary"))
         if err:
             msg = (await err.text_content() or "").strip()
@@ -582,6 +618,7 @@ class DVSAClient:
                     await self.page.get_by_role("link", name=re.compile(name, re.I)).click(timeout=2000)
                     await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                     await self._captcha_guard("start_now")
+                    await self._block_guard("start_now")
                     await self._human_pause(POST_NAV_SETTLE_MS)
                     await self._rps_pause("after_start_now_role")
                     await self._wait_for_dvsa_ready()
@@ -594,6 +631,7 @@ class DVSAClient:
                     await el.click()
                     await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                     await self._captcha_guard("start_now_css")
+                    await self._block_guard("start_now_css")
                     await self._human_pause(POST_NAV_SETTLE_MS)
                     await self._rps_pause("after_start_now_css")
                     await self._wait_for_dvsa_ready()
@@ -605,6 +643,7 @@ class DVSAClient:
                 await el.click(timeout=1500)
                 await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                 await self._captcha_guard("start_now_text")
+                await self._block_guard("start_now_text")
                 await self._human_pause(POST_NAV_SETTLE_MS)
                 await self._rps_pause("after_start_now_text")
                 await self._wait_for_dvsa_ready()
@@ -619,6 +658,7 @@ class DVSAClient:
             if btn:
                 await btn.click()
                 await self._captcha_guard("category_car")
+                await self._block_guard("category_car")
                 await self._human_pause(CLICK_SETTLE_MS)
                 await self._rps_pause("after_car_category")
         except PWTimeout:
@@ -854,6 +894,7 @@ class DVSAClient:
     async def search_centre_slots(self, centre_name: str) -> List[str]:
         try:
             await self._captcha_guard(f"pre_open:{centre_name}")
+            await self._block_guard(f"pre_open:{centre_name}")
             if not await self._open_centre(centre_name):
                 await self._event(f"error:{centre_name} · OpenFailed")
                 return []
@@ -907,12 +948,16 @@ class DVSAClient:
         except CaptchaDetected:
             await self._event(f"captcha_cooldown:{centre_name}")
             raise
+        except IPBlocked:
+            await self._event(f"ip_blocked:{centre_name}")
+            raise
         except Exception as e:
             await self._event(f"error:{centre_name} · {type(e).__name__}")
             raise
 
     async def swap_to(self, slot_label: str) -> bool:
         await self._captcha_guard("pre_swap_confirm")
+        await self._block_guard("pre_swap_confirm")
         await self._wait_for_dvsa_ready()
 
         m = re.match(r"^(.*?) · (.*?) · (\d{1,2}:\d{2})$", slot_label)
@@ -1013,6 +1058,7 @@ class DVSAClient:
     # ---------- Book & pay for NEW bookings and return reference ----------
     async def book_and_pay(self, slot_label: str) -> Optional[str]:
         await self._captcha_guard("pre_book_and_pay")
+        await self._block_guard("pre_book_and_pay")
         await self._wait_for_dvsa_ready()
 
         m = re.match(r"^(.*?) · (.*?) · (\d{1,2}:\d{2})$", slot_label)
