@@ -14,6 +14,8 @@ Instrumentation (optional; only active when sid is attached AND API creds presen
     checked:<centre> · no_slots|<count>
     captcha_cooldown:<centre|stage>
     ip_blocked:<centre|stage>
+    service_closed:<stage>
+    login_form_ready:<stage>
     slot_found:<centre> · <date> · <time>
     booked:<centre> · <date> · <time>
     booking_failed:<centre> · <date> · <time>
@@ -81,6 +83,13 @@ class IPBlocked(DVSAError):
         self.url = url or ""
 
 
+class ServiceClosed(DVSAError):
+    """Raised when DVSA is in an announced maintenance window (e.g., 'It’ll be back at 6 am')."""
+    def __init__(self, message: str = "DVSA booking service closed (maintenance window)", url: Optional[str] = None):
+        super().__init__(message)
+        self.url = url or ""
+
+
 # ---------------- Config (override via env if needed) ----------------
 URL_CHANGE_TEST = os.environ.get("DVSA_URL_CHANGE", "https://driverpracticaltest.dvsa.gov.uk/manage")
 URL_BOOK_TEST   = os.environ.get("DVSA_URL_BOOK",   "https://driverpracticaltest.dvsa.gov.uk/application")
@@ -121,7 +130,6 @@ SESS_DIR = os.environ.get("DVSA_SESS_DIR", "/tmp/dvsa_sessions")
 os.makedirs(SESS_DIR, exist_ok=True)
 
 # ---------------- Robust selectors ----------------
-# Expanded with newer DVSA field names/ids.
 SEL = {
     # GOV.UK landing “Start now”
     "start_now": (
@@ -377,9 +385,40 @@ class DVSAClient:
             return
         await asyncio.sleep(random.uniform(0.25, max_ms / 1000.0))
 
+    # --- Guards: captcha, waf, maintenance ---
+    async def _service_closed_guard(self, where: Optional[str] = None):
+        """
+        Detect DVSA's scheduled-outage page like:
+        'Sorry, you can’t use this service right now' / 'It’ll be back at 6 am'
+        """
+        try:
+            html = (await self.page.content()).lower()
+        except Exception:
+            return
+        indicators = [
+            "you can’t use this service right now",
+            "you can't use this service right now",
+            "it’ll be back at", "it'll be back at",
+            "we're doing some maintenance", "we are doing some maintenance",
+            "service will be available again", "back at 6 am", "back at 6am",
+        ]
+        if any(k in html for k in indicators):
+            stage = where or self._stage or "unknown"
+            try:
+                ts = str(int(asyncio.get_event_loop().time()))
+                await self.page.screenshot(path=f"/tmp/service_closed_{ts}.png", full_page=True)
+            except Exception:
+                pass
+            try:
+                await self._event(f"service_closed:{stage}")
+            except Exception:
+                pass
+            raise ServiceClosed(url=(self.page.url if self.page else ""))
+
     async def _wait_for_dvsa_ready(self) -> bool:
         await self._captcha_guard("ready_gate_pre")
         await self._block_guard("ready_gate_pre")
+        await self._service_closed_guard("ready_gate_pre")
 
         # "Please wait" / loading banners
         try:
@@ -408,6 +447,7 @@ class DVSAClient:
             try:
                 await self.page.wait_for_selector(sel, state="visible", timeout=READY_MAX_MS)
                 await self._human_pause(650)
+                await self._service_closed_guard("ready_gate_sel")
                 return True
             except Exception:
                 continue
@@ -415,6 +455,7 @@ class DVSAClient:
         try:
             await self.page.wait_for_load_state("networkidle", timeout=15000)
             await self._human_pause(600)
+            await self._service_closed_guard("ready_gate_idle")
             return True
         except Exception:
             return False
@@ -435,6 +476,7 @@ class DVSAClient:
             raise CaptchaDetected(url=self.page.url)
         await self._captcha_guard()
         await self._block_guard(stage)
+        await self._service_closed_guard(stage)
         if marker:
             await self.page.get_by_text(marker, exact=False).first.wait_for()
         await self._human_pause(POST_NAV_SETTLE_MS)
@@ -540,6 +582,9 @@ class DVSAClient:
             "Accept cookies",
             "I agree",
             "Accept additional cookies",
+            "Accept all non-essential cookies",
+            "Reject all non-essential cookies",
+            "Set cookie preferences",
         ]:
             try:
                 await self.page.get_by_role("button", name=name).click(timeout=1500)
@@ -586,8 +631,8 @@ class DVSAClient:
         indicators = [
             "access denied", "request blocked", "forbidden", "http 403",
             "you don't have permission", "blocked by security rules",
-            "your request has been blocked", "error code 1020",  # cloudflare
-            "this website is using a security service",          # cloudflare generic
+            "your request has been blocked", "error code 1020",
+            "this website is using a security service",
             "akamai error", "permission denied"
         ]
         if any(k in html for k in indicators):
@@ -606,6 +651,7 @@ class DVSAClient:
     async def _expect_ok(self):
         await self._captcha_guard()
         await self._block_guard()
+        await self._service_closed_guard()
         err = await self.page.query_selector(_sel("error_summary"))
         if err:
             msg = (await err.text_content() or "").strip()
@@ -619,6 +665,7 @@ class DVSAClient:
                     await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                     await self._captcha_guard("start_now")
                     await self._block_guard("start_now")
+                    await self._service_closed_guard("start_now")
                     await self._human_pause(POST_NAV_SETTLE_MS)
                     await self._rps_pause("after_start_now_role")
                     await self._wait_for_dvsa_ready()
@@ -632,6 +679,7 @@ class DVSAClient:
                     await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                     await self._captcha_guard("start_now_css")
                     await self._block_guard("start_now_css")
+                    await self._service_closed_guard("start_now_css")
                     await self._human_pause(POST_NAV_SETTLE_MS)
                     await self._rps_pause("after_start_now_css")
                     await self._wait_for_dvsa_ready()
@@ -644,6 +692,7 @@ class DVSAClient:
                 await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
                 await self._captcha_guard("start_now_text")
                 await self._block_guard("start_now_text")
+                await self._service_closed_guard("start_now_text")
                 await self._human_pause(POST_NAV_SETTLE_MS)
                 await self._rps_pause("after_start_now_text")
                 await self._wait_for_dvsa_ready()
@@ -659,6 +708,7 @@ class DVSAClient:
                 await btn.click()
                 await self._captcha_guard("category_car")
                 await self._block_guard("category_car")
+                await self._service_closed_guard("category_car")
                 await self._human_pause(CLICK_SETTLE_MS)
                 await self._rps_pause("after_car_category")
         except PWTimeout:
@@ -689,7 +739,6 @@ class DVSAClient:
     async def _licence_form_present(self) -> bool:
         """
         Return True if *any* plausible licence input is present (swap/new).
-        DVSA sometimes shuffles labels/ids; we look for multiple hints.
         """
         try:
             css = (
@@ -702,11 +751,13 @@ class DVSAClient:
                 "input[name='driverLicenceNumber']"
             )
             if await self.page.query_selector(css):
+                await self._event(f"login_form_ready:{self._stage or 'unknown'}")
                 return True
 
             try:
                 el = self.page.get_by_role("textbox", name=re.compile(r"driving\s*licen[sc]e", re.I)).first
                 if await el.count() > 0:
+                    await self._event(f"login_form_ready:{self._stage or 'unknown'}")
                     return True
             except Exception:
                 pass
@@ -716,6 +767,7 @@ class DVSAClient:
                 try:
                     ml = await i.get_attribute("maxlength")
                     if ml and int(ml) >= 16:
+                        await self._event(f"login_form_ready:{self._stage or 'unknown'}")
                         return True
                 except Exception:
                     continue
@@ -857,6 +909,8 @@ class DVSAClient:
 
         await self.page.wait_for_selector(_sel("centre_search_box"))
         await self._wait_for_dvsa_ready()
+        await self._service_closed_guard(f"centre_open:{centre_name}")
+
         await self.page.fill(_sel("centre_search_box"), centre_name)
         await self._human_pause(450)
 
@@ -895,6 +949,7 @@ class DVSAClient:
         try:
             await self._captcha_guard(f"pre_open:{centre_name}")
             await self._block_guard(f"pre_open:{centre_name}")
+            await self._service_closed_guard(f"pre_open:{centre_name}")
             if not await self._open_centre(centre_name):
                 await self._event(f"error:{centre_name} · OpenFailed")
                 return []
@@ -951,6 +1006,9 @@ class DVSAClient:
         except IPBlocked:
             await self._event(f"ip_blocked:{centre_name}")
             raise
+        except ServiceClosed:
+            # already posted service_closed event inside guard
+            raise
         except Exception as e:
             await self._event(f"error:{centre_name} · {type(e).__name__}")
             raise
@@ -958,6 +1016,7 @@ class DVSAClient:
     async def swap_to(self, slot_label: str) -> bool:
         await self._captcha_guard("pre_swap_confirm")
         await self._block_guard("pre_swap_confirm")
+        await self._service_closed_guard("pre_swap_confirm")
         await self._wait_for_dvsa_ready()
 
         m = re.match(r"^(.*?) · (.*?) · (\d{1,2}:\d{2})$", slot_label)
@@ -1059,6 +1118,7 @@ class DVSAClient:
     async def book_and_pay(self, slot_label: str) -> Optional[str]:
         await self._captcha_guard("pre_book_and_pay")
         await self._block_guard("pre_book_and_pay")
+        await self._service_closed_guard("pre_book_and_pay")
         await self._wait_for_dvsa_ready()
 
         m = re.match(r"^(.*?) · (.*?) · (\d{1,2}:\d{2})$", slot_label)
