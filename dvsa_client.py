@@ -126,14 +126,24 @@ SEL = {
     # NEW booking – category page (pick Car)
     "car_button": "button:has-text('Car'), a:has-text('Car (manual'), .app-button:has-text('Car'), [role='button']:has-text('Car')",
 
-    # Existing booking (swap) login (CSS fallbacks)
-    "swap_licence":  "input[name='driving-licence-number'], input[name*='licence'], input[id*='licence'], input[name='driverLicenceNumber']",
+    # Existing booking (swap) login (CSS fallbacks)  — broadened
+    "swap_licence": (
+        "input[name='driving-licence-number'], input[id='driving-licence-number'], "
+        "input[name='drivingLicenceNumber'], input[id='drivingLicenceNumber'], "
+        "input[name*='licence' i], input[id*='licence' i], "
+        "input[name*='license' i], input[id*='license' i]"
+    ),
     "swap_ref":      "input[name='booking-reference'], input[name*='reference'], input[id*='reference'], input[name='bookingReference']",
     "swap_email":    "input[name='email'], input[id*='email'], input[name='candidateEmail']",
     "swap_continue": "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
 
-    # New booking login (CSS fallbacks)
-    "new_licence":   "input[name='driving-licence-number'], input[name*='licence'], input[id*='licence'], input[name='driverLicenceNumber']",
+    # New booking login (CSS fallbacks)  — broadened
+    "new_licence": (
+        "input[name='driving-licence-number'], input[id='driving-licence-number'], "
+        "input[name='drivingLicenceNumber'], input[id='drivingLicenceNumber'], "
+        "input[name*='licence' i], input[id*='licence' i], "
+        "input[name*='license' i], input[id*='license' i]"
+    ),
     "new_theory":    "input[name='theory-pass-number'], input[name='theoryPassNumber'], input[name*='theory'], input[id*='theory']",
     "new_email":     "input[name='email'], input[id*='email'], input[name='candidateEmail']",
     "new_continue":  "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
@@ -625,15 +635,51 @@ class DVSAClient:
     async def _licence_form_present(self) -> bool:
         """Return True if any known licence input is present (swap/new)."""
         css = (
-            "input[name='driving-licence-number'], "
-            "input[name*='licence'], input[id*='licence'], "
-            "input[name='driverLicenceNumber']"
+            "input[name='driving-licence-number'], input[id='driving-licence-number'], "
+            "input[name='drivingLicenceNumber'], input[id='drivingLicenceNumber'], "
+            "input[name*='licence' i], input[id*='licence' i], "
+            "input[name*='license' i], input[id*='license' i]"
         )
         try:
             el = await self.page.query_selector(css)
-            return el is not None
+            if el:
+                return True
+            # broader probe
+            el2 = await self.page.query_selector("input[placeholder*='licen' i], input[aria-label*='licen' i]")
+            return el2 is not None
         except Exception:
             return False
+
+    async def _fill_licence_best_effort(self, value: str) -> bool:
+        """
+        Last-resort: try a wide net of inputs that look like 'licence/licence number'.
+        """
+        candidates = [
+            "input[name*='licen' i]", "input[id*='licen' i]",
+            "input[aria-label*='licen' i]", "input[aria-labelledby*='licen' i]",
+            "input[placeholder*='licen' i]",
+        ]
+        for sel in candidates:
+            try:
+                el = await self.page.query_selector(sel)
+                if el:
+                    await el.fill(value)
+                    await self._human_pause(350)
+                    return True
+            except Exception:
+                pass
+        # nearest input following text that mentions licence
+        try:
+            lab = self.page.get_by_text(re.compile(r"licen[cs]e", re.I)).first
+            await lab.wait_for(timeout=1500)
+            container = lab.locator("xpath=ancestor-or-self::*[self::label or self::div or self::fieldset][1]")
+            input_el = container.locator("input").first
+            await input_el.fill(value, timeout=2500)
+            await self._human_pause(350)
+            return True
+        except Exception:
+            pass
+        return False
 
     # ------------- Public API used by worker -------------
     async def login_swap(self, licence_number: str, booking_reference: str, email: Optional[str] = None):
@@ -651,8 +697,16 @@ class DVSAClient:
         if not ok_lic:
             try:
                 await self._fill_css(_sel("swap_licence"), licence_number)
+                ok_lic = True
             except Exception:
-                raise DVSAError("layout_change: licence field not found")
+                ok_lic = await self._fill_licence_best_effort(licence_number)
+        if not ok_lic:
+            try:
+                ts = str(int(asyncio.get_event_loop().time()))
+                await self.page.screenshot(path=f"/tmp/licence_missing_{ts}.png", full_page=True)
+            except Exception:
+                pass
+            raise DVSAError("layout_change: licence field not found")
 
         # Fill booking reference
         self._stage = "login_swap_reference"
@@ -698,8 +752,16 @@ class DVSAClient:
         if not ok_lic:
             try:
                 await self._fill_css(_sel("new_licence"), licence_number)
+                ok_lic = True
             except Exception:
-                raise DVSAError("layout_change: licence field not found")
+                ok_lic = await self._fill_licence_best_effort(licence_number)
+        if not ok_lic:
+            try:
+                ts = str(int(asyncio.get_event_loop().time()))
+                await self.page.screenshot(path=f"/tmp/licence_missing_{ts}.png", full_page=True)
+            except Exception:
+                pass
+            raise DVSAError("layout_change: licence field not found")
 
         # Optional theory pass
         if theory_pass:
