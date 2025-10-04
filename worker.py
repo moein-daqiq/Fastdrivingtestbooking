@@ -1,11 +1,12 @@
-# --- worker.py (priority centres + kill-switch + CAPTCHA/IP-block WhatsApp alerts + resume link + better logging + more attempts + anywhere-scan-first for NEW + auto-upgrade-to-swap) ---
+# --- worker.py (priority centres + kill-switch + CAPTCHA/IP-block WhatsApp alerts + resume link +
+#                better logging + more attempts + anywhere-scan-first for NEW + auto-upgrade-to-swap) ---
 
 import os, json, math, time, random, sqlite3, asyncio, subprocess, hashlib, re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional, Iterable
 
 import httpx
-from dvsa_client import DVSAClient, CaptchaDetected, IPBlocked  # <-- import IPBlocked
+from dvsa_client import DVSAClient, CaptchaDetected, IPBlocked  # <-- dvsa_client must define IPBlocked
 
 import hmac
 import base64
@@ -83,6 +84,7 @@ SCAN_ANYWHERE_FIRST_DEFAULT = os.environ.get("SCAN_ANYWHERE_FIRST_DEFAULT", "tru
 # Global controls (kill-switch + live priority)
 CTRL: Dict[str, object] = {"pause_all": False, "priority_centres": CURRENT_PRIORITY_CENTRES[:]}
 
+# Playwright footprint in Render
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/ms-playwright")
 os.environ.setdefault("FASTDTF_LAUNCH_ARGS", "--no-sandbox --disable-dev-shm-usage")
 
@@ -120,9 +122,10 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 def safe_json_loads(s: Optional[str], default):
+    """Lenient JSON load that returns the given default *type* on mismatch."""
     try:
         v = json.loads(s) if s not in (None, "", "null", "None") else default
-        return v if isinstance(v, type(default)) else default  # <-- ensure correct type (dict/list)
+        return v if isinstance(v, type(default)) else default
     except Exception:
         return default
 
@@ -300,6 +303,7 @@ async def set_status_api(client: httpx.AsyncClient, job: dict, status: str, even
     await _api_post(client, f"/api/worker/searches/{job['id']}/status", {"status": status, "event": event})
     _status_cache[job["id"]] = (status, event)
 
+    # Owner WhatsApp nudges for NEW bookings
     if (job.get("booking_type") or "") == "new":
         centres = safe_json_loads(job.get("centres_json"), [])
         if status == "found":
@@ -363,7 +367,7 @@ class TokenBucket:
             await asyncio.sleep(0.01)
 
 class _NoopBucket:
-    async def acquire(self):
+    async def acquire(self):  # noqa: D401
         return
 
 bucket_dvsa = TokenBucket(DVSA_RPS, DVSA_RPS) if not HONOUR_CLIENT_RPS else _NoopBucket()
@@ -512,14 +516,17 @@ def send_ipblock_alert(row: dict, where: str):
 # DVSA integration
 # ==============================
 async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -> List[str]:
+    # Admin "resume" override
     _, last_event = get_status_tuple_from_cache(row["id"])
     resume_override = (last_event in ("resume_now", "admin_resumed"))
 
+    # Global pause early exit
     if CTRL.get("pause_all"):
         try: await post_event_api(client_httpx, row["id"], "paused:global")
         except Exception: pass
         await asyncio.sleep(0.05); return []
 
+    # Circuit breaker gates
     if not resume_override and not global_allowed():
         await post_event_api(client_httpx, row["id"], f"cooldown_skip:*global*")
         await asyncio.sleep(0.05); return []
@@ -527,16 +534,18 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
         await post_event_api(client_httpx, row["id"], f"cooldown_skip:{centre}")
         await asyncio.sleep(0.05); return []
 
+    # Worker-side RPS (NOOP if HONOUR_CLIENT_RPS=true, because dvsa_client throttles itself)
     await bucket_dvsa.acquire()
     await asyncio.sleep(random.randint(0, JITTER_MS) / 1000.0)
 
+    # Pause re-check just before network
     if CTRL.get("pause_all"):
         try: await post_event_api(client_httpx, row["id"], "paused:global")
         except Exception: pass
         return []
 
     session_key = make_session_key(row, centre)
-    attempts = 5
+    attempts = 5  # persistent, but bounded
 
     for attempt in range(1, attempts + 1):
         try:
@@ -566,6 +575,7 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
             centre_fail(centre); global_cooldown(CAPTCHA_COOLDOWN_MIN)
             send_captcha_alert(row, centre)
             await post_event_api(client_httpx, row["id"], f"captcha_cooldown:{centre}")
+            # re-raise so caller halts this pass
             raise
 
         except IPBlocked:
@@ -577,7 +587,7 @@ async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -
         except Exception as e:
             msg = _human(e).lower()
             layout_like = any(k in msg for k in [
-                "timeout","not found","selector","locator","no node found for selector","failed to find",
+                "timeout", "not found", "selector", "locator", "no node found for selector", "failed to find",
             ])
             if layout_like:
                 await post_event_api(client_httpx, row["id"], f"layout_issue:{centre}")
@@ -611,6 +621,7 @@ async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
         print(f"[dvsa_swap_to_slot] {e}")
         return False
 
+# NOTE: Return (ok: bool, booking_reference: Optional[str]) for NEW bookings
 async def dvsa_book_and_pay(client_unused, row, slot: str) -> Tuple[bool, Optional[str]]:
     if AUTOBOOK_MODE == "simulate":
         await asyncio.sleep(0.3 + random.random() * 0.4)
@@ -627,7 +638,7 @@ async def dvsa_book_and_pay(client_unused, row, slot: str) -> Tuple[bool, Option
                 theory_pass=row.get("theory_pass") or None,
                 email=row.get("email") or None,
             )
-            ref = await dvsa.book_and_pay(slot)
+            ref = await dvsa.book_and_pay(slot)  # returns Optional[str]
             return (ref is not None), ref
     except CaptchaDetected:
         send_captcha_alert(row, "(during new booking confirm)")
@@ -692,6 +703,7 @@ def _split_prio(centres: List[str], prio_prefixes: List[str]) -> Tuple[List[str]
     return high, low
 
 async def process_job(client: httpx.AsyncClient, row: dict):
+    # Global pause handling for pre-claimed jobs
     if CTRL.get("pause_all"):
         try:
             await post_event_api(client, row["id"], "paused:global")
@@ -702,7 +714,7 @@ async def process_job(client: httpx.AsyncClient, row: dict):
 
     sid = row["id"]
 
-    # Mutex
+    # Mutex: new->licence, swap->reference
     session_key_for_lock = session_base(row).replace(" ", "")[:20]
     async with _lic_lock(session_key_for_lock):
 
@@ -714,6 +726,7 @@ async def process_job(client: httpx.AsyncClient, row: dict):
                 await set_status_api(client, row, "queued", f"stale_skipped:>{STALE_MINUTES}m")
                 return
 
+        # credentials sanity
         missing_reason = _missing_required_fields(row)
         if missing_reason:
             await set_status_api(client, row, "queued", missing_reason)
@@ -732,6 +745,7 @@ async def process_job(client: httpx.AsyncClient, row: dict):
         options = options_raw if isinstance(options_raw, dict) else {}
         booking_type = (row.get("booking_type") or "").strip().lower()
 
+        # NEW: anywhere-first for NEW bookings
         scan_anywhere_first = options.get("scan_anywhere_first", SCAN_ANYWHERE_FIRST_DEFAULT) if booking_type == "new" else False
 
         all_centres = normalize_centres(ALL_CENTRES_ENV)
@@ -749,6 +763,7 @@ async def process_job(client: httpx.AsyncClient, row: dict):
             random.Random(sid).shuffle(user_low)
             pass_order = [user_high, user_low]
 
+        # Flatten for logs (kept for potential future UI)
         scan_list: List[str] = _dedup_preserve_order([c for chunk in pass_order for c in chunk if c])
 
         found_slot: Optional[str] = None
@@ -772,6 +787,9 @@ async def process_job(client: httpx.AsyncClient, row: dict):
                 return
             except IPBlocked:
                 ipblock_hit = True
+                return
+            except Exception:
+                # swallow per-centre exception (already logged inside dvsa_check_centre)
                 return
             if slots and found_slot is None:
                 found_slot = slots[0]
@@ -828,6 +846,7 @@ async def process_job(client: httpx.AsyncClient, row: dict):
                 if ok:
                     booked_event = f"booked:{found_slot}" + (f" · ref={booking_ref}" if booking_ref else "")
                     await set_status_api(client, row, "booked", booked_event)
+                    # Immediately flip this NEW job into SWAP
                     if not booking_ref or not (len(str(booking_ref)) == 8 and str(booking_ref).isdigit()):
                         booking_ref = f"{random.randint(10000000, 99999999)}"
                     try:
