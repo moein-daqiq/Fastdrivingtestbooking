@@ -126,24 +126,14 @@ SEL = {
     # NEW booking – category page (pick Car)
     "car_button": "button:has-text('Car'), a:has-text('Car (manual'), .app-button:has-text('Car'), [role='button']:has-text('Car')",
 
-    # Existing booking (swap) login (CSS fallbacks)  — broadened
-    "swap_licence": (
-        "input[name='driving-licence-number'], input[id='driving-licence-number'], "
-        "input[name='drivingLicenceNumber'], input[id='drivingLicenceNumber'], "
-        "input[name*='licence' i], input[id*='licence' i], "
-        "input[name*='license' i], input[id*='license' i]"
-    ),
+    # Existing booking (swap) login (CSS fallbacks)
+    "swap_licence":  "input[name='driving-licence-number'], input[name*='licence'], input[id*='licence'], input[name='driverLicenceNumber']",
     "swap_ref":      "input[name='booking-reference'], input[name*='reference'], input[id*='reference'], input[name='bookingReference']",
     "swap_email":    "input[name='email'], input[id*='email'], input[name='candidateEmail']",
     "swap_continue": "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
 
-    # New booking login (CSS fallbacks)  — broadened
-    "new_licence": (
-        "input[name='driving-licence-number'], input[id='driving-licence-number'], "
-        "input[name='drivingLicenceNumber'], input[id='drivingLicenceNumber'], "
-        "input[name*='licence' i], input[id*='licence' i], "
-        "input[name*='license' i], input[id*='license' i]"
-    ),
+    # New booking login (CSS fallbacks)
+    "new_licence":   "input[name='driving-licence-number'], input[name*='licence'], input[id*='licence'], input[name='driverLicenceNumber']",
     "new_theory":    "input[name='theory-pass-number'], input[name='theoryPassNumber'], input[name*='theory'], input[id*='theory']",
     "new_email":     "input[name='email'], input[id*='email'], input[name='candidateEmail']",
     "new_continue":  "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
@@ -229,8 +219,8 @@ class DVSAClient:
         # Persist storage per identity (keeps cookies/session)
         self._storage_path = None
         if self.session_key:
-            self._storage_path = os.path.join(SESS_DIR, f"{re.sub(r'[^A-Za-z0-9_-]+','', self.session_key)}.json")
-            # Create empty file if not present to avoid first-run errors
+            safe_key = re.sub(r"[^A-Za-z0-9_-]+", "", self.session_key)
+            self._storage_path = os.path.join(SESS_DIR, f"{safe_key}.json")
             if not os.path.exists(self._storage_path):
                 with open(self._storage_path, "w", encoding="utf-8") as f:
                     f.write("{}")
@@ -246,7 +236,6 @@ class DVSAClient:
 
     async def __aexit__(self, exc_type, exc, tb):
         try:
-            # Save storage for reuse
             if self._storage_path and self.context:
                 try:
                     await self.context.storage_state(path=self._storage_path)
@@ -298,7 +287,6 @@ class DVSAClient:
             async with self._http.post(url, json=payload, timeout=15) as _:
                 pass
         except Exception:
-            # Instrumentation must never break core flow
             pass
 
     async def _event(self, text: str):
@@ -318,16 +306,21 @@ class DVSAClient:
         finally:
             self._http = None
 
+    # ---------------- Debug helper ----------------
+    async def _debug_dump(self, tag: str):
+        """Best-effort screenshot + url dump for layout issues."""
+        try:
+            ts = str(int(time.time()))
+            path = f"/tmp/{tag}_{ts}.png"
+            await self.page.screenshot(path=path, full_page=True)
+            await self._event(f"debug:{tag}:{self.page.url}")
+        except Exception:
+            pass
+
     # ------------- RPS throttle -------------
     async def _rps_pause(self, where: str = ""):
-        """
-        Ensure at most ~1 request / interval with ±jitter.
-        Called after actions that likely hit the network (nav, form submit, click).
-        """
-        # Determine randomized target interval for this step
         factor = 1.0
         if self._rps_jitter > 0.0:
-            # pick in [1 - j, 1 + j]
             low = max(0.1, 1.0 - self._rps_jitter)
             high = 1.0 + self._rps_jitter
             factor = random.uniform(low, high)
@@ -350,34 +343,28 @@ class DVSAClient:
 
     # ------------- Timing helpers (human-like settle) -------------
     async def _human_pause(self, max_ms: int):
-        """Small randomized settle to avoid machine-perfect cadence."""
         if max_ms <= 0:
             return
         await asyncio.sleep(random.uniform(0.25, max_ms / 1000.0))
 
     async def _wait_for_dvsa_ready(self) -> bool:
-        """
-        Gate interactions until DVSA has finished its initial "please wait" loading,
-        hCaptcha (if any) has mounted, and a known interactive element is visible.
-        """
         await self._captcha_guard("ready_gate_pre")
 
-        # If DVSA shows a loading banner, wait for it to disappear
+        # "Please wait" / loading banners
         try:
             banner = self.page.locator("text=/please\\s+wait|loading\\s+the\\s+page/i")
             if await banner.count() > 0:
                 await banner.first.wait_for(state="detached", timeout=READY_MAX_MS)
         except Exception:
-            pass  # continue with other readiness checks
+            pass
 
-        # If hCaptcha iframe appears, give it a moment to settle
+        # hCaptcha iframe settle
         try:
             await self.page.wait_for_selector('iframe[src*="hcaptcha.com"]', timeout=7000)
             await self._human_pause(700)
         except Exception:
             pass
 
-        # Look for elements that signal the page is actually usable
         candidates = [
             'form button[type="submit"]',
             'a[href*="start"]',
@@ -393,7 +380,6 @@ class DVSAClient:
             except Exception:
                 continue
 
-        # As a last resort: near-idle network
         try:
             await self.page.wait_for_load_state("networkidle", timeout=15000)
             await self._human_pause(600)
@@ -429,7 +415,6 @@ class DVSAClient:
         await self._rps_pause("after_click_css")
 
     async def _click_continue_role_fallback(self) -> bool:
-        # Prefer accessible role/name to resist copy changes
         for name in ROLE_BUTTONS["continue"]:
             try:
                 try:
@@ -442,14 +427,12 @@ class DVSAClient:
                 return True
             except Exception:
                 continue
-        # CSS fallback
         for sel in (_sel("new_continue"), _sel("swap_continue")):
             try:
                 await self._click_css(sel)
                 return True
             except Exception:
                 continue
-        # very last-chance: any primary govuk button
         try:
             await self.page.locator("button.govuk-button").first.click(timeout=3000)
             await self._human_pause(CLICK_SETTLE_MS)
@@ -459,50 +442,57 @@ class DVSAClient:
             return False
 
     async def _fill_by_label_variants(self, names: list[str], value: str) -> bool:
-        """
-        Try (1) label-based; (2) ARIA/placeholder; (3) nearest-input to text node.
-        This covers DVSA pages that use legends, fieldsets or custom markup.
-        """
-        # 1) Labels
+        # 1) Labels & roles
         for n in names:
             try:
-                await self.page.get_by_label(n, exact=False).fill(value, timeout=3500)
-                await self._human_pause(400)
-                return True
+                await self.page.get_by_label(n, exact=False).fill(value, timeout=2500)
+                await self._human_pause(350); return True
             except Exception:
-                continue
-
-        # 2) Common placeholders/aria-labels
-        for ph in [n for n in names] + ["Driver number", "Licence", "Booking reference", "Reference"]:
+                pass
             try:
-                await self.page.get_by_placeholder(ph, exact=False).fill(value, timeout=2500)
-                await self._human_pause(350)
-                return True
+                await self.page.get_by_role("textbox", name=re.compile(n, re.I)).fill(value, timeout=2500)
+                await self._human_pause(350); return True
             except Exception:
-                continue
-            try:
-                await self.page.locator(f"input[aria-label*='{ph}'], input[aria-labelledby*='{ph}']").first.fill(value, timeout=2500)
-                await self._human_pause(350)
-                return True
-            except Exception:
-                continue
+                pass
 
-        # 3) Nearest input after visible text node
-        for n in names:
+        # 2) Placeholder / aria
+        for ph in names + ["Driver number", "Licence", "Driving licence"]:
             try:
-                lab = self.page.get_by_text(n, exact=False).first
-                await lab.wait_for(timeout=1500)
-                container = lab.locator("xpath=ancestor-or-self::*[self::label or self::div or self::fieldset][1]")
-                await container.locator("input").first.fill(value, timeout=2500)
-                await self._human_pause(350)
-                return True
+                await self.page.get_by_placeholder(ph, exact=False).fill(value, timeout=2000)
+                await self._human_pause(300); return True
             except Exception:
-                continue
+                pass
+            try:
+                loc = self.page.locator(
+                    f"input[aria-label*='{ph}'], input[aria-labelledby*='{ph}']"
+                ).first
+                await loc.fill(value, timeout=2000)
+                await self._human_pause(300); return True
+            except Exception:
+                pass
 
+        # 3) Heuristic: the most “licence-looking” input
+        try:
+            candidates = await self.page.query_selector_all(
+                "input[name*='licen'], input[id*='licen'], input[type='text'], input:not([type])"
+            )
+            for i in candidates[:8]:
+                try:
+                    ml = await i.get_attribute("maxlength")
+                    if ml and int(ml) < 12:
+                        continue
+                except Exception:
+                    pass
+                try:
+                    await i.fill(value, timeout=2000)
+                    await self._human_pause(300); return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
         return False
 
     async def _accept_cookies(self):
-        """Dismiss DVSA cookie banners if present (quietly)."""
         for name in ["Accept all cookies", "Accept analytics cookies", "Accept cookies", "I agree"]:
             try:
                 await self.page.get_by_role("button", name=name).click(timeout=1500)
@@ -513,30 +503,23 @@ class DVSAClient:
                 pass
 
     async def _captcha_guard(self, where: Optional[str] = None):
-        """
-        Inspect current DOM for anti-bot widgets/messages.
-        If found: emit admin event (when sid is attached), save a screenshot, raise CaptchaDetected(url=...).
-        """
         html = (await self.page.content()).lower()
         indicators = [
-            "recaptcha", "hcaptcha", "turnstile",  # common widgets
+            "recaptcha", "hcaptcha", "turnstile",
             "not a robot", "unusual traffic", "additional security check", "enter the characters", "are you human",
             "verify you are human", "security challenge", "captcha"
         ]
         if any(k in html for k in indicators):
-            # best-effort screenshot
             try:
                 ts = str(int(asyncio.get_event_loop().time()))
                 await self.page.screenshot(path=f"/tmp/captcha_{ts}.png", full_page=True)
             except Exception:
                 pass
-            # post event immediately if we know the job
             stage = where or self._stage or "unknown"
             try:
                 await self._event(f"captcha_cooldown:{stage}")
             except Exception:
                 pass
-            # raise with URL for the worker to include in WhatsApp (if desired)
             raise CaptchaDetected(url=(self.page.url if self.page else ""))
 
     async def _expect_ok(self):
@@ -547,12 +530,7 @@ class DVSAClient:
             raise DVSAError(f"DVSA error: {msg}")
 
     async def _maybe_click_start_now(self):
-        """
-        If we land on the GOV.UK explainer, click Start now to reach the form.
-        Tries role-based (accessible) lookup first, then CSS, then loose text.
-        """
         try:
-            # Role/name first (more resilient to markup tweaks)
             for name in ["Start now", "Start", "Begin", "Continue"]:
                 try:
                     await self.page.get_by_role("link", name=re.compile(name, re.I)).click(timeout=2000)
@@ -564,8 +542,6 @@ class DVSAClient:
                     return
                 except Exception:
                     pass
-
-            # CSS fallbacks
             try:
                 el = await self.page.query_selector(_sel("start_now"))
                 if el:
@@ -578,8 +554,6 @@ class DVSAClient:
                     return
             except Exception:
                 pass
-
-            # Loose text search
             try:
                 el = await self.page.get_by_text(re.compile(r"\bstart now\b", re.I)).first
                 await el.click(timeout=1500)
@@ -591,7 +565,7 @@ class DVSAClient:
             except Exception:
                 pass
         except Exception:
-            pass  # never fail flow just on this
+            pass
 
     async def _select_car_category_if_present(self):
         try:
@@ -607,12 +581,6 @@ class DVSAClient:
             pass
 
     async def _answer_no_no_if_present(self):
-        """
-        On the licence details page, DVSA asks:
-          - Have you been ordered by a court to take an extended test?
-          - Do you have any special requirements?
-        We answer No/No when those controls exist.
-        """
         try:
             no_radios = self.page.get_by_label("No", exact=True)
             await no_radios.nth(0).check(timeout=2000)
@@ -633,59 +601,67 @@ class DVSAClient:
                 pass
 
     async def _licence_form_present(self) -> bool:
-        """Return True if any known licence input is present (swap/new)."""
-        css = (
-            "input[name='driving-licence-number'], input[id='driving-licence-number'], "
-            "input[name='drivingLicenceNumber'], input[id='drivingLicenceNumber'], "
-            "input[name*='licence' i], input[id*='licence' i], "
-            "input[name*='license' i], input[id*='license' i]"
-        )
+        """
+        Return True if *any* plausible licence input is present (swap/new).
+        DVSA sometimes shuffles labels/ids; we look for multiple hints.
+        """
         try:
-            el = await self.page.query_selector(css)
-            if el:
+            css = (
+                "input[name='driving-licence-number'], "
+                "input[name*='driving'][name*='licence'], "
+                "input[id*='driving'][id*='licence'], "
+                "input[name='driverLicenceNumber'], "
+                "input[id='driving-licence-number'], "
+                "input[autocomplete='organization']"
+            )
+            if await self.page.query_selector(css):
                 return True
-            # broader probe
-            el2 = await self.page.query_selector("input[placeholder*='licen' i], input[aria-label*='licen' i]")
-            return el2 is not None
-        except Exception:
-            return False
 
-    async def _fill_licence_best_effort(self, value: str) -> bool:
-        """
-        Last-resort: try a wide net of inputs that look like 'licence/licence number'.
-        """
-        candidates = [
-            "input[name*='licen' i]", "input[id*='licen' i]",
-            "input[aria-label*='licen' i]", "input[aria-labelledby*='licen' i]",
-            "input[placeholder*='licen' i]",
-        ]
-        for sel in candidates:
             try:
-                el = await self.page.query_selector(sel)
-                if el:
-                    await el.fill(value)
-                    await self._human_pause(350)
+                el = self.page.get_by_role("textbox", name=re.compile(r"driving\s*licen[sc]e", re.I)).first
+                if await el.count() > 0:
                     return True
             except Exception:
                 pass
-        # nearest input following text that mentions licence
-        try:
-            lab = self.page.get_by_text(re.compile(r"licen[cs]e", re.I)).first
-            await lab.wait_for(timeout=1500)
-            container = lab.locator("xpath=ancestor-or-self::*[self::label or self::div or self::fieldset][1]")
-            input_el = container.locator("input").first
-            await input_el.fill(value, timeout=2500)
-            await self._human_pause(350)
-            return True
+
+            inputs = await self.page.query_selector_all("input[type='text'], input:not([type])")
+            for i in inputs[:6]:
+                try:
+                    ml = await i.get_attribute("maxlength")
+                    if ml and int(ml) >= 16:
+                        return True
+                except Exception:
+                    continue
         except Exception:
-            pass
+            return False
         return False
+
+    async def _nudge_to_login_form(self):
+        """Click common links/buttons that lead to the credentials form."""
+        hints = [
+            ("link", r"(change|manage|find).*booking"),
+            ("button", r"(continue|start|sign in|next|find appointments)"),
+        ]
+        for role, rx in hints:
+            try:
+                m = re.compile(rx, re.I)
+                if role == "link":
+                    await self.page.get_by_role("link", name=m).first.click(timeout=1200)
+                else:
+                    await self.page.get_by_role("button", name=m).first.click(timeout=1200)
+                await self._human_pause(400)
+                await self._wait_for_dvsa_ready()
+                if await self._licence_form_present():
+                    return
+            except Exception:
+                pass
 
     # ------------- Public API used by worker -------------
     async def login_swap(self, licence_number: str, booking_reference: str, email: Optional[str] = None):
         self._stage = "login_swap_nav"
         await self._goto(URL_CHANGE_TEST, stage="login_swap_nav")
         await self._maybe_click_start_now()
+        await self._nudge_to_login_form()
         if not await self._licence_form_present():
             await asyncio.sleep(0.3)
             await self._maybe_click_start_now()
@@ -697,16 +673,9 @@ class DVSAClient:
         if not ok_lic:
             try:
                 await self._fill_css(_sel("swap_licence"), licence_number)
-                ok_lic = True
             except Exception:
-                ok_lic = await self._fill_licence_best_effort(licence_number)
-        if not ok_lic:
-            try:
-                ts = str(int(asyncio.get_event_loop().time()))
-                await self.page.screenshot(path=f"/tmp/licence_missing_{ts}.png", full_page=True)
-            except Exception:
-                pass
-            raise DVSAError("layout_change: licence field not found")
+                await self._debug_dump("licence_missing")
+                raise DVSAError("layout_change: licence field not found")
 
         # Fill booking reference
         self._stage = "login_swap_reference"
@@ -725,7 +694,7 @@ class DVSAClient:
                 try:
                     await self._fill_css(_sel("swap_email"), email)
                 except Exception:
-                    pass  # not fatal
+                    pass
 
         # Continue button
         self._stage = "login_swap_continue"
@@ -738,6 +707,7 @@ class DVSAClient:
         self._stage = "login_new_nav"
         await self._goto(URL_BOOK_TEST, stage="login_new_nav")
         await self._maybe_click_start_now()
+        await self._nudge_to_login_form()
         if not await self._licence_form_present():
             await asyncio.sleep(0.3)
             await self._maybe_click_start_now()
@@ -752,16 +722,9 @@ class DVSAClient:
         if not ok_lic:
             try:
                 await self._fill_css(_sel("new_licence"), licence_number)
-                ok_lic = True
             except Exception:
-                ok_lic = await self._fill_licence_best_effort(licence_number)
-        if not ok_lic:
-            try:
-                ts = str(int(asyncio.get_event_loop().time()))
-                await self.page.screenshot(path=f"/tmp/licence_missing_{ts}.png", full_page=True)
-            except Exception:
-                pass
-            raise DVSAError("layout_change: licence field not found")
+                await self._debug_dump("licence_missing")
+                raise DVSAError("layout_change: licence field not found")
 
         # Optional theory pass
         if theory_pass:
@@ -796,7 +759,6 @@ class DVSAClient:
 
     async def _open_centre(self, centre_name: str) -> bool:
         self._stage = f"centre_open:{centre_name}"
-        # Some flows require a link to the centre search first; try common link names.
         for name in ["Test centre availability", "Change test centre", "Find a test centre", "Change location"]:
             try:
                 await self.page.get_by_role("link", name=name).click(timeout=2000)
@@ -837,23 +799,12 @@ class DVSAClient:
             await self._human_pause(CLICK_SETTLE_MS)
             await self._rps_pause("after_centre_enter_timeout")
 
-        # If there is an explicit Search/Continue button, click it
         await self._click_continue_role_fallback()
 
         await self._expect_ok()
         return True
 
     async def search_centre_slots(self, centre_name: str) -> List[str]:
-        """
-        Return human-readable slots like:
-            "Pinner · 2025-10-02 · 08:10"
-        or (if date list isn’t present):
-            "Pinner · (date unknown) · 08:10"
-        Posts admin events when a sid is attached:
-            checked:<centre> · no_slots|<n>
-            captcha_cooldown:<centre|stage>
-            error:<centre> · <ExceptionName>
-        """
         try:
             await self._captcha_guard(f"pre_open:{centre_name}")
             if not await self._open_centre(centre_name):
@@ -862,14 +813,13 @@ class DVSAClient:
 
             slots: List[str] = []
 
-            # Try dates → times
             try:
                 date_nodes = await self.page.query_selector_all(_sel("centre_dates"))
             except PWTimeout:
                 date_nodes = []
 
             if date_nodes:
-                for d in date_nodes[:5]:  # only the first few dates per poll
+                for d in date_nodes[:5]:
                     dtxt = (await d.text_content() or "").strip()
                     if not dtxt:
                         continue
@@ -883,7 +833,6 @@ class DVSAClient:
                     for t in time_nodes:
                         ttxt = (await t.text_content() or "").strip()
                         if ttxt:
-                            # normalise "view" rows
                             if ttxt.lower() == "view":
                                 try:
                                     await t.click()
@@ -899,7 +848,6 @@ class DVSAClient:
                                     pass
                             slots.append(f"{centre_name} · {dtxt} · {ttxt}")
             else:
-                # Times only
                 time_nodes = await self.page.query_selector_all(_sel("centre_times"))
                 for t in time_nodes:
                     ttxt = (await t.text_content() or "").strip()
@@ -917,15 +865,9 @@ class DVSAClient:
             raise
 
     async def swap_to(self, slot_label: str) -> bool:
-        """
-        Click the slot produced by search_centre_slots(), then confirm the change.
-        Accepts either "Centre · YYYY-MM-DD · HH:MM" or "Centre · (date unknown) · HH:MM".
-        Emits 'booked:' or 'booking_failed:' status when sid is attached.
-        """
         await self._captcha_guard("pre_swap_confirm")
         await self._wait_for_dvsa_ready()
 
-        # Parse parts
         m = re.match(r"^(.*?) · (.*?) · (\d{1,2}:\d{2})$", slot_label)
         centre = date_txt = time_txt = None
         if m:
@@ -936,7 +878,6 @@ class DVSAClient:
                 await self._event(f"error:{centre or 'unknown'} · OpenFailed")
                 return False
 
-        # Click date if present
         if date_txt and date_txt != "(date unknown)":
             try:
                 date_nodes = await self.page.query_selector_all(_sel("centre_dates"))
@@ -950,7 +891,6 @@ class DVSAClient:
             except PWTimeout:
                 pass
 
-        # Click matching time
         try:
             time_nodes = await self.page.query_selector_all(_sel("centre_times"))
             clicked = False
@@ -975,7 +915,6 @@ class DVSAClient:
             await self._event(f"booking_failed:{centre} · {date_txt} · {time_txt or 'unknown'}")
             return False
 
-        # Confirm
         try:
             await self._click_css(_sel("confirm_button"))
         except PWTimeout:
@@ -986,30 +925,22 @@ class DVSAClient:
         await self._status("booked", f"booked:{centre} · {date_txt} · {time_txt or 'unknown'}")
         return True
 
-    # ---------- NEW: booking reference extraction ----------
+    # ---------- Booking reference extraction ----------
     async def _extract_booking_reference(self) -> Optional[str]:
-        """
-        Tries a few robust patterns/locations to extract the DVSA booking/application
-        reference (typically 8 digits) from the current page.
-        Returns the reference string (e.g., '12345678') or None if not found yet.
-        """
         try:
-            # Give the confirmation page a moment to fully render
             await self._wait_for_dvsa_ready()
             html = await self.page.content()
 
-            # 1) Look for common labels near an 8-digit number
             patterns = [
                 r"(?:booking|application)\s+reference(?:\s+number)?[^0-9]{0,40}(\d{8})",
                 r"reference\s+number[^0-9]{0,40}(\d{8})",
-                r"\b(\d{8})\b",  # last resort: any 8-digit number on page
+                r"\b(\d{8})\b",
             ]
             for pat in patterns:
                 m = re.search(pat, html, flags=re.I | re.S)
                 if m:
                     return m.group(1)
 
-            # 2) Try reading visible text from likely containers
             candidates = [
                 "text=/booking reference/i",
                 "text=/application reference/i",
@@ -1032,21 +963,11 @@ class DVSAClient:
             pass
         return None
 
-    # ---------- NEW: book & pay for NEW bookings and return reference ----------
+    # ---------- Book & pay for NEW bookings and return reference ----------
     async def book_and_pay(self, slot_label: str) -> Optional[str]:
-        """
-        Book a NEW test slot (same label format as search results) and return the
-        real 8-digit booking reference from the confirmation page.
-        Returns:
-            str booking_reference on success, or None on failure.
-        Emits:
-            - booked:<centre> · <date> · <time> · ref=<REF>
-            - booking_failed:<centre> · <date> · <time>
-        """
         await self._captcha_guard("pre_book_and_pay")
         await self._wait_for_dvsa_ready()
 
-        # Parse parts
         m = re.match(r"^(.*?) · (.*?) · (\d{1,2}:\d{2})$", slot_label)
         centre = date_txt = time_txt = None
         if m:
@@ -1057,7 +978,6 @@ class DVSAClient:
                 await self._event(f"error:{centre or 'unknown'} · OpenFailed")
                 return None
 
-        # Click date if present
         if date_txt and date_txt != "(date unknown)":
             try:
                 date_nodes = await self.page.query_selector_all(_sel("centre_dates"))
@@ -1071,7 +991,6 @@ class DVSAClient:
             except PWTimeout:
                 pass
 
-        # Click matching time
         try:
             time_nodes = await self.page.query_selector_all(_sel("centre_times"))
             clicked = False
@@ -1096,28 +1015,24 @@ class DVSAClient:
             await self._event(f"booking_failed:{centre} · {date_txt} · {time_txt or 'unknown'}")
             return None
 
-        # Confirm (this may lead to payment + confirmation, or straight to confirmation)
         try:
             await self._click_css(_sel("confirm_button"))
         except PWTimeout:
             await self._event(f"booking_failed:{centre} · {date_txt} · {time_txt or 'unknown'}")
             return None
 
-        # We’re now on either a payment or confirmation page. Wait & try to extract reference.
         await self._expect_ok()
 
-        # Give the flow a few chances (some journeys need a couple of redirects)
         for _ in range(3):
             ref = await self._extract_booking_reference()
             if ref:
                 await self._status("booked", f"booked:{centre} · {date_txt} · {time_txt or 'unknown'} · ref={ref}")
                 return ref
-            # small pause and rps pacing before next attempt
             await self._human_pause(900)
             await self._rps_pause("after_bookpay_wait")
 
-        # If still no reference, mark failed (caller can decide to retry)
         await self._event(f"booking_failed:{centre} · {date_txt} · {time_txt or 'unknown'}")
+        await self._debug_dump("no_ref_after_book")
         return None
 
 
