@@ -150,7 +150,9 @@ SEL = {
         "input#driving-licence-number, "
         "input#drivingLicenceNumber, "
         "input[name*='licence'], input[id*='licence'], "
-        "input[name='driverLicenceNumber']"
+        "input[name='driverLicenceNumber'], "
+        "input[name='driverNumber'], "
+        "input#driver-number, input[name='driver-number']"
     ),
     "swap_ref":      (
         "input[name='booking-reference'], "
@@ -170,7 +172,9 @@ SEL = {
         "input#driving-licence-number, "
         "input#drivingLicenceNumber, "
         "input[name*='licence'], input[id*='licence'], "
-        "input[name='driverLicenceNumber']"
+        "input[name='driverLicenceNumber'], "
+        "input[name='driverNumber'], "
+        "input#driver-number, input[name='driver-number']"
     ),
     "new_theory":    "input[name='theory-pass-number'], input[name='theoryPassNumber'], input[name*='theory'], input[id*='theory']",
     "new_email":     "input[name='email'], input[id*='email'], input[name='candidateEmail']",
@@ -195,11 +199,13 @@ LABELS = {
         "Driver number",
         "Licence number",
         "Driving licence number (as it appears on your licence)",
+        "Driving licence",
     ],
     "swap_ref": [
         "Application reference number",
         "Booking reference",
         "Reference number",
+        "Driving test reference number",
     ],
     "email": [
         "Email",
@@ -208,7 +214,7 @@ LABELS = {
     ],
 }
 ROLE_BUTTONS = {
-    "continue": ["Continue", "Sign in", "Next", "Find appointments", "Search"],
+    "continue": ["Continue", "Sign in", "Next", "Find appointments", "Search", "Find available appointments"],
 }
 
 def _sel(key: str) -> str:
@@ -482,10 +488,25 @@ class DVSAClient:
         await self._human_pause(POST_NAV_SETTLE_MS)
         await self._wait_for_dvsa_ready()
 
+    async def _scroll_focus_fill(self, locator, value: str) -> bool:
+        try:
+            await locator.scroll_into_view_if_needed()
+        except Exception:
+            pass
+        try:
+            await locator.focus(timeout=1500)
+        except Exception:
+            pass
+        try:
+            await locator.fill(value, timeout=2500)
+            await self._human_pause(350)
+            return True
+        except Exception:
+            return False
+
     async def _fill_css(self, sel: str, value: str):
-        await self.page.wait_for_selector(sel)
-        await self.page.fill(sel, value)
-        await self._human_pause(450)
+        el = await self.page.wait_for_selector(sel)
+        await self._scroll_focus_fill(el, value)
 
     async def _click_css(self, sel: str):
         await self.page.wait_for_selector(sel)
@@ -524,8 +545,49 @@ class DVSAClient:
         except Exception:
             return False
 
+    async def _fill_by_label_or_xpath(self, label_regex: str, value: str) -> bool:
+        """
+        GOV.UK often uses <label for="id"> + <input id="id">.
+        Strategy:
+          1) find label by regex -> resolve 'for' -> input#id
+          2) label -> nearest following input (DOM walk)
+          3) inputs linked via aria-labelledby that includes the label's id
+        """
+        try:
+            # 1) label -> for -> input
+            lab = self.page.locator(f"label:has-text(/^{label_regex}$/i)").first
+            if await lab.count() > 0:
+                for_id = await lab.get_attribute("for")
+                if for_id:
+                    inp = self.page.locator(f"#{for_id}")
+                    if await inp.count() > 0:
+                        ok = await self._scroll_focus_fill(inp.first, value)
+                        if ok: return True
+                # 2) following input
+                inp2 = self.page.locator(f"label:has-text(/^{label_regex}$/i) >> xpath=following::input[1]").first
+                if await inp2.count() > 0:
+                    ok = await self._scroll_focus_fill(inp2, value)
+                    if ok: return True
+
+                # 3) aria-labelledby chain
+                lab_id = await lab.get_attribute("id")
+                if lab_id:
+                    aria = self.page.locator(f"input[aria-labelledby*='{lab_id}']").first
+                    if await aria.count() > 0:
+                        ok = await self._scroll_focus_fill(aria, value)
+                        if ok: return True
+        except Exception:
+            pass
+        return False
+
     async def _fill_by_label_variants(self, names: list[str], value: str) -> bool:
-        # 1) Labels & roles
+        # A) Strong label/XPath route first
+        for n in names:
+            rx = re.escape(n).replace("\\ ", "\\s+")
+            if await self._fill_by_label_or_xpath(rx, value):
+                return True
+
+        # B) Labels & roles (Playwright helpers)
         for n in names:
             try:
                 await self.page.get_by_label(n, exact=False).fill(value, timeout=2500)
@@ -538,8 +600,8 @@ class DVSAClient:
             except Exception:
                 pass
 
-        # 2) Placeholder / aria
-        for ph in names + ["Driver number", "Licence", "Driving licence"]:
+        # C) Placeholder / aria
+        for ph in names + ["Driver number", "Licence", "Driving licence", "Driving licence number"]:
             try:
                 await self.page.get_by_placeholder(ph, exact=False).fill(value, timeout=2000)
                 await self._human_pause(300); return True
@@ -547,28 +609,30 @@ class DVSAClient:
                 pass
             try:
                 loc = self.page.locator(
-                    f"input[aria-label*='{ph}'], input[aria-labelledby*='{ph}']"
+                    f"input[aria-label*='{ph}'], input[aria-labelledby*='{ph}'], input[aria-describedby*='{ph}']"
                 ).first
-                await loc.fill(value, timeout=2000)
-                await self._human_pause(300); return True
+                if await loc.count() > 0:
+                    await loc.fill(value, timeout=2000)
+                    await self._human_pause(300); return True
             except Exception:
                 pass
 
-        # 3) Heuristic: the most “licence-looking” input
+        # D) Heuristic: the most “licence-looking” input
         try:
             candidates = await self.page.query_selector_all(
-                "input[name*='licen'], input[id*='licen'], input[type='text'], input:not([type])"
+                "input[name*='licen'], input[id*='licen'], input[name*='driver'], input[id*='driver'], input[type='text'], input:not([type])"
             )
-            for i in candidates[:8]:
+            for i in candidates[:12]:
                 try:
                     ml = await i.get_attribute("maxlength")
-                    if ml and int(ml) < 12:
-                        continue
                 except Exception:
-                    pass
+                    ml = None
                 try:
-                    await i.fill(value, timeout=2000)
-                    await self._human_pause(300); return True
+                    # Prefer likely long inputs (>= 16). Skip very short maxlen.
+                    if ml and ml.isdigit() and int(ml) < 12:
+                        continue
+                    await i.fill(value, timeout=1800)
+                    await self._human_pause(280); return True
                 except Exception:
                     continue
         except Exception:
@@ -584,6 +648,7 @@ class DVSAClient:
             "Accept additional cookies",
             "Accept all non-essential cookies",
             "Reject all non-essential cookies",
+            "Hide this message",
             "Set cookie preferences",
         ]:
             try:
@@ -659,7 +724,7 @@ class DVSAClient:
 
     async def _maybe_click_start_now(self):
         try:
-            for name in ["Start now", "Start", "Begin", "Continue"]:
+            for name in ["Start now", "Start", "Begin", "Continue", "Find a test centre"]:
                 try:
                     await self.page.get_by_role("link", name=re.compile(name, re.I)).click(timeout=2000)
                     await self.page.wait_for_load_state("domcontentloaded", timeout=6000)
@@ -748,14 +813,15 @@ class DVSAClient:
                 "input#drivingLicenceNumber, "
                 "input[name*='driving'][name*='licence'], "
                 "input[id*='driving'][id*='licence'], "
-                "input[name='driverLicenceNumber']"
+                "input[name='driverLicenceNumber'], input[name='driverNumber'], "
+                "input#driver-number, input[name='driver-number']"
             )
             if await self.page.query_selector(css):
                 await self._event(f"login_form_ready:{self._stage or 'unknown'}")
                 return True
 
             try:
-                el = self.page.get_by_role("textbox", name=re.compile(r"driving\s*licen[sc]e", re.I)).first
+                el = self.page.get_by_role("textbox", name=re.compile(r"driving\s*licen[sc]e|driver\s*number", re.I)).first
                 if await el.count() > 0:
                     await self._event(f"login_form_ready:{self._stage or 'unknown'}")
                     return True
@@ -763,7 +829,7 @@ class DVSAClient:
                 pass
 
             inputs = await self.page.query_selector_all("input[type='text'], input:not([type])")
-            for i in inputs[:6]:
+            for i in inputs[:8]:
                 try:
                     ml = await i.get_attribute("maxlength")
                     if ml and int(ml) >= 16:
@@ -1056,8 +1122,8 @@ class DVSAClient:
                 if not time_txt and slot_label in ttxt:
                     await t.click()
                     await self._human_pause(CLICK_SETTLE_MS)
-                    await self._rps_pause("after_swap_time_click2")
                     clicked = True
+                    await self._rps_pause("after_swap_time_click2")
                     break
             if not clicked:
                 await self._event(f"booking_failed:{centre} · {date_txt} · {time_txt or 'unknown'}")
