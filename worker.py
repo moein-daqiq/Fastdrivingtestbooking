@@ -896,6 +896,9 @@ async def run():
                     await asyncio.sleep(POLL_SEC); continue
 
                 jobs = await claim_candidates_api(client, CONCURRENCY)
+                # >>> added debug line so you can see each poll result in logs
+                print(f"[worker] poll: pause={CTRL.get('pause_all')} quiet={is_quiet_now()} "
+                      f"global_allowed={global_allowed()} claimed={len(jobs)}", flush=True)
                 if not jobs:
                     await asyncio.sleep(POLL_SEC); continue
                 for j in jobs:
