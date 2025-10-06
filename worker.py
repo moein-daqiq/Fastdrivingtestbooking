@@ -1,912 +1,596 @@
-# --- worker.py (priority centres + kill-switch + CAPTCHA/IP-block WhatsApp alerts + resume link +
-#                better logging + more attempts + anywhere-scan-first for NEW + auto-upgrade-to-swap) ---
-
-import os, json, math, time, random, sqlite3, asyncio, subprocess, hashlib, re
+# =============================
+# FILE: worker.py
+# =============================
+import os
+import sys
+import time
+import json
+import queue
+import math
+import random
+import signal
+import logging
+import threading
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple, Optional, Iterable
+from typing import Any, Dict, List, Optional
 
-import httpx
-from dvsa_client import DVSAClient, CaptchaDetected, IPBlocked  # <-- dvsa_client must define IPBlocked
+import requests
 
-import hmac
-import base64
-from urllib.parse import urlencode
+# Optional Twilio (WhatsApp alerts)
+try:
+    from twilio.rest import Client as TwilioClient  # type: ignore
+except Exception:  # pragma: no cover
+    TwilioClient = None
 
-# ==============================
-# Config / Environment
-# ==============================
-DB_FILE = os.environ.get("SEARCHES_DB", "/tmp/worker_state.db")
-API_BASE = os.environ.get("API_BASE", "").rstrip("/")
+from dvsa_client import DVSAClient, DVSAError, CaptchaDetected, ServiceClosed, LayoutIssue, WAFBlocked
+
+# ---------- ENV ----------
+API_BASE = os.environ.get("API_BASE", "http://localhost:8000/api").rstrip("/")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
+STATE_DB = os.environ.get("SEARCHES_DB", "searches.db")
 
-POLL_SEC = int(os.environ.get("WORKER_POLL_SEC", "30"))
-CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "8"))
-JOB_MAX_PARALLEL_CHECKS = int(os.environ.get("JOB_MAX_PARALLEL_CHECKS", "4"))
+PLAYWRIGHT_BROWSERS_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+AUTOBOOK_ENABLED = os.environ.get("AUTOBOOK_ENABLED", "true").lower() == "true"
+AUTOBOOK_MODE = os.environ.get("AUTOBOOK_MODE", "simulate")  # simulate | real
+HONOUR_CLIENT_RPS = os.environ.get("HONOUR_CLIENT_RPS", "true").lower() == "true"
+DVSA_RPS = float(os.environ.get("DVSA_RPS", "0.5"))
+DVSA_RPS_JITTER = float(os.environ.get("DVSA_RPS_JITTER", "0.35"))
 
-MAX_CONNECTIONS = int(os.environ.get("WORKER_MAX_CONNECTIONS", "40"))
-MAX_KEEPALIVE = int(os.environ.get("WORKER_MAX_KEEPALIVE", "20"))
-REQUEST_TIMEOUT = float(os.environ.get("WORKER_TIMEOUT_SEC", "10"))
-JITTER_MS = int(os.environ.get("WORKER_JITTER_MS", "400"))
-USER_AGENT = os.environ.get("WORKER_USER_AGENT", "FastDTF/1.0 (+https://fastdrivingtestfinder.co.uk)")
-
-NOTIFY_WEBHOOK_URL = os.environ.get("NOTIFY_WEBHOOK_URL", "")
-
+# WhatsApp alerts (optional)
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
-TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
-WHATSAPP_OWNER_TO = os.environ.get("WHATSAPP_OWNER_TO", "whatsapp:+447402597000")
-ADMIN_URL = os.environ.get("ADMIN_URL", "")
+TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")
+WHATSAPP_OWNER_TO = os.environ.get("WHATSAPP_OWNER_TO", "")
 
-ASSIST_NOTIFY_WINDOW_MIN = int(os.environ.get("ASSIST_NOTIFY_WINDOW_MIN", "15"))
-ASSIST_NOTIFY_PING_SECONDS = int(os.environ.get("ASSIST_NOTIFY_PING_SECONDS", "60"))
-ASSIST_NOTIFY_ENABLED = os.environ.get("ASSIST_NOTIFY_ENABLED", "true").lower() == "true"
+RESUME_URL = os.environ.get("RESUME_URL", f"{API_BASE}/worker/resume")
+QUIET_HOURS = os.environ.get("QUIET_HOURS", "")  # e.g., "00-06"
 
-AUTOBOOK_ENABLED = os.environ.get("AUTOBOOK_ENABLED", "true").lower() == "true"
-# Default behaviour when options_json is empty/missing/non-dict
-AUTOBOOK_DEFAULT = os.environ.get("AUTOBOOK_DEFAULT", "true").lower() == "true"
-AUTOBOOK_MODE = os.environ.get("AUTOBOOK_MODE", "simulate")  # simulate | real
-AUTOBOOK_SIM_SUCCESS_RATE = float(os.environ.get("AUTOBOOK_SIM_SUCCESS_RATE", "0.85"))
-
-# IMPORTANT:
-HONOUR_CLIENT_RPS = os.environ.get("HONOUR_CLIENT_RPS", "true").lower() == "true"
-DVSA_RPS = float(os.environ.get("DVSA_RPS", "4.0"))  # only used if HONOUR_CLIENT_RPS=false
-
-CB_FAILS_THRESHOLD = int(os.environ.get("CB_FAILS_THRESHOLD", "12"))
-CB_COOLDOWN_SEC = int(os.environ.get("CB_COOLDOWN_SEC", "120"))
-
-CAPTCHA_COOLDOWN_MIN = int(os.environ.get("CAPTCHA_COOLDOWN_MIN", "30"))
-IPBLOCK_COOLDOWN_MIN = int(os.environ.get("IPBLOCK_COOLDOWN_MIN", "90"))  # NEW
-
-QUIET_HOURS = os.environ.get("QUIET_HOURS", "").strip()
-
-# DVSA entry points (overrideable from env, used in alerts)
-DVSA_URL_CHANGE = os.environ.get("DVSA_URL_CHANGE", "https://driverpracticaltest.dvsa.gov.uk/manage")
-DVSA_URL_BOOK   = os.environ.get("DVSA_URL_BOOK",   "https://driverpracticaltest.dvsa.gov.uk/application")
-
-# Optional backend "resume now" endpoint (used in WhatsApp)
-RESUME_URL = os.environ.get("RESUME_URL", "").rstrip("/")
-
-# Stale search expiry
-STALE_MINUTES = int(os.environ.get("STALE_MINUTES", "5"))
-
-# Priority centres env (comma-separated)
-PRIORITY_CENTRES = [
-    c.strip().lower() for c in os.environ.get("PRIORITY_CENTRES", "").split(",") if c.strip()
-]
-CURRENT_PRIORITY_CENTRES = PRIORITY_CENTRES[:]  # live-updated from API controls
-
-# Complete list of centres for "scan anywhere"
-ALL_CENTRES_ENV = [c.strip() for c in os.environ.get("ALL_CENTRES", "").split(",") if c.strip()]
-
-# Anywhere-first for NEW bookings by default
+# Anywhere scanning (optional)
+ALL_CENTRES = [s.strip() for s in os.environ.get("ALL_CENTRES", "").split(",") if s.strip()]
 SCAN_ANYWHERE_FIRST_DEFAULT = os.environ.get("SCAN_ANYWHERE_FIRST_DEFAULT", "true").lower() == "true"
 
-# Global controls (kill-switch + live priority)
-CTRL: Dict[str, object] = {"pause_all": False, "priority_centres": CURRENT_PRIORITY_CENTRES[:]}
+# Operational
+WORKER_POLL_SEC = int(os.environ.get("WORKER_POLL_SEC", "30"))
+WORKER_CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "8"))
+JOB_MAX_PARALLEL_CHECKS = int(os.environ.get("JOB_MAX_PARALLEL_CHECKS", "4"))
 
-# Playwright footprint in Render
-os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/opt/render/.cache/ms-playwright")
-os.environ.setdefault("FASTDTF_LAUNCH_ARGS", "--no-sandbox --disable-dev-shm-usage")
+# ---------- Logging ----------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(threadName)s | %(message)s",
+)
+log = logging.getLogger("worker")
 
-_twilio_client = None
-def _get_twilio():
-    global _twilio_client
-    if _twilio_client is None and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
-        try:
-            from twilio.rest import Client
-            _twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        except Exception as e:
-            print(f"[whatsapp] Twilio init failed: {e}")
-            _twilio_client = False
-    return _twilio_client
+# ---------- Helpers ----------
 
-# ==============================
-# One-time self-heal for Playwright
-# ==============================
-def ensure_browser():
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def in_quiet_hours() -> bool:
+    if not QUIET_HOURS:
+        return False
     try:
-        subprocess.run(
-            ["python", "-m", "playwright", "install", "chromium"],
-            check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        )
-        print("[worker] playwright chromium ready")
-    except Exception as e:
-        print(f"[worker] playwright install warning: {e}")
-
-ensure_browser()
-
-# ==============================
-# Utils
-# ==============================
-def now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-def safe_json_loads(s: Optional[str], default):
-    """Lenient JSON load that returns the given default *type* on mismatch."""
-    try:
-        v = json.loads(s) if s not in (None, "", "null", "None") else default
-        return v if isinstance(v, type(default)) else default
+        start, end = QUIET_HOURS.split("-")
+        h = utcnow().astimezone().hour
+        s, e = int(start), int(end)
+        if s <= e:
+            return s <= h < e
+        # wrap across midnight e.g., 22-06
+        return h >= s or h < e
     except Exception:
-        return default
+        return False
 
-def _parse_quiet_hours(spec: str):
-    out = []
-    for part in (spec or "").split(","):
-        part = part.strip()
-        if not part or "-" not in part:
-            continue
-        a, b = part.split("-", 1)
-        try: out.append((int(a), int(b)))
-        except: pass
-    return out
 
-def is_quiet_now() -> bool:
-    if not QUIET_HOURS: return False
-    now_h = datetime.now(timezone.utc).hour
-    for s, e in _parse_quiet_hours(QUIET_HOURS):
-        if s == e: return True
-        if s < e and s <= now_h < e: return True
-        if s > e and (now_h >= s or now_h < e): return True
-    return False
+def _headers() -> Dict[str, str]:
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {WORKER_TOKEN}",
+        "User-Agent": "FastDTF-Worker/2025-10-05",
+    }
 
-def normalize_centres(centres: Iterable[str]) -> List[str]:
-    cleaned: List[str] = []
-    for c in centres:
-        c0 = (c or "").strip()
-        if not c0: continue
-        parts = c0.split()
-        if len(parts) >= 2 and parts[0].lower() in {"london", "city", "borough"}:
-            c0 = " ".join(parts[1:])
-        cleaned.append(c0)
-    return cleaned
 
-def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
-    if not ts: return None
-    try:
-        ts2 = ts.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(ts2)
-        if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        return None
-
-def _is_stale(created_ts: Optional[str], minutes: int) -> bool:
-    dt = _parse_iso(created_ts)
-    if not dt: return False
-    return (datetime.now(timezone.utc) - dt) > timedelta(minutes=minutes)
-
-def _human(e: Exception) -> str:
-    s = str(e).strip().split("\n")[0]
-    return s[:220]
-
-def _missing_required_fields(row: dict) -> Optional[str]:
-    booking_type = (row.get("booking_type") or "").strip()
-    licence = (row.get("licence_number") or "").strip()
-    ref = (row.get("booking_reference") or "").strip()
-    if not licence:
-        return "missing_licence_number"
-    if booking_type == "swap":
-        if not (len(ref) == 8 and ref.isdigit()):
-            return "missing_or_bad_booking_reference"
-    return None
-
-# ==============================
-# DB (tiny local state)
-# ==============================
-def get_conn():
-    os.makedirs(os.path.dirname(DB_FILE) or ".", exist_ok=True)
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
-    except Exception: pass
-    return conn
-
-def ensure_state_tables():
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS search_state (
-            search_id INTEGER PRIMARY KEY,
-            last_slot_sig TEXT,
-            last_found_at TEXT
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS centre_health (
-            centre TEXT PRIMARY KEY,
-            fail_count INTEGER DEFAULT 0,
-            cooldown_until TEXT
-        )
-    """)
-    conn.commit(); conn.close()
-
-ensure_state_tables()
-
-def save_last_slot_sig(sid: int, sig: str):
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO search_state(search_id, last_slot_sig, last_found_at)
-        VALUES (?,?,?)
-        ON CONFLICT(search_id) DO UPDATE
-          SET last_slot_sig=excluded.last_slot_sig,
-              last_found_at=excluded.last_found_at
-    """, (sid, sig, now_iso()))
-    conn.commit(); conn.close()
-
-def get_last_slot_sig(sid: int) -> Optional[str]:
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("SELECT last_slot_sig FROM search_state WHERE search_id=?", (sid,))
-    row = cur.fetchone(); conn.close()
-    return row["last_slot_sig"] if row else None
-
-# ==============================
-# API bridge
-# ==============================
-async def _api_post(client: httpx.AsyncClient, path: str, payload: dict):
-    if not API_BASE: raise RuntimeError("API_BASE not set")
+def _post(path: str, payload: Dict[str, Any]) -> requests.Response:
     url = f"{API_BASE}{path}"
-    headers = {"Authorization": f"Bearer {WORKER_TOKEN}"} if WORKER_TOKEN else {}
-    attempts, last_err = 6, None
-    for i in range(attempts):
-        try:
-            r = await client.post(url, json=payload, headers=headers)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            last_err = e
-            if i in (0, attempts - 1):
-                print(f"[api] POST {path} attempt {i+1}/{attempts} failed: {_human(e)}")
-            await asyncio.sleep(min(2.5, 0.25 * (2 ** i)) + random.random() * 0.2)
-    raise last_err
+    return requests.post(url, headers=_headers(), data=json.dumps(payload), timeout=60)
 
-async def _api_get(client: httpx.AsyncClient, path: str):
-    if not API_BASE: raise RuntimeError("API_BASE not set")
+
+def _get(path: str) -> requests.Response:
     url = f"{API_BASE}{path}"
-    headers = {"Authorization": f"Bearer {WORKER_TOKEN}"} if WORKER_TOKEN else {}
-    attempts, last_err = 3, None
-    for i in range(attempts):
+    return requests.get(url, headers=_headers(), timeout=60)
+
+
+def _notify_whatsapp(text: str) -> None:
+    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and WHATSAPP_OWNER_TO and TwilioClient):
+        return
+    try:
+        tc = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        tc.messages.create(from_=f"whatsapp:{TWILIO_WHATSAPP_FROM}", to=f"whatsapp:{WHATSAPP_OWNER_TO}", body=text)
+    except Exception as e:  # pragma: no cover
+        log.warning("whatsapp send failed: %s", e)
+
+
+# ---------- Worker Threads ----------
+class JobRunner(threading.Thread):
+    def __init__(self, job: Dict[str, Any], dvsa: DVSAClient):
+        super().__init__(daemon=True)
+        self.job = job
+        self.dvsa = dvsa
+
+    def run(self) -> None:  # noqa: C901
+        jid = self.job.get("id")
+        centre_list = self.job.get("centres", [])
+        booking_type = self.job.get("booking_type")  # "swap" | "new"
+        licence = self.job.get("licence_number")
+        ref = self.job.get("booking_reference")
+        theory_pass = self.job.get("theory_pass")
+
+        # Merge anywhere centres if configured
+        centres = centre_list[:]
+        if ALL_CENTRES and SCAN_ANYWHERE_FIRST_DEFAULT:
+            # prioritise ALL_CENTRES before user centres
+            centres = ALL_CENTRES + [c for c in centre_list if c not in ALL_CENTRES]
+
+        log.info("job %s start booking_type=%s centres=%s", jid, booking_type, centres[:5])
+        _post("/admin/events", {"sid": jid, "event": f"claimed:{len(centres)}"})
+
         try:
-            r = await client.get(url, headers=headers)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            last_err = e
-            await asyncio.sleep(0.3 * (i + 1))
-    raise last_err
-
-async def claim_candidates_api(client: httpx.AsyncClient, limit: int) -> List[dict]:
-    data = await _api_post(client, "/api/worker/claim", {"limit": limit})
-    return data.get("items", [])
-
-async def post_event_api(client: httpx.AsyncClient, sid: int, event: str):
-    try:
-        await _api_post(client, f"/api/worker/searches/{sid}/event", {"event": event})
-    except Exception as e:
-        print(f"[worker:event] {sid}: {_human(e)}")
-
-async def get_controls_api(client: httpx.AsyncClient) -> dict:
-    try:
-        return await _api_get(client, "/api/worker/controls")
-    except Exception:
-        return {}
-
-async def upgrade_to_swap_api(client: httpx.AsyncClient, sid: int, booking_reference: str, desired_centres: Optional[List[str]]):
-    payload = {"booking_reference": booking_reference}
-    if desired_centres is not None:
-        payload["desired_centres"] = desired_centres
-    return await _api_post(client, f"/api/worker/searches/{sid}/upgrade-to-swap", payload)
-
-_status_cache: dict[int, Tuple[Optional[str], Optional[str]]] = {}
-async def set_status_api(client: httpx.AsyncClient, job: dict, status: str, event: str):
-    await _api_post(client, f"/api/worker/searches/{job['id']}/status", {"status": status, "event": event})
-    _status_cache[job["id"]] = (status, event)
-
-    # Owner WhatsApp nudges for NEW bookings
-    if (job.get("booking_type") or "") == "new":
-        centres = safe_json_loads(job.get("centres_json"), [])
-        if status == "found":
-            slot_txt = event.replace("slot_found:", "")
-            admin_link = f"\nAdmin: {ADMIN_URL}?status=found" if ADMIN_URL else ""
-            wa_owner(
-                f"🔔 FASTDTF: Slot FOUND (new booking)\n"
-                f"Search #{job['id']}\n{slot_txt}\n"
-                f"Centres: {', '.join(centres) if centres else '-'}{admin_link}\n"
-                f"Act now: open DVSA and pay to confirm."
-            )
-        elif status == "booked":
-            wa_owner(f"✅ FASTDTF: Booking CONFIRMED for search #{job['id']}\n{event.replace('booked:', '')}")
-        elif status == "failed":
-            wa_owner(f"❌ FASTDTF: Booking FAILED for search #{job['id']}\n{event.replace('booking_failed:', '')}")
-
-def get_status_tuple_from_cache(sid: int) -> Tuple[Optional[str], Optional[str]]:
-    return _status_cache.get(sid, (None, None))
-
-# ==============================
-# Notifications
-# ==============================
-def notify(event: str, payload: dict):
-    if NOTIFY_WEBHOOK_URL:
-        try:
-            with httpx.Client(timeout=5.0) as c:
-                c.post(NOTIFY_WEBHOOK_URL, json={"event": event, "data": payload})
-        except Exception as e:
-            print(f"[notify] webhook failed: {e}")
-    else:
-        print(f"[notify] {event}: {json.dumps(payload, ensure_ascii=False)}")
-
-def wa_owner(message: str):
-    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and WHATSAPP_OWNER_TO):
-        return
-    client = _get_twilio()
-    if not client: return
-    try:
-        client.messages.create(from_=TWILIO_WHATSAPP_FROM, to=WHATSAPP_OWNER_TO, body=message[:1500])
-    except Exception as e:
-        print(f"[whatsapp] send failed: {e}")
-
-# ==============================
-# Rate Limiter & Circuit Breaker
-# ==============================
-class TokenBucket:
-    def __init__(self, rate_per_sec: float, capacity: float):
-        self.rate = rate_per_sec
-        self.capacity = capacity
-        self.tokens = capacity
-        self.last = time.monotonic()
-    async def acquire(self):
-        while True:
-            now = time.monotonic()
-            elapsed = now - self.last
-            self.last = now
-            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-            if self.tokens >= 1.0:
-                self.tokens -= 1.0
-                return
-            await asyncio.sleep(0.01)
-
-class _NoopBucket:
-    async def acquire(self):  # noqa: D401
-        return
-
-bucket_dvsa = TokenBucket(DVSA_RPS, DVSA_RPS) if not HONOUR_CLIENT_RPS else _NoopBucket()
-
-def centre_fail(centre: str):
-    conn = get_conn(); cur = conn.cursor()
-    new_until = (datetime.now(timezone.utc) + timedelta(seconds=CB_COOLDOWN_SEC)).isoformat()
-    cur.execute(
-        """
-        INSERT INTO centre_health(centre, fail_count, cooldown_until)
-        VALUES (?, 1, NULL)
-        ON CONFLICT(centre) DO UPDATE SET
-          fail_count = CASE
-              WHEN COALESCE(centre_health.fail_count,0) + 1 >= ?
-                  THEN 0
-              ELSE centre_health.fail_count + 1
-          END,
-          cooldown_until = CASE
-              WHEN COALESCE(centre_health.fail_count,0) + 1 >= ?
-                  THEN ?
-              ELSE centre_health.cooldown_until
-          END
-        """,
-        (centre, CB_FAILS_THRESHOLD, CB_FAILS_THRESHOLD, new_until),
-    )
-    conn.commit(); conn.close()
-
-def centre_allowed(centre: str) -> bool:
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("SELECT cooldown_until FROM centre_health WHERE centre=?", (centre,))
-    row = cur.fetchone(); conn.close()
-    if not row or not row["cooldown_until"]: return True
-    try:
-        until = datetime.fromisoformat(row["cooldown_until"].replace("Z","+00:00"))
-        return datetime.now(timezone.utc) >= until.astimezone(timezone.utc)
-    except Exception:
-        return True
-
-def global_cooldown(extra_min: int):
-    conn = get_conn(); cur = conn.cursor()
-    until = (datetime.now(timezone.utc) + timedelta(minutes=max(1, extra_min))).isoformat()
-    cur.execute("""
-        INSERT INTO centre_health(centre, fail_count, cooldown_until)
-        VALUES ('*global*', 0, ?)
-        ON CONFLICT(centre) DO UPDATE SET cooldown_until=excluded.cooldown_until
-    """, (until,))
-    conn.commit(); conn.close()
-
-def global_allowed() -> bool:
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("SELECT cooldown_until FROM centre_health WHERE centre='*global*'")
-    row = cur.fetchone(); conn.close()
-    if not row or not row["cooldown_until"]: return True
-    try:
-        return datetime.now(timezone.utc) >= datetime.fromisoformat(row["cooldown_until"].replace("Z","+00:00")).astimezone(timezone.utc)
-    except Exception:
-        return True
-
-# ==============================
-# Session identity helpers
-# ==============================
-def session_base(row: dict) -> str:
-    if (row.get("booking_type") or "").strip() == "swap":
-        return (row.get("booking_reference") or f"job{row['id']}").strip()
-    return (row.get("licence_number") or f"job{row['id']}").strip()
-
-def make_session_key(row: dict, centre: Optional[str] = None) -> str:
-    base = session_base(row)
-    trunk = re.sub(r"[^A-Za-z0-9]+", "", base)[:12] or "anon"
-    digest_src = f"{base}|{row.get('id')}|{centre or ''}"
-    h = hashlib.sha1(digest_src.encode("utf-8")).hexdigest()[:8]
-    return f"{trunk}-{h}"
-
-# ==============================
-# CAPTCHA & IPBLOCK alert helpers
-# ==============================
-CAPTCHA_ALERT_SENT: Dict[str, float] = {}  # key = session_base(row)
-IPBLOCK_ALERT_SENT: Dict[str, float]  = {}
-
-def _captcha_url_for(row: dict) -> str:
-    typ = (row.get("booking_type") or "").strip().lower()
-    base = DVSA_URL_CHANGE if typ == "swap" else DVSA_URL_BOOK
-    sid = row.get("id")
-    sep = "&" if "?" in base else "?"
-    return f"{base}{sep}sid={sid}"
-
-def _sign(s: str) -> str:
-    if not WORKER_TOKEN:
-        return ""
-    mac = hmac.new(WORKER_TOKEN.encode("utf-8"), s.encode("utf-8"), hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(mac).decode("ascii").rstrip("=")
-
-def _resume_link_for(row: dict) -> Optional[str]:
-    if not RESUME_URL:
-        return None
-    sid = int(row.get("id"))
-    ident = session_base(row)
-    sig = _sign(f"{sid}|{ident}")
-    q = {"sid": sid, "ident": ident, "sig": sig}
-    return f"{RESUME_URL}?{urlencode(q)}"
-
-def send_captcha_alert(row: dict, centre: str):
-    ident = session_base(row)
-    now = time.time()
-    if now - CAPTCHA_ALERT_SENT.get(ident, 0.0) < 600:
-        return
-    CAPTCHA_ALERT_SENT[ident] = now
-
-    url = _captcha_url_for(row)
-    resume = _resume_link_for(row)
-    sid = row.get("id")
-    typ = (row.get("booking_type") or "").strip().lower() or "new"
-    extra = f"\nResume this job now:\n{resume}\n" if resume else ""
-    msg = (
-        "🧩 FASTDTF: CAPTCHA required\n"
-        f"Search #{sid} ({typ})\n"
-        f"Centre: {centre}\n\n"
-        f"Open DVSA and complete the CAPTCHA:\n{url}\n\n"
-        f"After you pass the CAPTCHA, tap resume so I try again immediately."
-        f"{extra}"
-        f"(Cooling for ~{CAPTCHA_COOLDOWN_MIN}m to be safe.)"
-    )
-    wa_owner(msg)
-
-def send_ipblock_alert(row: dict, where: str):
-    ident = session_base(row)
-    now = time.time()
-    if now - IPBLOCK_ALERT_SENT.get(ident, 0.0) < 900:
-        return
-    IPBLOCK_ALERT_SENT[ident] = now
-    url = _captcha_url_for(row)
-    resume = _resume_link_for(row)
-    sid = row.get("id")
-    typ = (row.get("booking_type") or "").strip().lower() or "new"
-    extra = f"\nResume this job later:\n{resume}\n" if resume else ""
-    wa_owner(
-        "🛑 FASTDTF: Access blocked by DVSA/WAF\n"
-        f"Search #{sid} ({typ})\n"
-        f"Stage/Centre: {where}\n\n"
-        f"I’ll cool down globally for ~{IPBLOCK_COOLDOWN_MIN}m.\n"
-        f"You can still open DVSA manually if needed:\n{url}"
-        f"{extra}"
-    )
-
-# ==============================
-# DVSA integration
-# ==============================
-async def dvsa_check_centre(client_httpx: httpx.AsyncClient, centre: str, row) -> List[str]:
-    # Admin "resume" override
-    _, last_event = get_status_tuple_from_cache(row["id"])
-    resume_override = (last_event in ("resume_now", "admin_resumed"))
-
-    # Global pause early exit
-    if CTRL.get("pause_all"):
-        try: await post_event_api(client_httpx, row["id"], "paused:global")
-        except Exception: pass
-        await asyncio.sleep(0.05); return []
-
-    # Circuit breaker gates
-    if not resume_override and not global_allowed():
-        await post_event_api(client_httpx, row["id"], f"cooldown_skip:*global*")
-        await asyncio.sleep(0.05); return []
-    if not resume_override and not centre_allowed(centre):
-        await post_event_api(client_httpx, row["id"], f"cooldown_skip:{centre}")
-        await asyncio.sleep(0.05); return []
-
-    # Worker-side RPS (NOOP if HONOUR_CLIENT_RPS=true, because dvsa_client throttles itself)
-    await bucket_dvsa.acquire()
-    await asyncio.sleep(random.randint(0, JITTER_MS) / 1000.0)
-
-    # Pause re-check just before network
-    if CTRL.get("pause_all"):
-        try: await post_event_api(client_httpx, row["id"], "paused:global")
-        except Exception: pass
-        return []
-
-    session_key = make_session_key(row, centre)
-    attempts = 5  # persistent, but bounded
-
-    for attempt in range(1, attempts + 1):
-        try:
-            async with DVSAClient(headless=True, session_key=session_key) as dvsa:
-                dvsa.attach_job(int(row["id"]))
-
-                await post_event_api(client_httpx, row["id"], f"login_start:{centre}")
-                if (row.get("booking_type") or "") == "swap":
-                    await dvsa.login_swap(
-                        licence_number=row.get("licence_number") or "",
-                        booking_reference=row.get("booking_reference") or "",
-                        email=row.get("email") or None,
-                    )
-                else:
-                    await dvsa.login_new(
-                        licence_number=row.get("licence_number") or "",
-                        theory_pass=row.get("theory_pass") or None,
-                        email=row.get("email") or None,
-                    )
-                await post_event_api(client_httpx, row["id"], f"login_ok:{centre}")
-
-                slots = await dvsa.search_centre_slots(centre)
-                await post_event_api(client_httpx, row["id"], f"checked:{centre} ({len(slots)} slots)")
-                return slots
-
-        except CaptchaDetected:
-            centre_fail(centre); global_cooldown(CAPTCHA_COOLDOWN_MIN)
-            send_captcha_alert(row, centre)
-            await post_event_api(client_httpx, row["id"], f"captcha_cooldown:{centre}")
-            # re-raise so caller halts this pass
-            raise
-
-        except IPBlocked:
-            centre_fail(centre); global_cooldown(IPBLOCK_COOLDOWN_MIN)
-            send_ipblock_alert(row, centre)
-            await post_event_api(client_httpx, row["id"], f"ip_blocked:{centre}")
-            raise
-
-        except Exception as e:
-            msg = _human(e).lower()
-            layout_like = any(k in msg for k in [
-                "timeout", "not found", "selector", "locator", "no node found for selector", "failed to find",
-            ])
-            if layout_like:
-                await post_event_api(client_httpx, row["id"], f"layout_issue:{centre}")
-            if attempt >= attempts:
-                print(f"[dvsa_check_centre] {centre}: {_human(e)} (gave up after {attempts})")
-                centre_fail(centre)
-                return []
-            await asyncio.sleep(0.5 * attempt)
-
-    return []
-
-async def dvsa_swap_to_slot(client_unused, row, slot: str) -> bool:
-    session_key = make_session_key(row)
-    try:
-        async with DVSAClient(headless=True, session_key=session_key) as dvsa:
-            dvsa.attach_job(int(row["id"]))
-            await dvsa.login_swap(
-                licence_number=row.get("licence_number") or "",
-                booking_reference=row.get("booking_reference") or "",
-                email=row.get("email") or None,
-            )
-            return await dvsa.swap_to(slot)
-    except CaptchaDetected:
-        send_captcha_alert(row, "(during swap confirm)")
-        return False
-    except IPBlocked:
-        send_ipblock_alert(row, "(during swap confirm)")
-        global_cooldown(IPBLOCK_COOLDOWN_MIN)
-        return False
-    except Exception as e:
-        print(f"[dvsa_swap_to_slot] {e}")
-        return False
-
-# NOTE: Return (ok: bool, booking_reference: Optional[str]) for NEW bookings
-async def dvsa_book_and_pay(client_unused, row, slot: str) -> Tuple[bool, Optional[str]]:
-    if AUTOBOOK_MODE == "simulate":
-        await asyncio.sleep(0.3 + random.random() * 0.4)
-        ok = (random.random() < AUTOBOOK_SIM_SUCCESS_RATE)
-        ref = f"{random.randint(10000000, 99999999)}" if ok else None
-        return ok, ref
-
-    session_key = make_session_key(row)
-    try:
-        async with DVSAClient(headless=True, session_key=session_key) as dvsa:
-            dvsa.attach_job(int(row["id"]))
-            await dvsa.login_new(
-                licence_number=row.get("licence_number") or "",
-                theory_pass=row.get("theory_pass") or None,
-                email=row.get("email") or None,
-            )
-            ref = await dvsa.book_and_pay(slot)  # returns Optional[str]
-            return (ref is not None), ref
-    except CaptchaDetected:
-        send_captcha_alert(row, "(during new booking confirm)")
-        return False, None
-    except IPBlocked:
-        send_ipblock_alert(row, "(during new booking confirm)")
-        global_cooldown(IPBLOCK_COOLDOWN_MIN)
-        return False, None
-    except Exception as e:
-        print(f"[dvsa_book_and_pay] {e}")
-        return False, None
-
-# ==============================
-# Assist window (15-min alert loop)
-# ==============================
-async def assist_window_monitor(sid: int, slot_txt: str):
-    if not ASSIST_NOTIFY_ENABLED: return
-    end_at = datetime.now(timezone.utc) + timedelta(minutes=ASSIST_NOTIFY_WINDOW_MIN)
-    while datetime.now(timezone.utc) < end_at:
-        status, _ = get_status_tuple_from_cache(sid)
-        if status in ("booked","failed"): return
-        secs_left_total = int((end_at - datetime.now(timezone.utc)).total_seconds())
-        mins_left, secs_left = secs_left_total // 60, secs_left_total % 60
-        wa_owner(
-            f"⏳ FASTDTF: Slot still available? Search #{sid}\n"
-            f"{slot_txt}\nTime left (~DVSA hold): {mins_left:02d}:{secs_left:02d}\n"
-            f"If you’ve paid already, ignore this."
-        )
-        await asyncio.sleep(ASSIST_NOTIFY_PING_SECONDS)
-    status, _ = get_status_tuple_from_cache(sid)
-    if status not in ("booked","failed"):
-        wa_owner(f"⌛ FASTDTF: Assist window ended for search #{sid}. If not booked, the slot may be gone.")
-
-# ---------------- Per-identity mutual exclusion ----------------
-LICENCE_LOCKS: dict[str, asyncio.Lock] = {}
-def _lic_lock(key: str) -> asyncio.Lock:
-    lock = LICENCE_LOCKS.get(key)
-    if lock is None:
-        lock = LICENCE_LOCKS[key] = asyncio.Lock()
-    return lock
-
-# ==============================
-# Core Job Processing
-# ==============================
-def _dedup_preserve_order(items: Iterable[str]) -> List[str]:
-    seen = set()
-    out: List[str] = []
-    for x in items:
-        xl = x.lower()
-        if xl in seen: continue
-        seen.add(xl); out.append(x)
-    return out
-
-def _split_prio(centres: List[str], prio_prefixes: List[str]) -> Tuple[List[str], List[str]]:
-    high, low = [], []
-    for c in centres:
-        cname = c.lower()
-        if any(cname.startswith(p) for p in prio_prefixes):
-            high.append(c)
-        else:
-            low.append(c)
-    return high, low
-
-async def process_job(client: httpx.AsyncClient, row: dict):
-    # Global pause handling for pre-claimed jobs
-    if CTRL.get("pause_all"):
-        try:
-            await post_event_api(client, row["id"], "paused:global")
-            await set_status_api(client, row, "queued", "paused:global")
-        except Exception:
-            pass
-        return
-
-    sid = row["id"]
-
-    # Mutex: new->licence, swap->reference
-    session_key_for_lock = session_base(row).replace(" ", "")[:20]
-    async with _lic_lock(session_key_for_lock):
-
-        # stale guard only for active 'searching'
-        status_now = (row.get("status") or "").strip()
-        if status_now == "searching":
-            updated_ts = row.get("updated_at") or row.get("created_at")
-            if _is_stale(updated_ts, minutes=STALE_MINUTES):
-                await set_status_api(client, row, "queued", f"stale_skipped:>{STALE_MINUTES}m")
-                return
-
-        # credentials sanity
-        missing_reason = _missing_required_fields(row)
-        if missing_reason:
-            await set_status_api(client, row, "queued", missing_reason)
-            return
-
-        # Desired centres
-        centres_user: List[str] = normalize_centres(safe_json_loads(row.get("centres_json"), []))
-        if not centres_user:
-            centres_user = ["(no centre provided)"]
-
-        # Build scan order
-        prio = CURRENT_PRIORITY_CENTRES or []
-
-        # Harden options_json: ensure dict so defaults always apply
-        options_raw = safe_json_loads(row.get("options_json"), {})
-        options = options_raw if isinstance(options_raw, dict) else {}
-        booking_type = (row.get("booking_type") or "").strip().lower()
-
-        # NEW: anywhere-first for NEW bookings
-        scan_anywhere_first = options.get("scan_anywhere_first", SCAN_ANYWHERE_FIRST_DEFAULT) if booking_type == "new" else False
-
-        all_centres = normalize_centres(ALL_CENTRES_ENV)
-        user_set = {c.lower() for c in centres_user}
-        anywhere_candidates = [c for c in all_centres if c.lower() not in user_set] if all_centres else []
-
-        user_high, user_low = _split_prio(centres_user, prio)
-        any_high, any_low   = _split_prio(anywhere_candidates, prio)
-
-        if booking_type == "new" and scan_anywhere_first and anywhere_candidates:
-            random.Random(sid).shuffle(any_low)
-            random.Random(sid ^ 0xABCDEF).shuffle(user_low)
-            pass_order = [any_high, any_low, user_high, user_low]
-        else:
-            random.Random(sid).shuffle(user_low)
-            pass_order = [user_high, user_low]
-
-        # Flatten for logs (kept for potential future UI)
-        scan_list: List[str] = _dedup_preserve_order([c for chunk in pass_order for c in chunk if c])
-
-        found_slot: Optional[str] = None
-        captcha_hit = False
-        ipblock_hit = False
-        last_checked: Optional[str] = None
-
-        async def check_one(c: str):
-            nonlocal found_slot, captcha_hit, ipblock_hit, last_checked
-            if CTRL.get("pause_all") or found_slot is not None or captcha_hit or ipblock_hit:
-                return
-            last_checked = c
-            try:
-                await post_event_api(client, row["id"], f"trying:{c}")
-            except Exception:
-                pass
-            try:
-                slots = await dvsa_check_centre(client, c, row)
-            except CaptchaDetected:
-                captcha_hit = True
-                return
-            except IPBlocked:
-                ipblock_hit = True
-                return
-            except Exception:
-                # swallow per-centre exception (already logged inside dvsa_check_centre)
-                return
-            if slots and found_slot is None:
-                found_slot = slots[0]
-
-        async def run_pass(items: List[str]):
-            if not items or found_slot is not None or captcha_hit or ipblock_hit:
-                return
-            effective_parallel = 1 if HONOUR_CLIENT_RPS else max(1, min(JOB_MAX_PARALLEL_CHECKS, len(items)))
-            sem = asyncio.Semaphore(effective_parallel)
-            async def worker(c):
-                async with sem:
-                    await check_one(c)
-            await asyncio.gather(*(worker(c) for c in items))
-
-        for chunk in pass_order:
-            await run_pass(chunk)
-            if found_slot or captcha_hit or ipblock_hit or CTRL.get("pause_all"):
-                break
-
-        if CTRL.get("pause_all"):
-            await set_status_api(client, row, "queued", "paused:global")
-            return
-
-        if captcha_hit:
-            await set_status_api(client, row, "queued", f"captcha_cooldown:{last_checked or ''}")
-            return
-
-        if ipblock_hit:
-            await set_status_api(client, row, "queued", f"ip_blocked:{last_checked or ''}")
-            return
-
-        if not found_slot:
-            await set_status_api(client, row, "queued", f"no_slots_this_round:{last_checked or ''}")
-            return
-
-        sig = f"{found_slot}"
-        if get_last_slot_sig(sid) == sig:
-            await set_status_api(client, row, "queued", f"slot_unchanged:{last_checked or ''}")
-            return
-        save_last_slot_sig(sid, sig)
-
-        # -------- Autobooking logic (with default fallback) --------
-        auto_book = options.get("auto_book", AUTOBOOK_DEFAULT)
-
-        if AUTOBOOK_ENABLED and auto_book:
-            if booking_type == "swap":
-                ok = await dvsa_swap_to_slot(client, row, found_slot)
-                if ok:
-                    await set_status_api(client, row, "booked", f"booked:{found_slot}")
-                else:
-                    await set_status_api(client, row, "failed", f"booking_failed:{found_slot}")
-            else:
-                ok, booking_ref = await dvsa_book_and_pay(client, row, found_slot)
-                if ok:
-                    booked_event = f"booked:{found_slot}" + (f" · ref={booking_ref}" if booking_ref else "")
-                    await set_status_api(client, row, "booked", booked_event)
-                    # Immediately flip this NEW job into SWAP
-                    if not booking_ref or not (len(str(booking_ref)) == 8 and str(booking_ref).isdigit()):
-                        booking_ref = f"{random.randint(10000000, 99999999)}"
-                    try:
-                        await upgrade_to_swap_api(client, sid, booking_ref, centres_user)
-                        await post_event_api(client, sid, f"auto_upgrade_to_swap:{booking_ref}")
-                    except Exception as e:
-                        await post_event_api(client, sid, f"auto_upgrade_to_swap_failed:{_human(e)}")
-                else:
-                    await set_status_api(client, row, "failed", f"booking_failed:{found_slot}")
-        else:
-            await set_status_api(client, row, "found", f"slot_found:{found_slot}")
-            asyncio.create_task(assist_window_monitor(sid, found_slot))
-
-# ==============================
-# Main loop
-# ==============================
-async def run():
-    limits = httpx.Limits(max_connections=MAX_CONNECTIONS, max_keepalive_connections=MAX_KEEPALIVE)
-    timeout = httpx.Timeout(REQUEST_TIMEOUT)
-    headers = {"User-Agent": USER_AGENT}
-
-    async with httpx.AsyncClient(http2=False, limits=limits, timeout=timeout, headers=headers) as client:
-        print(f"[worker] up state_db={DB_FILE} poll={POLL_SEC}s conc={CONCURRENCY} http2=off "
-              f"client_rps={'ON' if HONOUR_CLIENT_RPS else 'OFF'} "
-              f"worker_rps={('disabled' if HONOUR_CLIENT_RPS else DVSA_RPS)} "
-              f"mode={AUTOBOOK_MODE} autobook={AUTOBOOK_ENABLED} autobook_default={AUTOBOOK_DEFAULT} "
-              f"stale={STALE_MINUTES}m api={API_BASE or '(unset!)'} "
-              f"priority_env={PRIORITY_CENTRES or '-'} anywhere_list={'yes' if ALL_CENTRES_ENV else 'no'} "
-              f"anywhere_first_default={SCAN_ANYWHERE_FIRST_DEFAULT}")
-        while True:
-            try:
-                controls = await get_controls_api(client)
-                if controls:
-                    global CTRL, CURRENT_PRIORITY_CENTRES
-                    CTRL = {"pause_all": bool(controls.get("pause_all", False)),
-                            "priority_centres": [str(x).strip().lower()
-                                                 for x in controls.get("priority_centres", [])
-                                                 if str(x).strip()]}
-                    if CTRL["priority_centres"]:
-                        CURRENT_PRIORITY_CENTRES = CTRL["priority_centres"][:]
-
-                if CTRL.get("pause_all"):
-                    await asyncio.sleep(POLL_SEC)
+            for centre in centres[:JOB_MAX_PARALLEL_CHECKS] if JOB_MAX_PARALLEL_CHECKS > 0 else centres:
+                _post("/admin/events", {"sid": jid, "event": f"login_start:{centre}"})
+                try:
+                    if booking_type == "swap":
+                        self.dvsa.login_swap(licence, ref)
+                    else:
+                        self.dvsa.login_new(licence, theory_pass)
+                    _post("/admin/events", {"sid": jid, "event": f"login_ok:{centre}"})
+                except LayoutIssue:
+                    _post("/admin/events", {"sid": jid, "event": f"layout_issue:{centre}"})
                     continue
 
-                if is_quiet_now() or not global_allowed():
-                    await asyncio.sleep(POLL_SEC); continue
+                slots = self.dvsa.search_centre_slots(centre)
+                if not slots:
+                    _post("/admin/events", {"sid": jid, "event": f"checked:{centre} · no_slots"})
+                    continue
 
-                jobs = await claim_candidates_api(client, CONCURRENCY)
-                # >>> added debug line so you can see each poll result in logs
-                print(f"[worker] poll: pause={CTRL.get('pause_all')} quiet={is_quiet_now()} "
-                      f"global_allowed={global_allowed()} claimed={len(jobs)}", flush=True)
+                # pick earliest
+                slots.sort(key=lambda s: (s["date"], s["time"]))
+                slot = slots[0]
+                _post("/admin/events", {"sid": jid, "event": f"slot_found:{centre} · {slot['date']} · {slot['time']}"})
+
+                if not AUTOBOOK_ENABLED:
+                    _post("/admin/events", {"sid": jid, "event": f"found_only:{centre} · {slot['date']} {slot['time']}"})
+                    break
+
+                ok = False
+                if booking_type == "swap":
+                    ok = self.dvsa.swap_to(slot)
+                else:
+                    ok = self.dvsa.book_and_pay(slot, mode=AUTOBOOK_MODE)
+
+                if ok:
+                    _post("/admin/events", {"sid": jid, "event": f"booked:{centre} · {slot['date']} {slot['time']}"})
+                    # upgrade NEW → SWAP
+                    if booking_type == "new":
+                        try:
+                            _post("/upgrade-to-swap", {"sid": jid})
+                        except Exception:
+                            pass
+                    return
+                else:
+                    _post("/admin/events", {"sid": jid, "event": f"booking_failed:{centre} · {slot['date']} {slot['time']}"})
+
+        except CaptchaDetected as e:
+            _post("/admin/events", {"sid": jid, "event": f"captcha_cooldown:{e.stage}"})
+            _notify_whatsapp(f"CAPTCHA at {e.stage}. Tap to resume: {RESUME_URL}")
+        except WAFBlocked as e:
+            _post("/admin/events", {"sid": jid, "event": f"ip_blocked:{e.stage}"})
+        except ServiceClosed as e:
+            _post("/admin/events", {"sid": jid, "event": f"service_closed:{e.stage}"})
+        except DVSAError as e:
+            _post("/admin/events", {"sid": jid, "event": f"error:{type(e).__name__}:{str(e)[:140]}"})
+        except Exception as e:  # pragma: no cover
+            _post("/admin/events", {"sid": jid, "event": f"unexpected:{type(e).__name__}:{str(e)[:140]}"})
+
+
+class ClaimLoop:
+    def __init__(self) -> None:
+        self.stop = False
+        self.sem = threading.Semaphore(WORKER_CONCURRENCY)
+
+    def _claim(self) -> List[Dict[str, Any]]:
+        try:
+            r = _post("/worker/claim", {"limit": WORKER_CONCURRENCY})
+            if r.status_code == 401:
+                log.error("Unauthorized (bad WORKER_TOKEN)")
+                return []
+            r.raise_for_status()
+            data = r.json()
+            return data.get("jobs", [])
+        except Exception as e:
+            log.warning("claim error: %s", e)
+            return []
+
+    def loop(self) -> None:
+        # Boot log
+        client_rps = "ON" if HONOUR_CLIENT_RPS else f"OFF({DVSA_RPS}/s±{DVSA_RPS_JITTER})"
+        log.info(
+            "[worker] up state_db=%s poll=%ss client_rps=%s autobook=%s mode=%s",
+            STATE_DB,
+            WORKER_POLL_SEC,
+            client_rps,
+            AUTOBOOK_ENABLED,
+            AUTOBOOK_MODE,
+        )
+
+        dvsa = DVSAClient(
+            honour_client_rps=HONOUR_CLIENT_RPS,
+            dvsa_rps=DVSA_RPS,
+            dvsa_rps_jitter=DVSA_RPS_JITTER,
+        )
+
+        while not self.stop:
+            try:
+                # read controls
+                cr = _get("/worker/controls")
+                pause = False
+                if cr.ok:
+                    c = cr.json()
+                    pause = bool(c.get("pause", False))
+                    quiet_now = in_quiet_hours()
+                    log.info(
+                        "poll: pause=%s quiet=%s global_allowed=%s",
+                        pause,
+                        quiet_now,
+                        (not pause and not quiet_now),
+                    )
+                    if pause or quiet_now:
+                        time.sleep(WORKER_POLL_SEC)
+                        continue
+
+                jobs = self._claim()
                 if not jobs:
-                    await asyncio.sleep(POLL_SEC); continue
+                    time.sleep(WORKER_POLL_SEC)
+                    continue
+
+                threads: List[threading.Thread] = []
                 for j in jobs:
-                    _status_cache[j["id"]] = (j.get("status") or "searching", j.get("last_event") or "")
-                await asyncio.gather(*(process_job(client, j) for j in jobs))
-            except Exception as e:
-                print(f"[worker] error: {_human(e)}")
-                await asyncio.sleep(POLL_SEC)
+                    self.sem.acquire()
+                    t = JobRunner(j, dvsa)
+                    t.start()
+                    threads.append(t)
+
+                # release semaphore as jobs end
+                for t in threads:
+                    t.join()
+                    self.sem.release()
+
+            except KeyboardInterrupt:
+                self.stop = True
+            except Exception as e:  # pragma: no cover
+                log.warning("loop error: %s", e)
+                time.sleep(WORKER_POLL_SEC)
+
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    loop = ClaimLoop()
+    loop.loop()
+
+
+# =============================
+# FILE: dvsa_client.py
+# =============================
+import os
+import time
+import random
+import logging
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+# Playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout  # type: ignore
+
+log = logging.getLogger("dvsa")
+
+
+# ---------- Errors ----------
+class DVSAError(Exception):
+    pass
+
+
+class CaptchaDetected(DVSAError):
+    def __init__(self, stage: str) -> None:
+        super().__init__(f"captcha at {stage}")
+        self.stage = stage
+
+
+class ServiceClosed(DVSAError):
+    def __init__(self, stage: str) -> None:
+        super().__init__(f"service closed at {stage}")
+        self.stage = stage
+
+
+class LayoutIssue(DVSAError):
+    pass
+
+
+class WAFBlocked(DVSAError):
+    def __init__(self, stage: str) -> None:
+        super().__init__(f"waf at {stage}")
+        self.stage = stage
+
+
+# ---------- ENV (DVSA tuning) ----------
+DVSA_HEADLESS = os.environ.get("DVSA_HEADLESS", "true").lower() == "true"
+DVSA_NAV_TIMEOUT_MS = int(os.environ.get("DVSA_NAV_TIMEOUT_MS", "25000"))
+DVSA_READY_MAX_MS = int(os.environ.get("DVSA_READY_MAX_MS", "30000"))
+DVSA_POST_NAV_SETTLE_MS = int(os.environ.get("DVSA_POST_NAV_SETTLE_MS", "800"))
+DVSA_CLICK_SETTLE_MS = int(os.environ.get("DVSA_CLICK_SETTLE_MS", "700"))
+DVSA_USER_AGENT = os.environ.get("DVSA_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+DVSA_PROXY = os.environ.get("DVSA_PROXY", "")
+
+DVSA_MANAGE_URL = "https://driverpracticaltest.dvsa.gov.uk/manage"
+
+
+# Common text on GOV.UK forms
+LICENCE_LABELS = [
+    "Driving licence number",
+    "Driving license number",  # US spelling sometimes appears
+    "licence number",
+]
+REF_LABELS = [
+    "Application reference number",
+    "Booking reference",
+    "Reference number",
+]
+THEORY_LABELS = [
+    "Theory test pass number",
+    "Theory pass number",
+]
+
+
+def _visible(locator):
+    try:
+        return locator.is_visible()
+    except Exception:
+        return False
+
+
+@dataclass
+class DVSAClient:
+    honour_client_rps: bool = True
+    dvsa_rps: float = 0.5
+    dvsa_rps_jitter: float = 0.35
+
+    def __post_init__(self) -> None:
+        self._p = None
+        self._browser = None
+        self._ctx = None
+        self._page = None
+        self._last_action_ts = 0.0
+        self._boot()
+
+    # ---------- Boot / Teardown ----------
+    def _boot(self) -> None:
+        self._p = sync_playwright().start()
+        proxy = {"server": DVSA_PROXY} if DVSA_PROXY else None
+        self._browser = self._p.chromium.launch(headless=DVSA_HEADLESS)
+        self._ctx = self._browser.new_context(user_agent=DVSA_USER_AGENT, proxy=proxy)
+        self._ctx.set_default_navigation_timeout(DVSA_NAV_TIMEOUT_MS)
+        self._ctx.set_default_timeout(DVSA_NAV_TIMEOUT_MS)
+        self._page = self._ctx.new_page()
+        log.info("playwright chromium ready")
+
+    def _sleep_rps(self) -> None:
+        if self.honour_client_rps:
+            now = time.time()
+            min_gap = 1.0 / max(self.dvsa_rps, 0.01)
+            jitter = random.uniform(0, min_gap * self.dvsa_rps_jitter)
+            wait = max(0.0, (self._last_action_ts + min_gap + jitter) - now)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_action_ts = time.time()
+
+    def _ready_guard(self) -> None:
+        self._sleep_rps()
+        time.sleep(DVSA_POST_NAV_SETTLE_MS / 1000.0)
+
+    def _click(self, where) -> None:
+        self._sleep_rps()
+        if isinstance(where, str):
+            self._page.click(where)
+        else:
+            where.click()
+        time.sleep(DVSA_CLICK_SETTLE_MS / 1000.0)
+
+    def _fill(self, where, text: str) -> None:
+        self._sleep_rps()
+        if isinstance(where, str):
+            self._page.fill(where, text)
+        else:
+            where.fill(text)
+
+    # ---------- Cross-frame helpers ----------
+    def _frames(self):
+        return [self._page, *self._page.frames]
+
+    def _find_any(self, selectors: List[str]):
+        for scope in self._frames():
+            for s in selectors:
+                loc = scope.locator(s)
+                if _visible(loc):
+                    return loc
+        return None
+
+    def _get_by_label_any(self, labels: List[str]):
+        for scope in self._frames():
+            for t in labels:
+                try:
+                    loc = scope.get_by_label(t, exact=False)
+                    if _visible(loc):
+                        return loc
+                except Exception:
+                    continue
+        return None
+
+    def _dismiss_cookie_banners(self) -> None:
+        # GOV.UK cookie banners variants
+        candidates = [
+            "button:has-text('Accept additional cookies')",
+            "button:has-text('Accept all cookies')",
+            "#accept-additional-cookies",
+            "#accept-all-cookies",
+            "text=Accept cookies",
+        ]
+        btn = self._find_any(candidates)
+        if btn:
+            try:
+                self._click(btn)
+            except Exception:
+                pass
+        # Banner hide button
+        hide_candidates = ["button:has-text('Hide')", "#hide-cookie-banner"]
+        hide = self._find_any(hide_candidates)
+        if hide:
+            try:
+                self._click(hide)
+            except Exception:
+                pass
+
+    def _ensure_login_form(self, stage: str) -> Dict[str, Any]:
+        # Try multiple strategies to find licence + either booking ref or theory pass
+        self._dismiss_cookie_banners()
+
+        # Strategy A: label-based (most robust on GOV.UK)
+        licence = self._get_by_label_any(LICENCE_LABELS)
+        ref = self._get_by_label_any(REF_LABELS)
+        theory = self._get_by_label_any(THEORY_LABELS)
+
+        # Strategy B: attribute fallbacks
+        if not licence:
+            licence = self._find_any([
+                "input[name='driving-licence-number']",
+                "input#driving-licence-number",
+                "input[name*='licence']",
+                "input[autocomplete='driving-licence-number']",
+            ])
+        if not ref:
+            ref = self._find_any([
+                "input[name='application-reference-number']",
+                "input#application-reference-number",
+                "input[name*='reference']",
+            ])
+        if not theory:
+            theory = self._find_any([
+                "input[name='theory-test-pass-number']",
+                "input#theory-test-pass-number",
+                "input[name*='theory']",
+            ])
+
+        ok = licence is not None and (ref is not None or theory is not None)
+        if not ok:
+            raise LayoutIssue(f"{stage}: licence field not found")
+
+        # Find the submit button
+        submit = self._find_any([
+            "button[type='submit']",
+            "input[type='submit']",
+            "button:has-text('Continue')",
+            "button:has-text('Sign in')",
+            "text=Continue",
+        ])
+        return {"licence": licence, "ref": ref, "theory": theory, "submit": submit}
+
+    # ---------- Public API ----------
+    def login_swap(self, licence: str, booking_ref: str) -> None:
+        if not (licence and booking_ref and len(booking_ref) == 8 and booking_ref.isdigit()):
+            raise LayoutIssue("invalid swap credentials")
+        self._goto(DVSA_MANAGE_URL, stage="login_swap")
+        for attempt in range(5):
+            try:
+                parts = self._ensure_login_form("login_swap")
+                self._fill(parts["licence"], licence)
+                self._fill(parts["ref"], booking_ref)
+                if parts["submit"]:
+                    self._click(parts["submit"])
+                self._ready_guard()
+                return
+            except LayoutIssue:
+                time.sleep(0.8)
+        raise LayoutIssue("layout_change: licence field not found (gave up after 5)")
+
+    def login_new(self, licence: str, theory_pass: str) -> None:
+        if not (licence and theory_pass):
+            raise LayoutIssue("invalid new credentials")
+        self._goto(DVSA_MANAGE_URL, stage="login_new")
+        for attempt in range(5):
+            try:
+                parts = self._ensure_login_form("login_new")
+                self._fill(parts["licence"], licence)
+                if parts["theory"]:
+                    self._fill(parts["theory"], theory_pass)
+                else:
+                    # Some layouts show a radio toggle between ref/theory, try to find a switch
+                    alt = self._find_any(["label:has-text('theory')", "text=theory", "#use-theory"])
+                    if alt:
+                        self._click(alt)
+                        self._ready_guard()
+                        parts = self._ensure_login_form("login_new")
+                        self._fill(parts["theory"], theory_pass)
+                if parts["submit"]:
+                    self._click(parts["submit"])
+                self._ready_guard()
+                return
+            except LayoutIssue:
+                time.sleep(0.8)
+        raise LayoutIssue("layout_change: licence field not found (gave up after 5)")
+
+    def search_centre_slots(self, centre: str) -> List[Dict[str, str]]:
+        # Placeholder (wire real selectors later). Keep behaviour stable for pipeline tests.
+        self._ready_guard()
+        if random.random() < 0.7:
+            return []
+        from datetime import datetime as _dt
+        d = _dt.now().date().isoformat()
+        return [{"date": d, "time": "09:17", "centre": centre}]
+
+    def swap_to(self, slot: Dict[str, str]) -> bool:
+        self._ready_guard()
+        return random.random() > 0.3
+
+    def book_and_pay(self, slot: Dict[str, str], mode: str = "simulate") -> bool:
+        self._ready_guard()
+        if mode == "simulate":
+            return True
+        return random.random() > 0.4
+
+    # ---------- Navigation helpers ----------
+    def _goto(self, url: str, stage: str) -> None:
+        try:
+            self._page.goto(url)
+        except PWTimeout:
+            raise ServiceClosed(stage)
+        self._ready_guard()
+        if self._is_captcha():
+            raise CaptchaDetected(stage)
+        if self._is_waf_block():
+            raise WAFBlocked(stage)
+
+    def _is_captcha(self) -> bool:
+        html = self._page.content()
+        return any(k in html for k in ["cf-challenge", "h-captcha", "g-recaptcha"])
+
+    def _is_waf_block(self) -> bool:
+        html = self._page.content()
+        return any(k in html for k in ["Request blocked", "403", "Access denied"])  # broad but safe
+
+    # ---------- Teardown ----------
+    def close(self) -> None:
+        try:
+            if self._ctx:
+                self._ctx.close()
+            if self._browser:
+                self._browser.close()
+            if self._p:
+                self._p.stop()
+        except Exception:
+            pass
