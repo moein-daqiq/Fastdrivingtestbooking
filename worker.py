@@ -1,5 +1,5 @@
 # =============================
-# FILE: worker.py  (FastDTF worker – fixed endpoints + richer status)
+# FILE: worker.py  (FastDTF worker – live step-by-step telemetry)
 # =============================
 import os
 import time
@@ -142,44 +142,64 @@ def _notify_whatsapp(text: str) -> None:
         log.warning("whatsapp send failed: %s", e)
 
 
+def _centres_summary(centres: List[str], max_names: int = 12) -> str:
+    names = [str(c) for c in centres]
+    head = ", ".join(names[:max_names])
+    tail = f" (+{len(names) - max_names} more)" if len(names) > max_names else ""
+    return head + tail
+
+
 # ---------- Worker Threads ----------
 class JobRunner(threading.Thread):
-    def __init__(self, job: Dict[str, Any], dvsa: DVSAClient):
+    def __init__(self, job: Dict[str, Any]):
         super().__init__(daemon=True)
         self.job = job
-        self.dvsa = dvsa
 
     def run(self) -> None:  # noqa: C901
         sid = int(self.job.get("id"))
-        centre_list = self.job.get("centres", [])
-        booking_type = self.job.get("booking_type")  # "swap" | "new"
-        licence = self.job.get("licence_number")
-        ref = self.job.get("booking_reference")
-        theory_pass = self.job.get("theory_pass")
 
-        centres = centre_list[:]
-        if ALL_CENTRES and SCAN_ANYWHERE_FIRST_DEFAULT:
-            centres = ALL_CENTRES + [c for c in centre_list if c not in ALL_CENTRES]
-
-        log.info("job %s start booking_type=%s centres=%s", sid, booking_type, centres[:5])
-        post_event(sid, f"claimed:{len(centres)}")
-        post_status(sid, event="worker_start", reached=False)
+        # Fresh DVSA client per thread + attach SID for DVSA-side events
+        dvsa = DVSAClient(
+            honour_client_rps=HONOUR_CLIENT_RPS,
+            dvsa_rps=DVSA_RPS,
+            dvsa_rps_jitter=DVSA_RPS_JITTER,
+        )
+        try:
+            dvsa.attach_job(sid)
+        except Exception:
+            pass
 
         try:
+            centre_list = self.job.get("centres", [])
+            booking_type = self.job.get("booking_type")  # "swap" | "new"
+            licence = self.job.get("licence_number")
+            ref = self.job.get("booking_reference")
+            theory_pass = self.job.get("theory_pass")
+
+            centres = centre_list[:]
+            if ALL_CENTRES and SCAN_ANYWHERE_FIRST_DEFAULT:
+                centres = ALL_CENTRES + [c for c in centre_list if c not in ALL_CENTRES]
+
+            log.info("job %s start booking_type=%s centres=%s", sid, booking_type, centres[:5])
+            post_event(sid, f"claimed:{len(centres)} | centres:{_centres_summary(centres)}")
+            post_status(sid, event="worker_start", reached=False, last_centre=(centres[0] if centres else ""))
+
+            # Iterate centres (optionally limited per tick)
             for centre in centres[:JOB_MAX_PARALLEL_CHECKS] if JOB_MAX_PARALLEL_CHECKS > 0 else centres:
-                post_status(sid, event=f"login_start:{centre}", last_centre=centre)
+                post_status(sid, event=f"step:login_start | centre:{centre}", last_centre=centre)
                 try:
                     if booking_type == "swap":
-                        self.dvsa.login_swap(licence, ref)
+                        dvsa.login_swap(licence, ref)
                     else:
-                        self.dvsa.login_new(licence, theory_pass)
-                    post_status(sid, event=f"login_ok:{centre}", reached=True, last_centre=centre)
+                        dvsa.login_new(licence, theory_pass)
+                    post_status(sid, event=f"step:login_ok | centre:{centre}", reached=True, last_centre=centre)
                 except LayoutIssue:
                     post_status(sid, event=f"layout_issue:{centre}", last_centre=centre)
                     continue
 
                 # --- Search slots ---
-                slots = self.dvsa.search_centre_slots(centre)
+                post_status(sid, event=f"step:open_centre | centre:{centre}", last_centre=centre)
+                slots = dvsa.search_centre_slots(centre)
                 if not slots:
                     post_event(sid, f"checked:{centre} · no_slots")
                     continue
@@ -192,13 +212,15 @@ class JobRunner(threading.Thread):
                     post_event(sid, f"found_only:{centre} · {slot['date']} {slot['time']}")
                     break
 
-                if booking_type == "swap":
-                    ok = self.dvsa.swap_to(slot)
-                else:
-                    ok = self.dvsa.book_and_pay(slot, mode=AUTOBOOK_MODE)
+                ok = dvsa.swap_to(slot) if booking_type == "swap" else dvsa.book_and_pay(slot, mode=AUTOBOOK_MODE)
 
                 if ok:
-                    post_status(sid, status="booked", event=f"booked:{centre} · {slot['date']} {slot['time']}", last_centre=centre)
+                    post_status(
+                        sid,
+                        status="booked",
+                        event=f"booked:{centre} · {slot['date']} {slot['time']}",
+                        last_centre=centre,
+                    )
                     if booking_type == "new":
                         try:
                             _post("/upgrade-to-swap", {"sid": sid})
@@ -207,7 +229,6 @@ class JobRunner(threading.Thread):
                     return
                 else:
                     post_event(sid, f"booking_failed:{centre} · {slot['date']} {slot['time']}")
-
         except CaptchaDetected as e:
             post_status(sid, event=f"captcha_cooldown:{getattr(e, 'stage', 'unknown')}", captcha=True)
             _notify_whatsapp(f"CAPTCHA hit. Tap to resume: {RESUME_URL}")
@@ -219,6 +240,11 @@ class JobRunner(threading.Thread):
             post_event(sid, f"error:{type(e).__name__}:{str(e)[:140]}")
         except Exception as e:  # pragma: no cover
             post_event(sid, f"unexpected:{type(e).__name__}:{str(e)[:140]}")
+        finally:
+            try:
+                dvsa.close()
+            except Exception:
+                pass
 
 
 class ClaimLoop:
@@ -254,12 +280,6 @@ class ClaimLoop:
             AUTOBOOK_MODE,
         )
 
-        dvsa = DVSAClient(
-            honour_client_rps=HONOUR_CLIENT_RPS,
-            dvsa_rps=DVSA_RPS,
-            dvsa_rps_jitter=DVSA_RPS_JITTER,
-        )
-
         while not self.stop:
             try:
                 cr = _get("/worker/controls")
@@ -286,7 +306,7 @@ class ClaimLoop:
                 threads: List[threading.Thread] = []
                 for j in jobs:
                     self.sem.acquire()
-                    t = JobRunner(j, dvsa)
+                    t = JobRunner(j)
                     t.start()
                     threads.append(t)
 
