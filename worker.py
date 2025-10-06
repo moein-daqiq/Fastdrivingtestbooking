@@ -1,8 +1,7 @@
 # =============================
-# FILE: worker.py
+# FILE: worker.py  (FastDTF worker – fixed endpoints + richer status)
 # =============================
 import os
-import sys
 import time
 import json
 import logging
@@ -20,9 +19,17 @@ except Exception:  # pragma: no cover
 
 # --- Import DVSA client + typed errors (with safe fallback for LayoutIssue) ---
 try:
-    from dvsa_client import DVSAClient, DVSAError, CaptchaDetected, ServiceClosed, LayoutIssue, WAFBlocked
+    from dvsa_client import (
+        DVSAClient,
+        DVSAError,
+        CaptchaDetected,
+        ServiceClosed,
+        LayoutIssue,
+        WAFBlocked,
+    )
 except ImportError:
     from dvsa_client import DVSAClient, DVSAError, CaptchaDetected, ServiceClosed, WAFBlocked  # type: ignore
+
     class LayoutIssue(DVSAError):
         pass
 
@@ -57,7 +64,10 @@ WORKER_CONCURRENCY = int(os.environ.get("WORKER_CONCURRENCY", "8"))
 JOB_MAX_PARALLEL_CHECKS = int(os.environ.get("JOB_MAX_PARALLEL_CHECKS", "4"))
 
 # ---------- Logging ----------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(threadName)s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(threadName)s | %(message)s",
+)
 log = logging.getLogger("worker")
 
 # ---------- Helpers ----------
@@ -98,12 +108,36 @@ def _get(path: str) -> requests.Response:
     return requests.get(url, headers=_headers(), timeout=60)
 
 
+# ---- Backend wiring (correct endpoints) ----
+
+def post_event(sid: int, text: str) -> None:
+    try:
+        _post(f"/worker/searches/{sid}/event", {"event": text})
+    except Exception as e:  # pragma: no cover
+        log.debug("post_event failed: %s", e)
+
+
+def post_status(sid: int, status: str | None = None, **fields: Any) -> None:
+    payload: Dict[str, Any] = {"event": fields.pop("event", "")}
+    if status is not None:
+        payload["status"] = status
+    payload.update(fields)  # allow last_centre, reached, captcha, etc.
+    try:
+        _post(f"/worker/searches/{sid}/status", payload)
+    except Exception as e:  # pragma: no cover
+        log.debug("post_status failed: %s", e)
+
+
 def _notify_whatsapp(text: str) -> None:
     if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and WHATSAPP_OWNER_TO and TwilioClient):
         return
     try:
         tc = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        tc.messages.create(from_=f"whatsapp:{TWILIO_WHATSAPP_FROM}", to=f"whatsapp:{WHATSAPP_OWNER_TO}", body=text)
+        tc.messages.create(
+            from_=f"whatsapp:{TWILIO_WHATSAPP_FROM}",
+            to=f"whatsapp:{WHATSAPP_OWNER_TO}",
+            body=text,
+        )
     except Exception as e:  # pragma: no cover
         log.warning("whatsapp send failed: %s", e)
 
@@ -116,7 +150,7 @@ class JobRunner(threading.Thread):
         self.dvsa = dvsa
 
     def run(self) -> None:  # noqa: C901
-        jid = self.job.get("id")
+        sid = int(self.job.get("id"))
         centre_list = self.job.get("centres", [])
         booking_type = self.job.get("booking_type")  # "swap" | "new"
         licence = self.job.get("licence_number")
@@ -127,33 +161,35 @@ class JobRunner(threading.Thread):
         if ALL_CENTRES and SCAN_ANYWHERE_FIRST_DEFAULT:
             centres = ALL_CENTRES + [c for c in centre_list if c not in ALL_CENTRES]
 
-        log.info("job %s start booking_type=%s centres=%s", jid, booking_type, centres[:5])
-        _post("/admin/events", {"sid": jid, "event": f"claimed:{len(centres)}"})
+        log.info("job %s start booking_type=%s centres=%s", sid, booking_type, centres[:5])
+        post_event(sid, f"claimed:{len(centres)}")
+        post_status(sid, event="worker_start", reached=False)
 
         try:
             for centre in centres[:JOB_MAX_PARALLEL_CHECKS] if JOB_MAX_PARALLEL_CHECKS > 0 else centres:
-                _post("/admin/events", {"sid": jid, "event": f"login_start:{centre}"})
+                post_status(sid, event=f"login_start:{centre}", last_centre=centre)
                 try:
                     if booking_type == "swap":
                         self.dvsa.login_swap(licence, ref)
                     else:
                         self.dvsa.login_new(licence, theory_pass)
-                    _post("/admin/events", {"sid": jid, "event": f"login_ok:{centre}"})
+                    post_status(sid, event=f"login_ok:{centre}", reached=True, last_centre=centre)
                 except LayoutIssue:
-                    _post("/admin/events", {"sid": jid, "event": f"layout_issue:{centre}"})
+                    post_status(sid, event=f"layout_issue:{centre}", last_centre=centre)
                     continue
 
+                # --- Search slots ---
                 slots = self.dvsa.search_centre_slots(centre)
                 if not slots:
-                    _post("/admin/events", {"sid": jid, "event": f"checked:{centre} · no_slots"})
+                    post_event(sid, f"checked:{centre} · no_slots")
                     continue
 
                 slots.sort(key=lambda s: (s["date"], s["time"]))
                 slot = slots[0]
-                _post("/admin/events", {"sid": jid, "event": f"slot_found:{centre} · {slot['date']} · {slot['time']}"})
+                post_event(sid, f"slot_found:{centre} · {slot['date']} · {slot['time']}")
 
                 if not AUTOBOOK_ENABLED:
-                    _post("/admin/events", {"sid": jid, "event": f"found_only:{centre} · {slot['date']} {slot['time']}"})
+                    post_event(sid, f"found_only:{centre} · {slot['date']} {slot['time']}")
                     break
 
                 if booking_type == "swap":
@@ -162,27 +198,27 @@ class JobRunner(threading.Thread):
                     ok = self.dvsa.book_and_pay(slot, mode=AUTOBOOK_MODE)
 
                 if ok:
-                    _post("/admin/events", {"sid": jid, "event": f"booked:{centre} · {slot['date']} {slot['time']}"})
+                    post_status(sid, status="booked", event=f"booked:{centre} · {slot['date']} {slot['time']}", last_centre=centre)
                     if booking_type == "new":
                         try:
-                            _post("/upgrade-to-swap", {"sid": jid})
+                            _post("/upgrade-to-swap", {"sid": sid})
                         except Exception:
                             pass
                     return
                 else:
-                    _post("/admin/events", {"sid": jid, "event": f"booking_failed:{centre} · {slot['date']} {slot['time']}"})
+                    post_event(sid, f"booking_failed:{centre} · {slot['date']} {slot['time']}")
 
         except CaptchaDetected as e:
-            _post("/admin/events", {"sid": jid, "event": f"captcha_cooldown:{e.stage}"})
-            _notify_whatsapp(f"CAPTCHA at {e.stage}. Tap to resume: {RESUME_URL}")
+            post_status(sid, event=f"captcha_cooldown:{getattr(e, 'stage', 'unknown')}", captcha=True)
+            _notify_whatsapp(f"CAPTCHA hit. Tap to resume: {RESUME_URL}")
         except WAFBlocked as e:
-            _post("/admin/events", {"sid": jid, "event": f"ip_blocked:{e.stage}"})
+            post_status(sid, event=f"ip_blocked:{getattr(e, 'stage', 'unknown')}")
         except ServiceClosed as e:
-            _post("/admin/events", {"sid": jid, "event": f"service_closed:{e.stage}"})
+            post_status(sid, event=f"service_closed:{getattr(e, 'stage', 'unknown')}")
         except DVSAError as e:
-            _post("/admin/events", {"sid": jid, "event": f"error:{type(e).__name__}:{str(e)[:140]}"})
+            post_event(sid, f"error:{type(e).__name__}:{str(e)[:140]}")
         except Exception as e:  # pragma: no cover
-            _post("/admin/events", {"sid": jid, "event": f"unexpected:{type(e).__name__}:{str(e)[:140]}"})
+            post_event(sid, f"unexpected:{type(e).__name__}:{str(e)[:140]}")
 
 
 class ClaimLoop:
@@ -198,7 +234,11 @@ class ClaimLoop:
                 return []
             r.raise_for_status()
             data = r.json()
-            return data.get("jobs", [])
+            # Support both {jobs:[...]} and {items:[...]}
+            jobs = data.get("jobs")
+            if jobs is None:
+                jobs = data.get("items", [])
+            return jobs
         except Exception as e:
             log.warning("claim error: %s", e)
             return []
@@ -226,7 +266,7 @@ class ClaimLoop:
                 pause = False
                 if cr.ok:
                     c = cr.json()
-                    pause = bool(c.get("pause", False))
+                    pause = bool(c.get("pause", False) or c.get("pause_all", False))
                     quiet_now = in_quiet_hours()
                     log.info(
                         "poll: pause=%s quiet=%s global_allowed=%s",
