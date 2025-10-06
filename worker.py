@@ -1,5 +1,5 @@
 # =============================
-# FILE: worker.py  (FastDTF worker – live step-by-step telemetry)
+# FILE: worker.py  (FastDTF worker – live status in Admin + correct swap centres)
 # =============================
 import os
 import time
@@ -94,7 +94,7 @@ def _headers() -> Dict[str, str]:
     return {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {WORKER_TOKEN}",
-        "User-Agent": "FastDTF-Worker/2025-10-06",
+        "User-Agent": "FastDTF-Worker/2025-10-07",
     }
 
 
@@ -108,9 +108,10 @@ def _get(path: str) -> requests.Response:
     return requests.get(url, headers=_headers(), timeout=60)
 
 
-# ---- Backend wiring (correct endpoints) ----
+# ---- Backend wiring (use STATUS for "Live" in Admin) ----
 
 def post_event(sid: int, text: str) -> None:
+    # Historical log line (keep for audit), but try to use post_status for "live" rows.
     try:
         _post(f"/worker/searches/{sid}/event", {"event": text})
     except Exception as e:  # pragma: no cover
@@ -118,6 +119,7 @@ def post_event(sid: int, text: str) -> None:
 
 
 def post_status(sid: int, status: str | None = None, **fields: Any) -> None:
+    # This is what the Admin page should render as the "Live" cell.
     payload: Dict[str, Any] = {"event": fields.pop("event", "")}
     if status is not None:
         payload["status"] = status
@@ -140,13 +142,6 @@ def _notify_whatsapp(text: str) -> None:
         )
     except Exception as e:  # pragma: no cover
         log.warning("whatsapp send failed: %s", e)
-
-
-def _centres_summary(centres: List[str], max_names: int = 12) -> str:
-    names = [str(c) for c in centres]
-    head = ", ".join(names[:max_names])
-    tail = f" (+{len(names) - max_names} more)" if len(names) > max_names else ""
-    return head + tail
 
 
 # ---------- Worker Threads ----------
@@ -176,13 +171,15 @@ class JobRunner(threading.Thread):
             ref = self.job.get("booking_reference")
             theory_pass = self.job.get("theory_pass")
 
+            # IMPORTANT: only prepend ALL_CENTRES for NEW jobs
             centres = centre_list[:]
-            if ALL_CENTRES and SCAN_ANYWHERE_FIRST_DEFAULT:
+            if booking_type == "new" and ALL_CENTRES and SCAN_ANYWHERE_FIRST_DEFAULT:
                 centres = ALL_CENTRES + [c for c in centre_list if c not in ALL_CENTRES]
 
             log.info("job %s start booking_type=%s centres=%s", sid, booking_type, centres[:5])
-            post_event(sid, f"claimed:{len(centres)} | centres:{_centres_summary(centres)}")
-            post_status(sid, event="worker_start", reached=False, last_centre=(centres[0] if centres else ""))
+
+            # Use STATUS for the live cell (avoid dumping 328 names into events)
+            post_status(sid, event=f"claimed:{len(centres)}", last_centre=(centres[0] if centres else ""), reached=False)
 
             # Iterate centres (optionally limited per tick)
             for centre in centres[:JOB_MAX_PARALLEL_CHECKS] if JOB_MAX_PARALLEL_CHECKS > 0 else centres:
@@ -201,15 +198,16 @@ class JobRunner(threading.Thread):
                 post_status(sid, event=f"step:open_centre | centre:{centre}", last_centre=centre)
                 slots = dvsa.search_centre_slots(centre)
                 if not slots:
-                    post_event(sid, f"checked:{centre} · no_slots")
+                    post_status(sid, event=f"checked:{centre} · no_slots", last_centre=centre)
                     continue
 
-                slots.sort(key=lambda s: (s["date"], s["time"]))
+                # Choose earliest-looking slot (given our lightweight representation)
+                slots.sort(key=lambda s: (s.get("date", ""), s.get("time", "")))
                 slot = slots[0]
-                post_event(sid, f"slot_found:{centre} · {slot['date']} · {slot['time']}")
+                post_status(sid, event=f"slot_found:{centre} · {slot.get('date','?')} · {slot.get('time','?')}", last_centre=centre)
 
                 if not AUTOBOOK_ENABLED:
-                    post_event(sid, f"found_only:{centre} · {slot['date']} {slot['time']}")
+                    post_status(sid, event=f"found_only:{centre} · {slot.get('date','?')} {slot.get('time','?')}", last_centre=centre)
                     break
 
                 ok = dvsa.swap_to(slot) if booking_type == "swap" else dvsa.book_and_pay(slot, mode=AUTOBOOK_MODE)
@@ -218,7 +216,7 @@ class JobRunner(threading.Thread):
                     post_status(
                         sid,
                         status="booked",
-                        event=f"booked:{centre} · {slot['date']} {slot['time']}",
+                        event=f"booked:{centre} · {slot.get('date','?')} {slot.get('time','?')}",
                         last_centre=centre,
                     )
                     if booking_type == "new":
@@ -228,7 +226,7 @@ class JobRunner(threading.Thread):
                             pass
                     return
                 else:
-                    post_event(sid, f"booking_failed:{centre} · {slot['date']} {slot['time']}")
+                    post_status(sid, event=f"booking_failed:{centre} · {slot.get('date','?')} {slot.get('time','?')}", last_centre=centre)
         except CaptchaDetected as e:
             post_status(sid, event=f"captcha_cooldown:{getattr(e, 'stage', 'unknown')}", captcha=True)
             _notify_whatsapp(f"CAPTCHA hit. Tap to resume: {RESUME_URL}")
@@ -237,9 +235,9 @@ class JobRunner(threading.Thread):
         except ServiceClosed as e:
             post_status(sid, event=f"service_closed:{getattr(e, 'stage', 'unknown')}")
         except DVSAError as e:
-            post_event(sid, f"error:{type(e).__name__}:{str(e)[:140]}")
+            post_status(sid, event=f"error:{type(e).__name__}:{str(e)[:140]}")
         except Exception as e:  # pragma: no cover
-            post_event(sid, f"unexpected:{type(e).__name__}:{str(e)[:140]}")
+            post_status(sid, event=f"unexpected:{type(e).__name__}:{str(e)[:140]}")
         finally:
             try:
                 dvsa.close()
