@@ -1,15 +1,23 @@
 # =============================
-# FILE: dvsa_client.py
+# FILE: dvsa_client.py  (synchronous Playwright + rich instrumentation)
 # =============================
 """
-Synchronous Playwright DVSA client tailored for FastDTF worker.
-- Robust cookie-banner dismissal and cross-frame field discovery
-- Label-first lookup with multiple fallbacks for licence/reference/theory fields
-- Human-like pacing + optional RPS throttle
-- CAPTCHA/WAF/Service-closed guards raising typed exceptions
-- API compatible with worker.py: login_swap, login_new, search_centre_slots, swap_to, book_and_pay
+Synchronous DVSA automation client for FastDTF worker.
+- Robust readiness + cookie banner handling
+- Label-first discovery with multiple fallbacks
+- Human-like pacing with optional internal RPS throttle
+- CAPTCHA / WAF / Service-closed guards with typed exceptions
+- Rich, per-step instrumentation to your backend when a job SID is attached
 
-Env knobs (optional):
+Public API used by the worker (sync):
+  - login_swap(licence_number, booking_reference, email=None)
+  - login_new(licence_number, theory_pass=None, email=None)
+  - search_centre_slots(centre_name) -> List[dict]
+  - swap_to(slot_dict) -> bool
+  - book_and_pay(slot_dict, mode="simulate"|"real") -> bool
+
+Set these ENV vars on the worker host:
+  API_BASE, WORKER_TOKEN
   DVSA_HEADLESS=true
   DVSA_NAV_TIMEOUT_MS=25000
   DVSA_READY_MAX_MS=30000
@@ -24,17 +32,18 @@ Env knobs (optional):
 from __future__ import annotations
 
 import os
+import re
 import time
 import random
 import logging
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout  # type: ignore
 
 log = logging.getLogger("dvsa")
 
-# ---------- Errors ----------
+# ---------- Exceptions ----------
 class DVSAError(Exception):
     pass
 
@@ -56,26 +65,34 @@ class WAFBlocked(DVSAError):
         super().__init__(f"waf at {stage}")
         self.stage = stage
 
-# ---------- ENV (DVSA tuning) ----------
-DVSA_HEADLESS = os.environ.get("DVSA_HEADLESS", "true").lower() == "true"
-DVSA_NAV_TIMEOUT_MS = int(os.environ.get("DVSA_NAV_TIMEOUT_MS", "25000"))
-DVSA_READY_MAX_MS = int(os.environ.get("DVSA_READY_MAX_MS", "30000"))
-DVSA_POST_NAV_SETTLE_MS = int(os.environ.get("DVSA_POST_NAV_SETTLE_MS", "800"))
-DVSA_CLICK_SETTLE_MS = int(os.environ.get("DVSA_CLICK_SETTLE_MS", "700"))
-DVSA_USER_AGENT = os.environ.get(
+# ---------- ENV ----------
+API_BASE = os.environ.get("API_BASE", "http://localhost:8000/api").rstrip("/")
+WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
+
+HEADLESS = os.environ.get("DVSA_HEADLESS", "true").lower() == "true"
+NAV_TIMEOUT_MS = int(os.environ.get("DVSA_NAV_TIMEOUT_MS", "25000"))
+READY_MAX_MS = int(os.environ.get("DVSA_READY_MAX_MS", "30000"))
+POST_NAV_SETTLE_MS = int(os.environ.get("DVSA_POST_NAV_SETTLE_MS", "800"))
+CLICK_SETTLE_MS = int(os.environ.get("DVSA_CLICK_SETTLE_MS", "700"))
+USER_AGENT = os.environ.get(
     "DVSA_USER_AGENT",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 )
 DVSA_PROXY = os.environ.get("DVSA_PROXY", "")
 
-DVSA_MANAGE_URL = "https://driverpracticaltest.dvsa.gov.uk/manage"
+DVSA_RPS = float(os.environ.get("DVSA_RPS", "0.5"))
+DVSA_RPS_JITTER = float(os.environ.get("DVSA_RPS_JITTER", "0.35"))
 
-# ---------- Label text we try to match (GOV.UK varies) ----------
+URL_CHANGE_TEST = os.environ.get("DVSA_URL_CHANGE", "https://driverpracticaltest.dvsa.gov.uk/manage")
+URL_BOOK_TEST   = os.environ.get("DVSA_URL_BOOK",   "https://driverpracticaltest.dvsa.gov.uk/application")
+
+# ---------- Label text variants ----------
 LICENCE_LABELS = [
     "Driving licence number",
     "Driving license number",
     "Driver number",
     "Licence number",
+    "Driving licence",
 ]
 REF_LABELS = [
     "Application reference number",
@@ -85,34 +102,48 @@ REF_LABELS = [
 THEORY_LABELS = [
     "Theory test pass number",
     "Theory pass number",
+    "Theory pass certificate number",
 ]
 
-# ---------- DVSA RPS throttle ----------
-DVSA_RPS = float(os.environ.get("DVSA_RPS", "0.5"))
-DVSA_RPS_JITTER = float(os.environ.get("DVSA_RPS_JITTER", "0.35"))
+# ---------- Selectors (fallbacks) ----------
+SEL = {
+    "start_now": "a.govuk-button--start, a.govuk-button[href*='start'], a.button--start, a[href*='start now' i]",
+    "swap_licence": "input[name*='licen'], input[id*='licen'], input#driving-licence-number, input#drivingLicenceNumber",
+    "swap_ref": "input[name*='reference'], input[id*='reference'], input#booking-reference, input[name='booking-reference']",
+    "new_licence": "input[name*='licen'], input[id*='licen'], input#driving-licence-number, input#drivingLicenceNumber",
+    "new_theory": "input[name*='theory'], input[id*='theory']",
+    "centre_search_box": "input[name*='test-centre'], input[id*='test-centre'], input[name*='centre'], input[name='testCentreSearch']",
+    "centre_suggestions": "ul[role='listbox'] li, li[role='option'], ul li a",
+    "centre_dates": "[data-test='available-dates'] li, ul.available-dates li, .available-dates li",
+    "centre_times": "[data-test='available-times'] li, ul.available-times li, .available-times li, .slot, a:has-text(':')",
+    "continue": "button[type='submit'], button.govuk-button, [role='button'][type='submit']",
+    "error_summary": ".govuk-error-summary, [role='alert']",
+}
 
-@dataclass
+# ---------- Client ----------
 class DVSAClient:
-    honour_client_rps: bool = True
-    dvsa_rps: float = DVSA_RPS
-    dvsa_rps_jitter: float = DVSA_RPS_JITTER
-
-    def __post_init__(self) -> None:
+    def __init__(self, honour_client_rps: bool = True, dvsa_rps: float = DVSA_RPS, dvsa_rps_jitter: float = DVSA_RPS_JITTER) -> None:
         self._p = None
         self._browser = None
         self._ctx = None
         self._page = None
-        self._last_action_ts = 0.0
+        self._last_ts = 0.0
+        self._honour = honour_client_rps
+        self._rps = max(0.05, dvsa_rps)
+        self._jit = max(0.0, dvsa_rps_jitter)
+        self.sid: Optional[int] = None  # attached job id for instrumentation
         self._boot()
 
-    # ---------- Boot / Teardown ----------
+    # ----- boot/close -----
     def _boot(self) -> None:
         self._p = sync_playwright().start()
-        proxy = {"server": DVSA_PROXY} if DVSA_PROXY else None
-        self._browser = self._p.chromium.launch(headless=DVSA_HEADLESS)
-        self._ctx = self._browser.new_context(user_agent=DVSA_USER_AGENT, proxy=proxy)
-        self._ctx.set_default_navigation_timeout(DVSA_NAV_TIMEOUT_MS)
-        self._ctx.set_default_timeout(DVSA_NAV_TIMEOUT_MS)
+        kwargs = {"headless": HEADLESS}
+        if DVSA_PROXY:
+            kwargs["proxy"] = {"server": DVSA_PROXY}
+        self._browser = self._p.chromium.launch(**kwargs)
+        self._ctx = self._browser.new_context(user_agent=USER_AGENT)
+        self._ctx.set_default_navigation_timeout(NAV_TIMEOUT_MS)
+        self._ctx.set_default_timeout(NAV_TIMEOUT_MS)
         self._page = self._ctx.new_page()
         log.info("playwright chromium ready")
 
@@ -127,204 +158,291 @@ class DVSAClient:
         except Exception:
             pass
 
-    # ---------- pacing ----------
+    # ----- instrumentation wiring -----
+    def attach_job(self, sid: int) -> None:
+        self.sid = int(sid)
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {WORKER_TOKEN}",
+            "User-Agent": "FastDTF-DVSA/2025-10-06",
+        }
+
+    def _post_json(self, path: str, payload: Dict[str, Any]) -> None:
+        if not (self.sid and API_BASE and WORKER_TOKEN):
+            return
+        try:
+            url = f"{API_BASE}{path}"
+            requests.post(url, headers=self._headers(), data=json.dumps(payload), timeout=15)
+        except Exception:
+            pass
+
+    def _event(self, text: str) -> None:
+        if not self.sid:
+            return
+        self._post_json(f"/worker/searches/{self.sid}/event", {"event": text})
+
+    def _status(self, status: Optional[str] = None, **fields: Any) -> None:
+        if not self.sid:
+            return
+        payload: Dict[str, Any] = {"event": fields.pop("event", "")}
+        if status:
+            payload["status"] = status
+        payload.update(fields)
+        self._post_json(f"/worker/searches/{self.sid}/status", payload)
+
+    # ----- pacing/guards -----
     def _sleep_rps(self) -> None:
-        if self.honour_client_rps:
-            now = time.time()
-            min_gap = 1.0 / max(self.dvsa_rps, 0.01)
-            jitter = random.uniform(0, min_gap * self.dvsa_rps_jitter)
-            wait = max(0.0, (self._last_action_ts + min_gap + jitter) - now)
-            if wait > 0:
-                time.sleep(wait)
-            self._last_action_ts = time.time()
+        if not self._honour:
+            return
+        now = time.time()
+        min_gap = 1.0 / self._rps
+        jitter = random.uniform(0, min_gap * self._jit)
+        wait = max(0.0, (self._last_ts + min_gap + jitter) - now)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_ts = time.time()
 
     def _ready_guard(self) -> None:
         self._sleep_rps()
-        time.sleep(DVSA_POST_NAV_SETTLE_MS / 1000.0)
+        time.sleep(POST_NAV_SETTLE_MS / 1000.0)
 
-    # ---------- query helpers ----------
-    def _frames(self):
-        return [self._page, *self._page.frames]
+    def _click(self, sel_or_loc) -> None:
+        self._sleep_rps()
+        if isinstance(sel_or_loc, str):
+            self._page.click(sel_or_loc)
+        else:
+            sel_or_loc.click()
+        time.sleep(CLICK_SETTLE_MS / 1000.0)
 
-    def _find_any(self, selectors: List[str]):
-        for scope in self._frames():
-            for s in selectors:
-                try:
-                    loc = scope.locator(s)
-                    if loc and loc.is_visible():
-                        return loc
-                except Exception:
-                    continue
-        return None
+    def _fill(self, sel_or_loc, text: str) -> None:
+        self._sleep_rps()
+        if isinstance(sel_or_loc, str):
+            self._page.fill(sel_or_loc, text)
+        else:
+            sel_or_loc.fill(text)
 
-    def _get_by_label_any(self, labels: List[str]):
-        for scope in self._frames():
-            for t in labels:
-                try:
-                    loc = scope.get_by_label(t, exact=False)
-                    if loc and loc.is_visible():
-                        return loc
-                except Exception:
-                    continue
-        return None
-
-    def _dismiss_cookie_banners(self) -> None:
-        buttons = [
+    def _dismiss_cookies(self) -> None:
+        for s in [
             "button:has-text('Accept additional cookies')",
             "button:has-text('Accept all cookies')",
             "#accept-additional-cookies",
             "#accept-all-cookies",
             "text=Accept cookies",
-        ]
-        btn = self._find_any(buttons)
-        if btn:
+        ]:
             try:
-                self._click(btn)
-            except Exception:
-                pass
-        hide = self._find_any(["button:has-text('Hide')", "#hide-cookie-banner"])
-        if hide:
-            try:
-                self._click(hide)
+                if self._page.locator(s).is_visible():
+                    self._click(s)
+                    break
             except Exception:
                 pass
 
-    # ---------- low-level actions ----------
-    def _click(self, where) -> None:
-        self._sleep_rps()
-        if isinstance(where, str):
-            self._page.click(where)
-        else:
-            where.click()
-        time.sleep(DVSA_CLICK_SETTLE_MS / 1000.0)
+    def _is_captcha(self) -> bool:
+        html = self._page.content().lower()
+        return any(k in html for k in ["cf-challenge", "hcaptcha", "g-recaptcha", "are you human", "unusual traffic"]) or "hcaptcha.com" in (self._page.url.lower())
 
-    def _fill(self, where, text: str) -> None:
-        self._sleep_rps()
-        if isinstance(where, str):
-            self._page.fill(where, text)
-        else:
-            where.fill(text)
+    def _is_waf_block(self) -> bool:
+        html = self._page.content().lower()
+        return any(k in html for k in ["request blocked", "access denied", "http 403", "forbidden", "error code 1020"])  # heuristic
 
-    # ---------- guards & nav ----------
     def _goto(self, url: str, stage: str) -> None:
         try:
             self._page.goto(url)
         except PWTimeout:
+            self._status(event=f"nav_timeout:{stage}")
             raise ServiceClosed(stage)
         self._ready_guard()
+        self._dismiss_cookies()
         if self._is_captcha():
+            self._event(f"captcha_cooldown:{stage}")
             raise CaptchaDetected(stage)
         if self._is_waf_block():
+            self._event(f"ip_blocked:{stage}")
             raise WAFBlocked(stage)
 
-    def _is_captcha(self) -> bool:
-        html = self._page.content()
-        return any(k in html for k in ["cf-challenge", "h-captcha", "g-recaptcha"])
+    # ----- helpers -----
+    def _get_by_label_any(self, labels: List[str]):
+        for t in labels:
+            try:
+                loc = self._page.get_by_label(t, exact=False)
+                if loc and loc.is_visible():
+                    return loc
+            except Exception:
+                pass
+        return None
 
-    def _is_waf_block(self) -> bool:
-        html = self._page.content().lower()
-        return any(k in html for k in ["request blocked", "access denied", "http 403", "forbidden"])  # heuristic
+    def _find_any(self, selectors: List[str]):
+        for s in selectors:
+            try:
+                loc = self._page.locator(s)
+                if loc and loc.is_visible():
+                    return loc
+            except Exception:
+                pass
+        return None
 
-    # ---------- form discovery ----------
-    def _ensure_login_form(self, stage: str) -> Dict[str, Any]:
-        self._dismiss_cookie_banners()
-
-        licence = self._get_by_label_any(LICENCE_LABELS)
-        ref = self._get_by_label_any(REF_LABELS)
-        theory = self._get_by_label_any(THEORY_LABELS)
-
-        if not licence:
-            licence = self._find_any([
-                "input[name='driving-licence-number']",
-                "input#driving-licence-number",
-                "input[name*='licence']",
-                "input[autocomplete='driving-licence-number']",
-                "input[name*='driver']",
-            ])
-        if not ref:
-            ref = self._find_any([
-                "input[name='application-reference-number']",
-                "input#application-reference-number",
-                "input[name*='reference']",
-                "input[name='booking-reference']",
-            ])
-        if not theory:
-            theory = self._find_any([
-                "input[name='theory-test-pass-number']",
-                "input#theory-test-pass-number",
-                "input[name*='theory']",
-            ])
-
-        if not (licence and (ref or theory)):
-            raise LayoutIssue(f"{stage}: licence field not found")
-
-        submit = self._find_any([
-            "button[type='submit']",
-            "input[type='submit']",
-            "button:has-text('Continue')",
-            "button:has-text('Sign in')",
-            "text=Continue",
-        ])
-        return {"licence": licence, "ref": ref, "theory": theory, "submit": submit}
-
-    # ---------- Public API ----------
-    def login_swap(self, licence: str, booking_ref: str) -> None:
+    # ----- Public API -----
+    def login_swap(self, licence: str, booking_ref: str, email: Optional[str] = None) -> None:
         if not (licence and booking_ref and len(booking_ref) == 8 and booking_ref.isdigit()):
             raise LayoutIssue("invalid swap credentials")
-        self._goto(DVSA_MANAGE_URL, stage="login_swap")
-        for _ in range(5):
-            try:
-                parts = self._ensure_login_form("login_swap")
-                self._fill(parts["licence"], licence)
-                self._fill(parts["ref"], booking_ref)
-                if parts["submit"]:
-                    self._click(parts["submit"])
-                self._ready_guard()
-                return
-            except LayoutIssue:
-                time.sleep(0.8)
-        raise LayoutIssue("layout_change: licence field not found (gave up after 5)")
+        stage = "login_swap"
+        self._goto(URL_CHANGE_TEST, stage)
+        self._event("form_nav_ok")
 
-    def login_new(self, licence: str, theory_pass: str) -> None:
-        if not (licence and theory_pass):
-            raise LayoutIssue("invalid new credentials")
-        self._goto(DVSA_MANAGE_URL, stage="login_new")
-        for _ in range(5):
-            try:
-                parts = self._ensure_login_form("login_new")
-                self._fill(parts["licence"], licence)
-                if parts["theory"]:
-                    self._fill(parts["theory"], theory_pass)
-                else:
-                    alt = self._find_any(["label:has-text('theory')", "text=theory", "#use-theory"])
-                    if alt:
-                        self._click(alt)
-                        self._ready_guard()
-                        parts = self._ensure_login_form("login_new")
-                        self._fill(parts["theory"], theory_pass)
-                if parts["submit"]:
-                    self._click(parts["submit"])
-                self._ready_guard()
-                return
-            except LayoutIssue:
-                time.sleep(0.8)
-        raise LayoutIssue("layout_change: licence field not found (gave up after 5)")
+        lic = self._get_by_label_any(LICENCE_LABELS) or self._find_any([SEL["swap_licence"]])
+        if not lic:
+            self._event("licence_field_missing")
+            raise LayoutIssue("layout_change: licence field not found")
+        self._event("licence_field_found")
+        self._fill(lic, licence)
+        self._event("licence_number_entered")
 
-    def search_centre_slots(self, centre: str) -> List[Dict[str, str]]:
-        # Placeholder. Replace with real selectors when ready.
+        ref = self._get_by_label_any(REF_LABELS) or self._find_any([SEL["swap_ref"]])
+        if not ref:
+            self._event("booking_reference_field_missing")
+            raise LayoutIssue("layout_change: booking reference field not found")
+        self._event("booking_reference_field_found")
+        self._fill(ref, booking_ref)
+        self._event("booking_reference_entered")
+
+        if email:
+            try:
+                em = self._page.get_by_label("Email", exact=False)
+                if em and em.is_visible():
+                    self._event("email_field_found")
+                    self._fill(em, email)
+                    self._event("email_entered")
+            except Exception:
+                pass
+
+        cont = self._find_any([SEL["continue"], "button:has-text('Continue')"]) or self._page.locator("button.govuk-button").first
+        if cont:
+            self._click(cont)
+            self._event("continue_clicked")
         self._ready_guard()
-        if random.random() < 0.7:
-            return []
-        from datetime import datetime as _dt
-        d = _dt.now().date().isoformat()
-        return [{"date": d, "time": "09:17", "centre": centre}]
+
+        if self._is_captcha():
+            self._event("captcha_cooldown:login_after_continue")
+            raise CaptchaDetected(stage)
+        if self._is_waf_block():
+            self._event("ip_blocked:login_after_continue")
+            raise WAFBlocked(stage)
+
+    def login_new(self, licence: str, theory_pass: Optional[str] = None, email: Optional[str] = None) -> None:
+        if not licence:
+            raise LayoutIssue("invalid new credentials")
+        stage = "login_new"
+        self._goto(URL_BOOK_TEST, stage)
+        self._event("form_nav_ok")
+
+        lic = self._get_by_label_any(LICENCE_LABELS) or self._find_any([SEL["new_licence"]])
+        if not lic:
+            self._event("licence_field_missing")
+            raise LayoutIssue("layout_change: licence field not found")
+        self._event("licence_field_found")
+        self._fill(lic, licence)
+        self._event("licence_number_entered")
+
+        if theory_pass:
+            th = self._get_by_label_any(THEORY_LABELS) or self._find_any([SEL["new_theory"]])
+            if th:
+                self._event("theory_field_found")
+                self._fill(th, theory_pass)
+                self._event("theory_number_entered")
+
+        if email:
+            try:
+                em = self._page.get_by_label("Email", exact=False)
+                if em and em.is_visible():
+                    self._event("email_field_found")
+                    self._fill(em, email)
+                    self._event("email_entered")
+            except Exception:
+                pass
+
+        cont = self._find_any([SEL["continue"], "button:has-text('Continue')"]) or self._page.locator("button.govuk-button").first
+        if cont:
+            self._click(cont)
+            self._event("continue_clicked")
+        self._ready_guard()
+
+        if self._is_captcha():
+            self._event("captcha_cooldown:login_after_continue")
+            raise CaptchaDetected(stage)
+        if self._is_waf_block():
+            self._event("ip_blocked:login_after_continue")
+            raise WAFBlocked(stage)
+
+    def _open_centre(self, centre_name: str) -> None:
+        self._event(f"centre_open_start:{centre_name}")
+        box = self._find_any([SEL["centre_search_box"]])
+        if not box:
+            raise LayoutIssue("centre search box not found")
+        self._fill(box, centre_name)
+        self._event(f"centre_query_entered:{centre_name}")
+        try:
+            sugg = self._page.locator(SEL["centre_suggestions"]).first
+            if sugg and sugg.is_visible():
+                self._click(sugg)
+            else:
+                self._page.keyboard.press("Enter")
+        except Exception:
+            self._page.keyboard.press("Enter")
+        self._ready_guard()
+        self._event(f"centre_selected:{centre_name}")
+
+    def search_centre_slots(self, centre_name: str) -> List[Dict[str, str]]:
+        self._open_centre(centre_name)
+        slots: List[Dict[str, str]] = []
+        try:
+            dates = self._page.locator(SEL["centre_dates"])  # may be empty
+            if dates and dates.count() > 0:
+                count = min(5, dates.count())
+                for i in range(count):
+                    try:
+                        dates.nth(i).click()
+                        self._ready_guard()
+                        times = self._page.locator(SEL["centre_times"]) or []
+                        n = times.count() if hasattr(times, "count") else 0
+                        for j in range(n):
+                            ttxt = times.nth(j).inner_text().strip()
+                            if not ttxt:
+                                continue
+                            # best-effort: we don't parse date text here; DVSA UI includes date section header
+                            slots.append({"centre": centre_name, "date": f"date#{i+1}", "time": ttxt})
+                    except Exception:
+                        continue
+            else:
+                self._event(f"centre_no_dates:{centre_name}")
+        except Exception:
+            pass
+        if slots:
+            self._event(f"centre_times_listed:{centre_name}")
+        self._event(f"checked:{centre_name} · {('no_slots' if not slots else str(len(slots)))}")
+        return slots
 
     def swap_to(self, slot: Dict[str, str]) -> bool:
-        self._ready_guard()
-        return random.random() > 0.3
+        self._event(f"swap_attempt:{slot.get('centre','?')} · {slot.get('date','?')} · {slot.get('time','?')}")
+        btn = self._find_any([SEL["continue"], "button:has-text('Confirm')", "button:has-text('Book')"])  # heuristic
+        if btn:
+            self._click(btn)
+            self._ready_guard()
+            self._status(status="booked", event="swap_confirm_clicked")
+            return True
+        self._event("swap_fail:no_button")
+        return False
 
     def book_and_pay(self, slot: Dict[str, str], mode: str = "simulate") -> bool:
-        self._ready_guard()
+        self._event(f"book_attempt:{slot.get('centre','?')} · {slot.get('date','?')} · {slot.get('time','?')}")
         if mode == "simulate":
+            self._status(status="booked", event="book_simulated")
             return True
-        return random.random() > 0.4
+        btn = self._find_any([SEL["continue"], "button:has-text('Confirm')", "button:has-text('Book and pay')"])  # heuristic
+        if btn:
+            self._click(btn)
+            self._ready_guard()
+            self._status(status="booked", event="bookpay_clicked")
+            return True
+        self._event("bookpay_fail:no_button")
+        return False
