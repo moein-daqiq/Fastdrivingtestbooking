@@ -298,6 +298,7 @@ def live_status_for(row: sqlite3.Row) -> str:
     status = (row["status"] or "").lower()
     if status == "pending_payment":
         return "Awaiting Payment"
+
     now = utcnow()
     updated = _parse_iso_safe(row["updated_at"]) or (now - timedelta(days=365))
     age_min = (now - updated).total_seconds() / 60.0
@@ -309,11 +310,14 @@ def live_status_for(row: sqlite3.Row) -> str:
         return "IP Blocked"
     if "slot_found" in last_event:
         return "Slot Found (awaiting action)"
+
+    # >>> CHANGE #1: stale must win over "Scanning"
+    if age_min >= STALE_SEARCH_MIN:
+        return f"Stale (>{STALE_SEARCH_MIN}m)"
+
     if "worker_claimed" in last_event or status == "searching":
         return "Scanning"
 
-    if age_min >= STALE_SEARCH_MIN:
-        return f"Stale (>{STALE_SEARCH_MIN}m)"
     return "Idle / Queued"
 
 # ---- Amount helpers ----
@@ -868,7 +872,7 @@ def _fmt_ts(val: Optional[str]) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         dt = dt.astimezone(ZoneInfo("Europe/London"))
-        return dt.strftime("%H:MM:%S<br>%d/%m/%Y")  # NOTE: leaving as-is (matches your prior style)
+        return dt.strftime("%H:%M:%S<br>%d/%m/%Y")
     except Exception:
         return html.escape(str(val))
 
@@ -1072,6 +1076,9 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
           }});
           location.reload();
         }}
+
+        // >>> CHANGE #2: auto-refresh the admin page every 60 seconds
+        setInterval(() => {{ window.location.reload(); }}, 60_000);
       </script>
     </head>
     <body>
