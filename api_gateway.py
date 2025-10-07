@@ -122,6 +122,18 @@ def migrate():
         )
     """)
 
+    # [NEW] worker_status table for /api/worker/pulse
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS worker_status (
+            worker_id TEXT PRIMARY KEY,
+            last_seen TEXT NOT NULL,
+            state TEXT,
+            note TEXT,
+            rps REAL,
+            jobs_active INTEGER
+        )
+    """)
+
     cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_status ON searches(status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_paid ON searches(paid)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_searches_expires ON searches(expires_at)")
@@ -187,6 +199,14 @@ class AdminBatchIds(BaseModel):
 class UpgradeToSwapIn(BaseModel):
     booking_reference: str
     desired_centres: Optional[List[str]] = None  # keep existing if None
+
+# [NEW] worker pulse payload
+class WorkerPulseIn(BaseModel):
+    worker_id: str
+    state: Optional[str] = "idle"
+    note: Optional[str] = None
+    rps: Optional[float] = None
+    jobs_active: Optional[int] = None
 
 # ---------- HELPERS ----------
 def utcnow() -> datetime:
@@ -258,6 +278,44 @@ def _expire_unpaid(conn: sqlite3.Connection):
     """, (ts, ts))
     conn.commit()
 
+# [NEW] small helpers to compute live status (no impact elsewhere)
+def _parse_iso_safe(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+def live_status_for(row: sqlite3.Row) -> str:
+    """
+    Derives a compact, human-readable live status for a search row based on:
+    - status, updated_at age, last_event markers (captcha/ip_blocked/slot_found/worker_claimed)
+    """
+    status = (row["status"] or "").lower()
+    if status == "pending_payment":
+        return "Awaiting Payment"
+    now = utcnow()
+    updated = _parse_iso_safe(row["updated_at"]) or (now - timedelta(days=365))
+    age_min = (now - updated).total_seconds() / 60.0
+
+    last_event = (row["last_event"] or "").lower()
+    if "captcha" in last_event:
+        return "Captcha Cooldown"
+    if "ip_blocked" in last_event or "blocked" in last_event:
+        return "IP Blocked"
+    if "slot_found" in last_event:
+        return "Slot Found (awaiting action)"
+    if "worker_claimed" in last_event or status == "searching":
+        return "Scanning"
+
+    if age_min >= STALE_SEARCH_MIN:
+        return f"Stale (>{STALE_SEARCH_MIN}m)"
+    return "Idle / Queued"
+
 # ---- Amount helpers ----
 def _band_ok(amount_cents: int, base_cents: int) -> bool:
     if amount_cents <= 0 or amount_cents % 100 != 0:
@@ -324,7 +382,13 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ts": now_iso(), "version": "1.7.0"}
+    # [NEW] include last worker pulse time
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT MAX(last_seen) AS last FROM worker_status")
+    last = cur.fetchone()["last"] if cur.fetchone is not None else None
+    conn.close()
+    return {"ok": True, "ts": now_iso(), "version": "1.7.0", "last_worker_pulse": last}
 
 # ---------- CONTROLS (Admin + Worker) ----------
 def _get_controls(conn: sqlite3.Connection) -> dict:
@@ -804,7 +868,7 @@ def _fmt_ts(val: Optional[str]) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         dt = dt.astimezone(ZoneInfo("Europe/London"))
-        return dt.strftime("%H:%M:%S<br>%d/%m/%Y")
+        return dt.strftime("%H:MM:%S<br>%d/%m/%Y")  # NOTE: leaving as-is (matches your prior style)
     except Exception:
         return html.escape(str(val))
 
@@ -895,6 +959,9 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
         reached_html = "✅" if reached else "—"
         captcha_html = "🚧" if captcha else "—"
 
+        # [NEW] compute live status text per row
+        live = live_status_for(r)
+
         # per-row checkbox + action button
         checkbox = f"<input type='checkbox' class='sel' value='{r['id']}' />"
         if r["status"] == "paused":
@@ -907,6 +974,7 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
             + td(checkbox)
             + td(r["id"])
             + td(_badge(r["status"]))
+            + td(live)  # [NEW] Live Status column cell
             + td(action_btn)
             + td(r["booking_type"] or "")
             + td(r["licence_number"] or "")
@@ -1038,7 +1106,8 @@ async def admin(request: Request, status: Optional[str] = Query(None)):
         <table>
           <thead>
             <tr>
-              <th></th><th>ID</th><th>Status</th><th>Actions</th>
+              <th></th><th>ID</th><th>Status</th><th>Live Status</th>
+              <th>Actions</th>
               <th>Type</th><th>Licence</th><th>Booking Ref</th><th>Theory</th>
               <th>Date/Time Window</th><th>Phone</th><th>Email</th><th>Centres</th><th>Options</th>
               <th>Last Event</th><th>Paid</th><th>PI</th>
@@ -1110,6 +1179,25 @@ def worker_claim(body: WorkerClaimRequest, _: bool = Depends(_verify_worker)):
 
     items = [dict(row) for row in claimed]
     return {"items": items}
+
+# [NEW] worker pulse endpoint
+@app.post("/api/worker/pulse")
+def worker_pulse(body: WorkerPulseIn, _: bool = Depends(_verify_worker)):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO worker_status (worker_id, last_seen, state, note, rps, jobs_active)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(worker_id) DO UPDATE SET
+          last_seen=excluded.last_seen,
+          state=excluded.state,
+          note=excluded.note,
+          rps=excluded.rps,
+          jobs_active=excluded.jobs_active
+    """, (body.worker_id, now_iso(), body.state, body.note, body.rps, body.jobs_active))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 @app.post("/api/worker/searches/{sid}/event")
 def worker_event(sid: int, body: WorkerEvent, _: bool = Depends(_verify_worker)):
