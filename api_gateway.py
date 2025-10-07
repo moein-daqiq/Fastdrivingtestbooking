@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import stripe
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 # ========================== ENV ==========================
@@ -60,6 +60,20 @@ def iso(dt: datetime) -> str:
 
 def parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
+
+def parse_iso_safe(s: Optional[str]) -> Optional[datetime]:
+    if s is None:
+        return None
+    ss = str(s).strip()
+    if not ss:
+        return None
+    try:
+        return datetime.fromisoformat(ss)
+    except Exception:
+        return None
+
+def esc(v: Any) -> str:
+    return html.escape("" if v is None else str(v))
 
 # ========================== DB ==========================
 def db() -> sqlite3.Connection:
@@ -270,7 +284,7 @@ def live_status_for(row: sqlite3.Row) -> str:
 @app.post("/search", response_model=Dict[str, Any])
 def create_search(body: CreateSearchBody):
     sid = new_id("srch")
-    now = iso(utcnow())
+    nowts = iso(utcnow())
     con = db()
     cur = con.cursor()
     centre_prefs_json = json.dumps(body.centre_prefs or [])
@@ -282,13 +296,13 @@ def create_search(body: CreateSearchBody):
           booking_reference, theory_pass, centre_prefs, date_window_from, date_window_to
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        sid, now, now, body.booking_type, status, body.amount_cents or 0,
+        sid, nowts, nowts, body.booking_type, status, body.amount_cents or 0,
         body.first_name, body.last_name, body.phone, body.email, body.licence_number,
         body.booking_reference, body.theory_pass, centre_prefs_json, body.date_window_from, body.date_window_to
     ))
     con.commit()
     con.close()
-    return {"id": sid, "status": status, "created_at": now}
+    return {"id": sid, "status": status, "created_at": nowts}
 
 @app.get("/search/{sid}", response_model=Dict[str, Any])
 def get_search(sid: str):
@@ -338,9 +352,9 @@ def create_intent(body: CreateIntentBody):
         # Simulated local dev intent
         pid = f"pi_sim_{body.search_id}"
         client_secret = f"{pid}_secret_{os.urandom(3).hex()}"
-    now = iso(utcnow())
+    nowts = iso(utcnow())
     cur.execute("UPDATE searches SET amount_cents=?, payment_intent_id=?, updated_at=? WHERE id=?",
-                (body.amount_cents, pid, now, body.search_id))
+                (body.amount_cents, pid, nowts, body.search_id))
     con.commit()
     con.close()
     return {"payment_intent_id": pid, "client_secret": client_secret}
@@ -470,32 +484,32 @@ def worker_event(body: WorkerEventBody, request: Request):
     wid = require_worker(request)
     con = db()
     cur = con.cursor()
-    now = iso(utcnow())
+    nowts = iso(utcnow())
     # audit
     cur.execute("""
         INSERT INTO admin_events (created_at, search_id, worker_id, kind, details)
         VALUES (?, ?, ?, ?, ?)
-    """, (now, body.search_id, wid, body.kind, body.details))
+    """, (nowts, body.search_id, wid, body.kind, body.details))
     # reflect to search row
     cur.execute("""
         UPDATE searches
            SET last_event=?, last_event_at=?, updated_at=?
          WHERE id=?
-    """, (f"{body.kind}", now, now, body.search_id))
+    """, (f"{body.kind}", nowts, nowts, body.search_id))
     # if booked -> mark completed + clear lock
     if body.kind.startswith("booked"):
         cur.execute("""
             UPDATE searches
                SET status='completed', locked_by=NULL, locked_at=NULL, lock_expires_at=NULL, updated_at=?
              WHERE id=?
-        """, (now, body.search_id))
+        """, (nowts, body.search_id))
     # if severe block -> pause
     if "ip_blocked" in body.kind or "service_closed" in body.kind:
         cur.execute("""
             UPDATE searches
                SET status='paused', updated_at=?
              WHERE id=?
-        """, (now, body.search_id))
+        """, (nowts, body.search_id))
     con.commit()
     con.close()
     return {"ok": True}
@@ -516,19 +530,32 @@ def worker_release(sid: str, request: Request):
 
 # ========================== ROUTES: ADMIN ==========================
 def fmt_age(ts: Optional[str]) -> str:
-    if not ts:
+    dt = parse_iso_safe(ts)
+    if not dt:
         return "—"
-    try:
-        dt = parse_iso(ts)
-    except Exception:
-        return "—"
-    delta = utcnow() - dt
-    mins = int(delta.total_seconds() // 60)
+    mins = int((utcnow() - dt).total_seconds() // 60)
     if mins < 1:
         return "just now"
     if mins == 1:
         return "1 min"
     return f"{mins} mins"
+
+@app.get("/admin/raw", response_model=Dict[str, Any])
+def admin_raw(request: Request):
+    require_admin(request)
+    con = db()
+    cur = con.cursor()
+    cur.execute("SELECT * FROM worker_status ORDER BY worker_id ASC")
+    workers = [dict(r) for r in cur.fetchall()]
+    cur.execute("SELECT * FROM searches ORDER BY created_at DESC LIMIT 500")
+    searches = [dict(r) for r in cur.fetchall()]
+    con.close()
+    return {
+        "workers": workers,
+        "searches": searches,
+        "server_time_london": london_now().isoformat(),
+        "stale_search_min": STALE_SEARCH_MIN,
+    }
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request):
@@ -547,16 +574,16 @@ def admin_page(request: Request):
     worker_cards = []
     for w in workers:
         last_seen = w["last_seen"]
-        state = html.escape(w["state"] or "—")
-        note = html.escape(w["note"] or "")
-        rps = w["rps"]
-        jobs = w["jobs_active"]
+        state = esc(w["state"] or "—")
+        note = esc(w["note"] or "")
+        rps = w["rps"] if w["rps"] is not None else "—"
+        jobs = w["jobs_active"] if w["jobs_active"] is not None else "—"
         age = fmt_age(last_seen)
         worker_cards.append(f"""
         <div class="wcard">
-          <div class="wtitle">Worker: <b>{html.escape(w['worker_id'])}</b></div>
+          <div class="wtitle">Worker: <b>{esc(w['worker_id'])}</b></div>
           <div>State: {state}</div>
-          <div>RPS: {rps if rps is not None else '—'} | Jobs: {jobs if jobs is not None else '—'}</div>
+          <div>RPS: {rps} | Jobs: {jobs}</div>
           <div>Last pulse: {age}</div>
           <div class="wnote">{note}</div>
         </div>
@@ -565,23 +592,30 @@ def admin_page(request: Request):
     # Table rows
     trs = []
     for r in rows:
-        live = live_status_for(r)
-        created_lon = parse_iso(r["created_at"]).astimezone(LON)
-        updated_lon = parse_iso(r["updated_at"]).astimezone(LON)
-        paid_badge = "Yes" if r["paid_at"] else ("No" if r["amount_cents"] else "N/A")
+        live = esc(live_status_for(r))
+        _created = parse_iso_safe(r["created_at"])
+        _updated = parse_iso_safe(r["updated_at"])
+        created_lon = (_created or utcnow()).astimezone(LON)
+        updated_lon = (_updated or utcnow()).astimezone(LON)
+        paid_badge = "N/A"
+        try:
+            if r["amount_cents"] and int(r["amount_cents"]) > 0:
+                paid_badge = "Yes" if r["paid_at"] else "No"
+        except Exception:
+            paid_badge = "N/A"
         lock = "—"
         if r["locked_by"]:
-            lock = f"{html.escape(r['locked_by'])} (until {html.escape(r['lock_expires_at'] or '')})"
-        last_event = html.escape(r["last_event"] or "—")
+            lock = f"{esc(r['locked_by'])} (until {esc(r['lock_expires_at'] or '')})"
+        last_event = esc(r["last_event"] or "—")
         name = " ".join([r["first_name"] or "", r["last_name"] or ""]).strip() or "—"
         trs.append(f"""
         <tr>
-          <td><code>{html.escape(r['id'])}</code></td>
+          <td><code>{esc(r['id'])}</code></td>
           <td>{created_lon.strftime("%Y-%m-%d %H:%M")}</td>
-          <td>{html.escape(r['booking_type'])}</td>
-          <td>{html.escape(name)}<br><small>{html.escape(r['phone'] or '—')}</small></td>
-          <td>{html.escape(r['status'])}</td>
-          <td><b>{html.escape(live)}</b></td>
+          <td>{esc(r['booking_type'])}</td>
+          <td>{esc(name)}<br><small>{esc(r['phone'] or '—')}</small></td>
+          <td>{esc(r['status'])}</td>
+          <td><b>{live}</b></td>
           <td>{last_event}</td>
           <td>{updated_lon.strftime("%Y-%m-%d %H:%M")}<br><small>{fmt_age(r['updated_at'])}</small></td>
           <td>{lock}</td>
@@ -609,13 +643,15 @@ def admin_page(request: Request):
     th {{ background:#f7f7f7; position: sticky; top:0; z-index: 1; }}
     code {{ background:#f3f3f3; padding:1px 4px; border-radius:4px; }}
     .tips {{ margin-bottom: 10px; color:#444; }}
+    a {{ color:#2563eb; text-decoration:none; }}
   </style>
 </head>
 <body>
   <h1>FastDTF Admin</h1>
   <div class="muted">
     Server Time (London): <b>{london_now().strftime("%Y-%m-%d %H:%M:%S")}</b> ·
-    Stale Reclaim Window: <b>{STALE_SEARCH_MIN}m</b>
+    Stale Reclaim Window: <b>{STALE_SEARCH_MIN}m</b> ·
+    <a href="/admin/raw">raw JSON</a>
   </div>
 
   <div class="tips">Workers heartbeat via <code>POST /worker/pulse</code>. Jobs are claimed via <code>GET /worker/next</code> and auto-reclaimed when locks expire.</div>
@@ -647,6 +683,15 @@ def admin_page(request: Request):
 </html>
     """
     return HTMLResponse(html_doc)
+
+# Optional compatibility redirects if your proxy prefixes /api
+@app.get("/api/admin")
+def _redir_admin():
+    return RedirectResponse(url="/admin")
+
+@app.get("/api/health")
+def _redir_health():
+    return RedirectResponse(url="/health")
 
 # ========================== HEALTH ==========================
 @app.get("/health", response_model=Dict[str, Any])
