@@ -28,7 +28,7 @@ stripe.api_key = STRIPE_SECRET_KEY
 stripe.max_network_retries = 2
 
 # ---------- APP ----------
-app = FastAPI(title="FastDrivingTestFinder API", version="1.7.0")
+app = FastAPI(title="FastDrivingTestFinder API", version="1.7.1")
 
 # CORS: allow any subdomain of fastdrivingtestfinder.co.uk + localhost dev
 app.add_middleware(
@@ -122,7 +122,7 @@ def migrate():
         )
     """)
 
-    # [NEW] worker_status table for /api/worker/pulse
+    # worker_status table for /api/worker/pulse
     cur.execute("""
         CREATE TABLE IF NOT EXISTS worker_status (
             worker_id TEXT PRIMARY KEY,
@@ -195,12 +195,12 @@ class AdminControlsIn(BaseModel):
 class AdminBatchIds(BaseModel):
     ids: List[int]
 
-# NEW: worker upgrade NEW -> SWAP payload
+# worker upgrade NEW -> SWAP payload
 class UpgradeToSwapIn(BaseModel):
     booking_reference: str
     desired_centres: Optional[List[str]] = None  # keep existing if None
 
-# [NEW] worker pulse payload
+# worker pulse payload
 class WorkerPulseIn(BaseModel):
     worker_id: str
     state: Optional[str] = "idle"
@@ -214,6 +214,9 @@ def utcnow() -> datetime:
 
 def now_iso() -> str:
     return utcnow().replace(microsecond=0).isoformat()
+
+def plus_minutes_iso(m: int) -> str:
+    return (utcnow() + timedelta(minutes=m)).replace(microsecond=0).isoformat()
 
 def json_dumps(v) -> str:
     try:
@@ -278,7 +281,7 @@ def _expire_unpaid(conn: sqlite3.Connection):
     """, (ts, ts))
     conn.commit()
 
-# [NEW] small helpers to compute live status (no impact elsewhere)
+# small helpers for live status
 def _parse_iso_safe(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
@@ -293,7 +296,7 @@ def _parse_iso_safe(s: Optional[str]) -> Optional[datetime]:
 def live_status_for(row: sqlite3.Row) -> str:
     """
     Derives a compact, human-readable live status for a search row based on:
-    - status, updated_at age, last_event markers (captcha/ip_blocked/slot_found/worker_claimed)
+    - status, updated_at age, last_event markers, and active cooldown (expires_at)
     """
     status = (row["status"] or "").lower()
     if status == "pending_payment":
@@ -304,6 +307,12 @@ def live_status_for(row: sqlite3.Row) -> str:
     age_min = (now - updated).total_seconds() / 60.0
 
     last_event = (row["last_event"] or "").lower()
+    expires_at = _parse_iso_safe(row["expires_at"])
+
+    # Cooldowns
+    if last_event.startswith("layout_issue:") and expires_at and expires_at > now:
+        return "Layout Cooldown"
+
     if "captcha" in last_event:
         return "Captcha Cooldown"
     if "ip_blocked" in last_event or "blocked" in last_event:
@@ -311,7 +320,7 @@ def live_status_for(row: sqlite3.Row) -> str:
     if "slot_found" in last_event:
         return "Slot Found (awaiting action)"
 
-    # >>> CHANGE #1: stale must win over "Scanning"
+    # Stale must win over "Scanning"
     if age_min >= STALE_SEARCH_MIN:
         return f"Stale (>{STALE_SEARCH_MIN}m)"
 
@@ -386,13 +395,13 @@ def _create_search_record(
 # ---------- HEALTH ----------
 @app.get("/api/health")
 def health():
-    # [NEW] include last worker pulse time
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT MAX(last_seen) AS last FROM worker_status")
-    last = cur.fetchone()["last"] if cur.fetchone is not None else None
+    row = cur.fetchone()
+    last = row["last"] if row else None
     conn.close()
-    return {"ok": True, "ts": now_iso(), "version": "1.7.0", "last_worker_pulse": last}
+    return {"ok": True, "ts": now_iso(), "version": "1.7.1", "last_worker_pulse": last}
 
 # ---------- CONTROLS (Admin + Worker) ----------
 def _get_controls(conn: sqlite3.Connection) -> dict:
@@ -425,37 +434,25 @@ def _set_controls(conn: sqlite3.Connection, pause_all: Optional[bool], priority_
 
 @app.get("/api/worker/controls")
 def worker_controls(_: bool = Depends(_verify_worker)):
-    """
-    Read-only controls for the worker:
-      - Admin pause flag + priority centres (from DB)
-      - DVSA throttling / timeouts / URLs / UA (from ENV)
-      - Service info (API base, Playwright path)
-    """
     conn = get_conn()
     controls = _get_controls(conn)
     conn.close()
 
-    # RPS & jitter (from env, clamped to safe ranges)
-    dvsa_rps = _env_float("DVSA_RPS", 0.5)
-    dvsa_rps = max(0.2, min(2.0, dvsa_rps))
-    dvsa_jitter = _env_float("DVSA_RPS_JITTER", 0.35)
-    dvsa_jitter = max(0.0, min(0.9, dvsa_jitter))
+    dvsa_rps = max(0.2, min(2.0, _env_float("DVSA_RPS", 0.5)))
+    dvsa_jitter = max(0.0, min(0.9, _env_float("DVSA_RPS_JITTER", 0.35)))
     target_interval_sec = round(1.0 / dvsa_rps, 3)
 
-    # Other DVSA behaviour toggles / timeouts
     headless = _env_bool("DVSA_HEADLESS", True)
     nav_timeout_ms = int(os.environ.get("DVSA_NAV_TIMEOUT_MS", "25000"))
     ready_max_ms = int(os.environ.get("DVSA_READY_MAX_MS", "30000"))
     post_nav_settle_ms = int(os.environ.get("DVSA_POST_NAV_SETTLE_MS", "800"))
     click_settle_ms = int(os.environ.get("DVSA_CLICK_SETTLE_MS", "700"))
 
-    # URLs and UA
     url_change = os.environ.get("DVSA_URL_CHANGE", "")
     url_book = os.environ.get("DVSA_URL_BOOK", "")
     ua_full = os.environ.get("DVSA_USER_AGENT", "")
     ua_short = (ua_full[:80] + "...") if ua_full else ""
 
-    # Service info
     api_base = os.environ.get("API_BASE", "")
     pw_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
 
@@ -473,16 +470,10 @@ def worker_controls(_: bool = Depends(_verify_worker)):
                 "post_nav_settle_ms": post_nav_settle_ms,
                 "click_settle_ms": click_settle_ms,
             },
-            "urls": {
-                "change": url_change,
-                "book": url_book,
-            },
+            "urls": {"change": url_change, "book": url_book},
             "user_agent": ua_short,
         },
-        "service": {
-            "api_base": api_base,
-            "playwright_path": pw_path,
-        },
+        "service": {"api_base": api_base, "playwright_path": pw_path},
     }
 
 @app.get("/api/admin/controls")
@@ -685,644 +676,4 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
         raise HTTPException(status_code=400, detail="amount not in allowed range")
 
     inferred = _infer_booking_type(amount)
-    existing_type = (row["booking_type"] or "").strip() or None
-    if inferred and inferred != existing_type:
-        try:
-            cur.execute(
-                "UPDATE searches SET booking_type=?, updated_at=? WHERE id=?",
-                (inferred, now_iso(), sid),
-            )
-            conn.commit()
-        except Exception:
-            pass
-
-    md = {"search_id": str(sid), "email": (row["email"] or body.email or "")}
-    if body.metadata:
-        try:
-            for k, v in body.metadata.items():
-                if k != "search_id":
-                    md[k] = v
-        except Exception:
-            pass
-
-    try:
-        intent = stripe.PaymentIntent.create(
-            amount=amount,
-            currency=body.currency,
-            description=body.description or f"Search #{sid}",
-            metadata=md,
-            automatic_payment_methods={"enabled": True},
-            idempotency_key=f"pi_search_{sid}",
-        )
-    except Exception as e:
-        conn.close()
-        raise HTTPException(status_code=400, detail=str(e))
-
-    cur.execute(
-        "UPDATE searches SET payment_intent_id = ?, amount = ?, last_event = ?, updated_at = ? WHERE id = ?",
-        (intent["id"], amount, "payment_intent.created", now_iso(), sid)
-    )
-    conn.commit()
-    conn.close()
-    return {
-        "search_id": sid,
-        "client_secret": intent["client_secret"],
-        "clientSecret": intent["client_secret"],
-        "paymentIntentId": intent["id"]
-    }
-
-# ---------- STRIPE WEBHOOK ----------
-@app.post("/api/stripe/webhook")
-async def stripe_webhook(request: Request):
-    payload = await request.body()
-    sig_header = request.headers.get("stripe-signature")
-
-    if not STRIPE_WEBHOOK_SECRET:
-        try:
-            event = json.loads(payload.decode())
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid payload")
-    else:
-        try:
-            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Webhook error: {e}")
-
-    event_id = event.get("id")
-    etype = event.get("type")
-    data = event.get("data", {}).get("object", {}) or {}
-
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "INSERT OR IGNORE INTO stripe_events (id, type, created_at) VALUES (?,?,?)",
-            (event_id, etype, now_iso())
-        )
-        conn.commit()
-    except Exception:
-        pass
-
-    if etype == "payment_intent.succeeded":
-        pi_id = data.get("id")
-        sid = (data.get("metadata") or {}).get("search_id")
-        amount_received = int(data.get("amount_received") or data.get("amount") or 0)
-        if sid:
-            _mark_paid_and_queue(int(sid), pi_id, "payment_intent.succeeded", amount_received)
-    elif etype in ("payment_intent.canceled", "payment_intent.payment_failed"):
-        pi_id = data.get("id")
-        sid = (data.get("metadata") or {}).get("search_id")
-        if sid:
-            _fail(int(sid), f"{etype} ({pi_id})")
-
-    conn.close()
-    return JSONResponse({"received": True})
-
-def _mark_paid_and_queue(search_id: int, payment_intent_id: str, event_label: str, amount_received: int = 0):
-    conn = get_conn()
-    cur = conn.cursor()
-    now = now_iso()
-    cur.execute("""
-        UPDATE searches
-           SET paid = 1,
-               status = 'queued',
-               last_event = ?,
-               payment_intent_id = ?,
-               amount = COALESCE(NULLIF(?,0), amount),
-               updated_at = ?,
-               queued_at = ?,                -- ensure freshness for worker
-               expires_at = NULL
-         WHERE id = ?
-    """, (event_label, payment_intent_id, amount_received, now, now, search_id))
-    conn.commit()
-    conn.close()
-
-def _fail(search_id: int, reason: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE searches SET status='failed', last_event=?, updated_at=? WHERE id=?",
-                (reason, now_iso(), search_id))
-    conn.commit()
-    conn.close()
-
-# ---------- ADMIN ----------
-def _badge(s: str) -> str:
-    colors = {
-        "pending_payment":"#64748b","new":"#64748b","queued":"#2563eb",
-        "searching":"#a855f7","found":"#10b981","booked":"#16a34a",
-        "failed":"#ef4444","expired":"#334155","disabled":"#6b7280",
-        "paused":"#f59e0b",
-    }
-    c = colors.get(s, "#334155")
-    return f'<span style="background:{c};color:white;padding:2px 8px;border-radius:999px;font-size:12px">{s}</span>'
-
-def _derive_flags(row: sqlite3.Row):
-    ev = (row["last_event"] or "").strip()
-    reached = False
-    last_centre = ""
-    captcha = False
-
-    prefixes_with_centre = (
-        "checked:",
-        "slot_found:",
-        "booked:",
-        "booking_failed:",
-        "captcha_cooldown:",
-        "no_slots_this_round:",
-        "slot_unchanged:",
-        "trying:",
-    )
-
-    for pfx in prefixes_with_centre:
-        if ev.startswith(pfx):
-            try:
-                payload = ev.split(":", 1)[1]
-                last_centre = (payload.split("·", 1)[0] or "").strip()
-            except Exception:
-                last_centre = ""
-            break
-
-    if ev.startswith(("checked:", "slot_found:", "booked:", "booking_failed:")):
-        reached = True
-
-    if ev.startswith("captcha_cooldown:"):
-        captcha = True
-
-    return reached, last_centre, captcha
-
-def _fmt_booking_ref(row: sqlite3.Row) -> str:
-    ref = (row["booking_reference"] or "").strip()
-    if (row["booking_type"] or "") == "swap":
-        ok = len(ref) == 8 and ref.isdigit()
-        if ok:
-            return f"{ref} ✅"
-        return f"{ref or '—'} <span title='Missing or not 8 digits'>⚠</span>"
-    return ref or ""
-
-# FORMAT a stored ISO timestamp into "HH:MM:SS<br>%d/%m/%Y" in Europe/London
-def _fmt_ts(val: Optional[str]) -> str:
-    if not val:
-        return ""
-    s = str(val)
-    try:
-        # Accept both "...Z" and "+00:00" and even naive strings (assume UTC)
-        if s.endswith("Z"):
-            s = s.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        dt = dt.astimezone(ZoneInfo("Europe/London"))
-        return dt.strftime("%H:%M:%S<br>%d/%m/%Y")
-    except Exception:
-        return html.escape(str(val))
-
-# pause/resume helpers and endpoints
-def _pause_ids(conn: sqlite3.Connection, ids: List[int]) -> int:
-    cur = conn.cursor()
-    now = now_iso()
-    n = 0
-    for sid in ids:
-        cur.execute("""
-            UPDATE searches
-               SET status='paused', last_event='admin_paused', updated_at=?
-             WHERE id=? AND status NOT IN ('booked','failed','expired','disabled')
-        """, (now, sid))
-        n += cur.rowcount
-    conn.commit()
-    return n
-
-def _resume_ids(conn: sqlite3.Connection, ids: List[int]) -> int:
-    cur = conn.cursor()
-    now = now_iso()
-    n = 0
-    for sid in ids:
-        cur.execute("""
-            UPDATE searches
-               SET status='queued',
-                   last_event='admin_resumed',
-                   queued_at=COALESCE(queued_at, ?),
-                   updated_at=?
-             WHERE id=? AND status='paused'
-        """, (now, now, sid))
-        n += cur.rowcount
-    conn.commit()
-    return n
-
-@app.post("/api/admin/searches/pause")
-def admin_pause(payload: AdminBatchIds, request: Request):
-    require_admin(request)
-    conn = get_conn()
-    count = _pause_ids(conn, list(set(int(i) for i in payload.ids)))
-    conn.close()
-    return {"ok": True, "paused": count}
-
-@app.post("/api/admin/searches/resume")
-def admin_resume(payload: AdminBatchIds, request: Request):
-    require_admin(request)
-    conn = get_conn()
-    count = _resume_ids(conn, list(set(int(i) for i in payload.ids)))
-    conn.close()
-    return {"ok": True, "resumed": count}
-
-@app.get("/api/admin", response_class=HTMLResponse)
-async def admin(request: Request, status: Optional[str] = Query(None)):
-    require_admin(request)
-    conn = get_conn()
-    _expire_unpaid(conn)
-
-    # controls
-    controls = _get_controls(conn)
-    pause_badge = '<span style="background:#ef4444;color:#fff;padding:2px 8px;border-radius:999px;font-size:12px">PAUSED</span>' \
-                  if controls["pause_all"] else \
-                  '<span style="background:#16a34a;color:#fff;padding:2px 8px;border-radius:999px;font-size:12px">RUNNING</span>'
-    prio_txt = ", ".join(controls["priority_centres"]) or "—"
-
-    cur = conn.cursor()
-    cur.execute("SELECT status, COUNT(*) as c FROM searches GROUP BY status")
-    counts = {r["status"]: r["c"] for r in cur.fetchall()}
-
-    if status:
-        cur.execute("SELECT * FROM searches WHERE status=? ORDER BY created_at DESC", (status,))
-    else:
-        cur.execute("SELECT * FROM searches ORDER BY created_at DESC")
-    rows = cur.fetchall()
-    conn.close()
-
-    def td(v): return f"<td style='border-bottom:1px solid #eee;padding:8px;vertical-align:top'>{v}</td>"
-
-    statuses = ["pending_payment","new","queued","searching","found","booked","failed","expired","disabled","paused"]
-    pills = " ".join(f'<a href="?status={s}" style="text-decoration:none">{_badge(s)}</a>' for s in statuses)
-
-    rows_html = []
-    for r in rows:
-        centres = ", ".join((json.loads(r["centres_json"] or "[]")))
-        opts_raw = r["options_json"] or ""
-        opts = html.escape(opts_raw)
-
-        reached, last_centre, captcha = _derive_flags(r)
-        reached_html = "✅" if reached else "—"
-        captcha_html = "🚧" if captcha else "—"
-
-        # [NEW] compute live status text per row
-        live = live_status_for(r)
-
-        # per-row checkbox + action button
-        checkbox = f"<input type='checkbox' class='sel' value='{r['id']}' />"
-        if r["status"] == "paused":
-            action_btn = f"<button class='mini' onclick='resumeOne({r['id']})'>Resume</button>"
-        else:
-            action_btn = f"<button class='warn mini' onclick='pauseOne({r['id']})'>Pause</button>"
-
-        rows_html.append(
-            "<tr>"
-            + td(checkbox)
-            + td(r["id"])
-            + td(_badge(r["status"]))
-            + td(live)  # [NEW] Live Status column cell
-            + td(action_btn)
-            + td(r["booking_type"] or "")
-            + td(r["licence_number"] or "")
-            + td(_fmt_booking_ref(r))
-            + td(r["theory_pass"] or "")
-            + td(f'{r["date_window_from"] or ""} → {r["date_window_to"] or ""}<br>{r["time_window_from"] or ""} → {r["time_window_to"] or ""}')
-            + td(r["phone"] or "")
-            + td(r["email"] or "")
-            + td(centres)
-            + td(f"<code style='font-size:12px'>{opts}</code>")
-            + td(r["last_event"] or "")
-            + td(r["paid"])
-            + td(r["payment_intent_id"] or "")
-            + td(reached_html)
-            + td(last_centre or "—")
-            + td(captcha_html)
-            + td(_fmt_ts(r["created_at"]))
-            + td(_fmt_ts(r["updated_at"]))
-            + "</tr>"
-        )
-
-    html_doc = f"""
-    <html>
-    <head>
-      <title>Admin · FastDrivingTestFinder</title>
-      <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <style>
-        body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:16px;color:#0f172a}}
-        .wrap{{max-width:1200px;margin:0 auto}}
-        h1{{margin:0 0 8px 0}}
-        table{{border-collapse:collapse;width:100%;font-size:14px}}
-        th,td{{border-bottom:1px solid #eee;padding:8px;text-align:left;vertical-align:top}}
-        th{{background:#f8fafc;position:sticky;top:0}}
-        .counts span{{margin-right:10px}}
-        .bar{{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}}
-        .pill a{{margin-right:6px}}
-        code{{background:#f1f5f9;padding:2px 4px;border-radius:6px}}
-        input[type=text]{{padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px}}
-        button{{padding:6px 10px;border:none;border-radius:8px;background:#2563eb;color:#fff;cursor:pointer}}
-        button.grey{{background:#64748b}}
-        button.warn{{background:#f59e0b}}
-        .mini{{font-size:12px;padding:4px 8px}}
-      </style>
-      <script>
-        function idsSelected() {{
-          return Array.from(document.querySelectorAll('.sel:checked')).map(x => parseInt(x.value));
-        }}
-        async function setPause(p) {{
-          await fetch('/api/admin/controls', {{
-            method:'POST', headers:{{'Content-Type':'application/json'}},
-            body: JSON.stringify({{pause_all:p}})
-          }});
-          location.reload();
-        }}
-        async function savePrio() {{
-          const txt = document.getElementById('prio').value;
-          await fetch('/api/admin/controls', {{
-            method:'POST', headers:{{'Content-Type':'application/json'}},
-            body: JSON.stringify({{priority_centres: txt}})
-          }});
-          location.reload();
-        }}
-        function toggleAll(ck) {{
-          document.querySelectorAll('.sel').forEach(x => x.checked = ck.checked);
-        }}
-        async function bulkPause() {{
-          const ids = idsSelected();
-          if (!ids.length) return alert('Select at least one row');
-          await fetch('/api/admin/searches/pause', {{
-            method:'POST', headers:{{'Content-Type':'application/json'}},
-            body: JSON.stringify({{ids}})
-          }});
-          location.reload();
-        }}
-        async function bulkResume() {{
-          const ids = idsSelected();
-          if (!ids.length) return alert('Select at least one row');
-          await fetch('/api/admin/searches/resume', {{
-            method:'POST', headers:{{'Content-Type':'application/json'}},
-            body: JSON.stringify({{ids}})
-          }});
-          location.reload();
-        }}
-        async function pauseOne(id) {{
-          await fetch('/api/admin/searches/pause', {{
-            method:'POST', headers:{{'Content-Type':'application/json'}},
-            body: JSON.stringify({{ids:[id]}})
-          }});
-          location.reload();
-        }}
-        async function resumeOne(id) {{
-          await fetch('/api/admin/searches/resume', {{
-            method:'POST', headers:{{'Content-Type':'application/json'}},
-            body: JSON.stringify({{ids:[id]}})
-          }});
-          location.reload();
-        }}
-
-        // >>> CHANGE #2: auto-refresh the admin page every 60 seconds
-        setInterval(() => {{ window.location.reload(); }}, 60_000);
-      </script>
-    </head>
-    <body>
-      <div class="wrap">
-        <h1>Searches</h1>
-
-        <div class="bar">
-          <div>Status: {pause_badge}</div>
-          <div>
-            <button onclick="setPause({str(not controls['pause_all']).lower()})">
-              {'Resume' if controls['pause_all'] else 'Pause'} all
-            </button>
-          </div>
-          <div style="display:flex;align-items:center;gap:6px">
-            <span>Priority centres:</span>
-            <input id="prio" type="text" size="40" value="{html.escape(prio_txt)}" placeholder="e.g. elgin,pinner,mill hill" />
-            <button class="grey" onclick="savePrio()">Save</button>
-          </div>
-          <div class="pill">{pills}<a href="/api/admin" style="margin-left:8px">Clear</a></div>
-          <div style="flex:1"></div>
-          <div>
-            <input type="checkbox" onclick="toggleAll(this)" title="Select all" /> Select
-            <button class="warn mini" onclick="bulkPause()">Pause selected</button>
-            <button class="mini" onclick="bulkResume()">Resume selected</button>
-          </div>
-        </div>
-
-        <div class="counts">
-          {"".join(f"<span>{_badge(k)} {v}</span>" for k,v in counts.items())}
-        </div>
-
-        <table>
-          <thead>
-            <tr>
-              <th></th><th>ID</th><th>Status</th><th>Live Status</th>
-              <th>Actions</th>
-              <th>Type</th><th>Licence</th><th>Booking Ref</th><th>Theory</th>
-              <th>Date/Time Window</th><th>Phone</th><th>Email</th><th>Centres</th><th>Options</th>
-              <th>Last Event</th><th>Paid</th><th>PI</th>
-              <th>Reached?</th><th>Last centre</th><th>Captcha?</th>
-              <th>Created</th><th>Updated</th>
-            </tr>
-          </thead>
-          <tbody>
-            {''.join(rows_html)}
-          </tbody>
-        </table>
-      </div>
-    </body>
-    </html>
-    """
-    return HTMLResponse(html_doc)
-
-# ---------- WORKER ENDPOINTS ----------
-@app.post("/api/worker/claim")
-def worker_claim(body: WorkerClaimRequest, _: bool = Depends(_verify_worker)):
-    """
-    Claim up to `limit` searches:
-      - Any paid searches in 'queued' or 'new'
-      - PLUS 'searching' searches whose updated_at is older than STALE_SEARCH_MIN
-        (to reclaim stuck jobs).
-    Also: if global pause is ON, return zero items.
-    """
-    conn = get_conn()
-    _expire_unpaid(conn)
-
-    # respect global pause
-    if _get_controls(conn)["pause_all"]:
-        conn.close()
-        return {"items": []}
-
-    cutoff_iso = (utcnow() - timedelta(minutes=max(1, STALE_SEARCH_MIN))).replace(microsecond=0).isoformat()
-
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT * FROM searches
-         WHERE paid=1
-           AND status NOT IN ('paused','disabled','failed','expired','booked')
-           AND (
-                 status IN ('queued','new')
-                 OR (status='searching' AND (updated_at IS NULL OR updated_at < ?))
-               )
-         ORDER BY updated_at ASC
-         LIMIT ?
-    """, (cutoff_iso, body.limit))
-    rows = cur.fetchall()
-
-    claimed = []
-    for r in rows:
-        cur.execute("""
-            UPDATE searches
-               SET status='searching', last_event='worker_claimed', updated_at=?
-             WHERE id=? AND paid=1
-               AND status NOT IN ('paused','disabled','failed','expired','booked')
-               AND (
-                     status IN ('queued','new')
-                     OR (status='searching' AND (updated_at IS NULL OR updated_at < ?))
-                   )
-        """, (now_iso(), r["id"], cutoff_iso))
-        if cur.rowcount:
-            cur.execute("SELECT * FROM searches WHERE id=?", (r["id"],))
-            claimed.append(cur.fetchone())
-    conn.commit()
-    conn.close()
-
-    items = [dict(row) for row in claimed]
-    return {"items": items}
-
-# [NEW] worker pulse endpoint
-@app.post("/api/worker/pulse")
-def worker_pulse(body: WorkerPulseIn, _: bool = Depends(_verify_worker)):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO worker_status (worker_id, last_seen, state, note, rps, jobs_active)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(worker_id) DO UPDATE SET
-          last_seen=excluded.last_seen,
-          state=excluded.state,
-          note=excluded.note,
-          rps=excluded.rps,
-          jobs_active=excluded.jobs_active
-    """, (body.worker_id, now_iso(), body.state, body.note, body.rps, body.jobs_active))
-    conn.commit()
-    conn.close()
-    return {"ok": True}
-
-@app.post("/api/worker/searches/{sid}/event")
-def worker_event(sid: int, body: WorkerEvent, _: bool = Depends(_verify_worker)):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE searches SET last_event=?, updated_at=? WHERE id=?",
-                (body.event, now_iso(), sid))
-    conn.commit()
-    conn.close()
-    return {"ok": True}
-
-@app.post("/api/worker/searches/{sid}/status")
-def worker_status(sid: int, b: WorkerStatus, _: bool = Depends(_verify_worker)):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE searches SET status=?, last_event=?, updated_at=? WHERE id=?",
-                (b.status, b.event, now_iso(), sid))
-    conn.commit()
-    conn.close()
-    return {"ok": True}
-
-# ---------- WORKER: upgrade NEW -> SWAP (after an 'anywhere' booking) ----------
-@app.post("/api/worker/searches/{sid}/upgrade-to-swap")
-def worker_upgrade_to_swap(sid: int, body: UpgradeToSwapIn, _: bool = Depends(_verify_worker)):
-    """
-    Convert a NEW booking into a SWAP job after we've secured a slot anywhere.
-    - booking_type -> 'swap'
-    - booking_reference -> provided by worker
-    - centres_json -> keep existing (user's preferred) unless desired_centres provided
-    - status -> 'queued' (so worker immediately starts swap passes)
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("SELECT id, status, booking_type, centres_json FROM searches WHERE id=?", (sid,))
-    row = cur.fetchone()
-    if not row:
-        conn.close()
-        raise HTTPException(status_code=404, detail="search not found")
-
-    if row["status"] in ("failed", "expired", "disabled"):
-        conn.close()
-        raise HTTPException(status_code=400, detail=f"cannot upgrade from state {row['status']}")
-
-    centres_json = row["centres_json"] or "[]"
-    if body.desired_centres is not None:
-        centres_json = json_dumps([s.strip() for s in body.desired_centres if str(s).strip()])
-
-    now = now_iso()
-    cur.execute("""
-        UPDATE searches
-           SET booking_type='swap',
-               booking_reference=?,
-               last_event='auto_swap_started',
-               status='queued',
-               updated_at=?,
-               queued_at=COALESCE(queued_at, ?),
-               centres_json=?
-         WHERE id=?
-    """, (body.booking_reference, now, now, centres_json, sid))
-    conn.commit()
-    conn.close()
-    return {"ok": True, "id": sid, "status": "queued", "booking_type": "swap"}
-
-# ---------- WORKER RESUME (Signed) ----------
-def _hmac_b64url(data: str, secret: str) -> str:
-    import hmac, hashlib, base64
-    mac = hmac.new(secret.encode("utf-8"), data.encode("utf-8"), hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(mac).decode("ascii").rstrip("=")
-
-def _verify_resume_sig(sid: int, ident: str, sig: str) -> bool:
-    if not WORKER_TOKEN:
-        # If no token is set, accept nothing (safer than accepting everything)
-        return False
-    expected = _hmac_b64url(f"{sid}|{ident}", WORKER_TOKEN)
-    import hmac as _hmac
-    return _hmac.compare_digest(expected, (sig or ""))
-
-@app.get("/api/worker/resume")
-def worker_resume(
-    sid: int,
-    ident: str,
-    sig: str,
-):
-    """
-    One-tap 'resume now' link target.
-    Effect:
-      - Validates signature with WORKER_TOKEN
-      - Sets last_event='resume_now'
-      - Sets status='queued', queued_at=now, updated_at=now
-      - Clears expires_at so it can be processed
-    """
-    if not _verify_resume_sig(sid, ident, sig):
-        raise HTTPException(status_code=401, detail="Bad signature")
-
-    conn = get_conn()
-    cur = conn.cursor()
-    now = now_iso()
-
-    cur.execute("SELECT id, paid, status FROM searches WHERE id=?", (sid,))
-    row = cur.fetchone()
-    if not row:
-        conn.close()
-        raise HTTPException(status_code=404, detail="search not found")
-
-    if row["status"] in ("booked", "failed", "disabled", "expired"):
-        conn.close()
-        return {"ok": False, "id": sid, "status": row["status"], "message": "cannot resume in final state"}
-
-    cur.execute("""
-        UPDATE searches
-           SET last_event='resume_now',
-               status='queued',
-               updated_at=?,
-               queued_at=?,
-               expires_at=NULL
-         WHERE id=?
-    """, (now, now, sid))
-    conn.commit()
-    conn.close()
-    return {"ok": True, "id": sid, "status": "queued", "event": "resume_now"}
+    existing_type = (row["booking_type"] or "")._]()_
