@@ -676,4 +676,6 @@ async def pay_create_intent(body: PayCreateIntentIn, request: Request):
         raise HTTPException(status_code=400, detail="amount not in allowed range")
 
     inferred = _infer_booking_type(amount)
-    existing_type = (row["booking_type"] or "")._]()_
+    existing_type = (row["booking_type"] or "").strip() or None
+
+
