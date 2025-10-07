@@ -61,7 +61,7 @@ def iso(dt: datetime) -> str:
 def parse_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
-# --- minimal additions (used only by admin rendering) ---
+# ---- minimal additions used only to harden admin rendering ----
 def parse_iso_safe(s: Optional[str]) -> Optional[datetime]:
     if not s or not str(s).strip():
         return None
@@ -72,7 +72,15 @@ def parse_iso_safe(s: Optional[str]) -> Optional[datetime]:
 
 def esc(v: Any) -> str:
     return html.escape("" if v is None else str(v))
-# ---------------------------------------------------------
+
+def aware(dt: Optional[datetime]) -> datetime:
+    # Ensure timezone-aware (assume UTC if naive); fallback to now if None
+    if dt is None:
+        return utcnow()
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
+# ----------------------------------------------------------------
 
 # ========================== DB ==========================
 def db() -> sqlite3.Connection:
@@ -532,6 +540,7 @@ def fmt_age(ts: Optional[str]) -> str:
     dt = parse_iso_safe(ts)
     if not dt:
         return "—"
+    dt = aware(dt)
     mins = int((utcnow() - dt).total_seconds() // 60)
     if mins < 1:
         return "just now"
@@ -571,14 +580,14 @@ def admin_page(request: Request):
         </div>
         """)
 
-    # Table rows (now tolerant to bad timestamps)
+    # Table rows
     trs = []
     for r in rows:
         live = live_status_for(r)
         _created = parse_iso_safe(r["created_at"])
         _updated = parse_iso_safe(r["updated_at"])
-        created_lon = (_created or utcnow()).astimezone(LON)
-        updated_lon = (_updated or utcnow()).astimezone(LON)
+        created_lon = aware(_created).astimezone(LON)
+        updated_lon = aware(_updated).astimezone(LON)
         paid_badge = "Yes" if r["paid_at"] else ("No" if r["amount_cents"] else "N/A")
         lock = "—"
         if r["locked_by"]:
